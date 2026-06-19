@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #15161c;
+  color: #e6e6ec;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #3a3d4f;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+input,
+select {
+  background: #15161c;
+  border: 1px solid #34374a;
+  border-radius: 4px;
+  color: #e6e6ec;
+  padding: 2px 6px;
+  font-size: 12px;
+  outline: none;
+}
+input:focus,
+select:focus {
+  border-color: #c9a227;
+}
+button {
+  cursor: pointer;
+}

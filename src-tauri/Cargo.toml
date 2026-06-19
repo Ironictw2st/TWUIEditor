@@ -1,0 +1,37 @@
+[package]
+name = "twui-editor"
+version = "0.1.0"
+description = "TWUI XML Viewer & Editor"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "twui_editor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = "0.36"
+thiserror = "1"
+lru = "0.12"
+rand = "0.8"
+percent-encoding = "2"
+
+# DDS decode support (ink/material textures are BCn/DX10 .dds).
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+ddsfile = { version = "0.5", optional = true }
+image_dds = { version = "0.7", optional = true, default-features = false, features = ["ddsfile", "image"] }
+
+[features]
+default = ["dds"]
+dds = ["dep:image", "dep:ddsfile", "dep:image_dds"]
+
+[profile.dev]
+incremental = true

@@ -1,0 +1,19 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+/src-tauri/target
+*.tsbuildinfo
+
+# Game data & generated artifacts (large, reproducible — not tracked)
+/3K
+/output
+/reference
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
