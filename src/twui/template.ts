@@ -102,17 +102,9 @@ function num(el: RawElement, key: string): number | undefined {
   return isNaN(n) ? undefined : n;
 }
 
-export function resolveTemplated(
-  comp: RawElement,
-  templates: Record<string, TwuiDocument>
-): ResolvedTemplate | undefined {
-  const templateId = getAttr(comp, "template_id");
-  if (!templateId) return undefined;
-  const tplDoc = templates[templateId];
-  if (!tplDoc) return undefined;
-  const tplComp = templateComponent(tplDoc, templateId);
-  if (!tplComp) return undefined;
-
+/** Resolve an instance's layers against a specific template component (its geometry +
+ *  componentimages, with the instance's `override_images` swapped in positionally). */
+export function resolveAgainst(comp: RawElement, tplComp: RawElement): ResolvedTemplate {
   const [dw, dh] = parseVec2(getAttr(comp, "dimensions"), [0, 0]);
 
   const state = templateActiveState(tplComp);
@@ -148,4 +140,30 @@ export function resolveTemplated(
   }
 
   return { width: dw, height: dh, layers };
+}
+
+/** id -> component for a template document (to match a part_of_template child by id). */
+export function templateIdMap(tplDoc: TwuiDocument): Map<string, RawElement> {
+  const m = new Map<string, RawElement>();
+  const comps = childByTag(tplDoc.root, "components");
+  if (comps) {
+    for (const c of elementChildren(comps)) {
+      const id = getAttr(c, "id");
+      if (id && !m.has(id)) m.set(id, c);
+    }
+  }
+  return m;
+}
+
+export function resolveTemplated(
+  comp: RawElement,
+  templates: Record<string, TwuiDocument>
+): ResolvedTemplate | undefined {
+  const templateId = getAttr(comp, "template_id");
+  if (!templateId) return undefined;
+  const tplDoc = templates[templateId];
+  if (!tplDoc) return undefined;
+  const tplComp = templateComponent(tplDoc, templateId);
+  if (!tplComp) return undefined;
+  return resolveAgainst(comp, tplComp);
 }

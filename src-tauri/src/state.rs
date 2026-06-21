@@ -35,9 +35,16 @@ impl AppState {
     }
 }
 
-/// Try to locate the unpacked `3K` data folder relative to the working dir or
-/// executable so images resolve out of the box during development.
+/// Try to locate a game data folder out of the box: prefer a game under a
+/// `games/` directory (3K first), else a legacy top-level `3K` (transitional).
 fn guess_data_root() -> Option<PathBuf> {
+    if let Some(gd) = games_dir() {
+        let games = list_games_in(&gd);
+        if let Some(g) = games.iter().find(|n| n.as_str() == "3K").or_else(|| games.first()) {
+            return Some(gd.join(g));
+        }
+    }
+    // Legacy fallback: a top-level `3K` (before it was moved under `games/`).
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("3K"));
@@ -53,6 +60,42 @@ fn guess_data_root() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|c| is_data_root(c))
+}
+
+/// Locate the `games/` directory (holding per-game data folders) relative to the
+/// working dir or executable.
+pub fn games_dir() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("games"));
+        candidates.push(cwd.join("..").join("games"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut p = exe.as_path();
+        for _ in 0..6 {
+            if let Some(parent) = p.parent() {
+                candidates.push(parent.join("games"));
+                p = parent;
+            }
+        }
+    }
+    candidates.into_iter().find(|c| c.is_dir())
+}
+
+/// Names of the games under `dir` (subfolders that contain a `ui/`), sorted.
+pub fn list_games_in(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if is_data_root(&e.path()) {
+                if let Some(name) = e.file_name().to_str() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn is_data_root(p: &Path) -> bool {

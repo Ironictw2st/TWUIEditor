@@ -1,8 +1,10 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
-import { ContextDb, FactionContext, TwuiDocument } from "../types/twui";
+import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, TwuiDocument } from "../types/twui";
 import * as ipc from "../ipc/commands";
 import {
+  childByTag,
   componentsSection,
   elementChildren,
   findComponentElement,
@@ -12,7 +14,11 @@ import {
   removeAttr,
   setAttr,
 } from "../twui/doc";
+import { encodeEntities } from "../twui/cco";
+import { LuaValue } from "../twui/lua";
 import { collectTemplateIds } from "../twui/template";
+import { collectCreatorPaths } from "../twui/creator";
+import { pageScriptId } from "../twui/script";
 import {
   addNode,
   deleteNode,
@@ -30,7 +36,70 @@ interface View {
   panY: number;
 }
 
-interface AppStore {
+/** Visualizer interaction mode (shared with VisualizerPanel + the keybind registry). */
+export type Mode = "view" | "move" | "sim" | "tooltip";
+
+/** Persisted user preferences (localStorage `twui-settings`). Document/runtime
+ *  state is never persisted — only this subset (+ `background`/`view`). */
+export interface Settings {
+  /** actionId -> binding override (only set when the user rebinds; else the default). */
+  keybinds: Record<string, string>;
+  /** Default perspective applied on load (null = the built-in default). */
+  perspective: FactionContext | null;
+  visualizer: { defaultMode: Mode; showBounds: boolean; restoreView: boolean };
+  editor: { undoLimit: number; rememberLastFile: boolean };
+  /** Stub for future theming; wired but no visual effect yet. */
+  theme: { accent: string; density: "comfortable" | "compact" };
+  lastGame: string | null;
+  lastFile: string | null;
+}
+
+const DEFAULT_VIEW: View = { zoom: 0.5, panX: 40, panY: 40 };
+
+const DEFAULT_SETTINGS: Settings = {
+  keybinds: {},
+  perspective: null,
+  visualizer: { defaultMode: "view", showBounds: false, restoreView: false },
+  editor: { undoLimit: 100, rememberLastFile: false },
+  theme: { accent: "#c9a227", density: "comfortable" },
+  lastGame: null,
+  lastFile: null,
+};
+
+/** Deep-merge the persisted prefs subset over the freshly-created store so older or
+ *  partial persisted blobs gain any new fields' defaults (and methods are preserved). */
+function mergePersisted(current: AppStore, persisted: unknown): AppStore {
+  const p = (persisted ?? {}) as Partial<Pick<AppStore, "settings" | "background" | "view">>;
+  const ps = (p.settings ?? {}) as Partial<Settings>;
+  const settings: Settings = {
+    ...current.settings,
+    ...ps,
+    visualizer: { ...current.settings.visualizer, ...(ps.visualizer ?? {}) },
+    editor: { ...current.settings.editor, ...(ps.editor ?? {}) },
+    theme: { ...current.settings.theme, ...(ps.theme ?? {}) },
+    keybinds: { ...(ps.keybinds ?? {}) },
+    perspective: ps.perspective ?? null,
+  };
+  return {
+    ...current,
+    settings,
+    background: "background" in p ? p.background ?? null : current.background,
+    view: p.view ? { ...current.view, ...p.view } : current.view,
+  };
+}
+
+/** The Lua script connected to the current page (auto-detected from script_id). */
+interface ScriptConn {
+  /** The panel's script_id (from ContextInitScriptObject), if any. */
+  id: string | null;
+  /** Resolved script path (data-root-relative, or the picked absolute path). */
+  path: string | null;
+  /** Script source text (drives the data-pack parser). */
+  text: string | null;
+  status: "none" | "connected" | "missing";
+}
+
+export interface AppStore {
   doc: TwuiDocument | null;
   filePath: string | null;
   fileName: string | null;
@@ -42,14 +111,47 @@ interface AppStore {
   undoStack: TwuiDocument[];
   redoStack: TwuiDocument[];
 
+  /** Games available under `games/` and the active one. */
+  games: string[];
+  game: string | null;
   contextDb: ContextDb | null;
   context: FactionContext;
+  /** Character generation templates + resolved portraits (Characters panel). */
+  characterDb: CharacterDb | null;
+  /** CCO symbol table from the game UI docs (Inspector binding hints). */
+  ccoDocs: CcoDocs | null;
+  /** Content-defined CCO shorthand macros (`ui/cco/*.json`) keyed by CCO type. */
+  ccoShorthand: CcoShorthand | null;
+  /** Scene roster: role-context name (e.g. `FactionLeaderContext`) -> template key. */
+  characters: Record<string, string>;
   templates: Record<string, TwuiDocument>;
+  /** Layouts embedded via `ComponentCreator`, keyed by their data-root-relative path. */
+  createdLayouts: Record<string, TwuiDocument>;
   loc: Record<string, string>;
+  scriptConn: ScriptConn;
+  /** Non-destructive data-pack override (Script tweak menu) — wins over the parsed pack.
+   *  Typed `unknown` (semantically `LuaValue | null`) so immer doesn't draft the recursive type. */
+  dataPackOverride: unknown;
+  /** Raw-Lua working copy for the Script menu's Raw tab (null = use scriptConn.text). */
+  scriptDraft: string | null;
+  /** Non-persistent per-component state preview (Inspector → Visualizer). */
+  previewState: Record<string, string>;
   backgrounds: string[];
   background: string | null;
+  /** Persisted user preferences (Settings screen). */
+  settings: Settings;
 
-  init: () => Promise<void>;
+  init: (applyPrefs?: boolean) => Promise<void>;
+  updateSettings: (patch: Partial<Settings>) => void;
+  setKeybind: (actionId: string, binding: string | null) => void;
+  resetKeybinds: () => void;
+  setGame: (name: string) => Promise<void>;
+  setCharacter: (role: string, templateKey: string | null) => void;
+  connectScript: (path: string) => Promise<void>;
+  clearScript: () => void;
+  setDataPackOverride: (pack: LuaValue | null) => void;
+  setScriptDraft: (text: string | null) => void;
+  setPreviewState: (guid: string, name: string | null) => void;
   setBackground: (path: string | null) => void;
   setCampaign: (key: string) => void;
   setFaction: (key: string) => void;
@@ -65,6 +167,7 @@ interface AppStore {
 
   mutate: (fn: (doc: TwuiDocument) => void) => void;
   editAttr: (guid: string, key: string, value: string) => void;
+  setCallbackFunc: (guid: string, index: number, value: string) => void;
   toggleVisible: (guid: string) => void;
   beginDrag: () => void;
   liveSetOffset: (guid: string, x: number, y: number) => void;
@@ -83,10 +186,9 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-const MAX_UNDO = 100;
-
 export const useStore = create<AppStore>()(
-  immer((set, get) => ({
+  persist(
+    immer((set, get) => ({
     doc: null,
     filePath: null,
     fileName: null,
@@ -94,10 +196,12 @@ export const useStore = create<AppStore>()(
     selectedGuid: null,
     dataRoot: null,
     status: "Ready",
-    view: { zoom: 0.5, panX: 40, panY: 40 },
+    view: { ...DEFAULT_VIEW },
     undoStack: [],
     redoStack: [],
 
+    games: [],
+    game: null,
     contextDb: null,
     context: {
       campaign: "3k_main_campaign_map",
@@ -105,54 +209,154 @@ export const useStore = create<AppStore>()(
       culture: "3k_main_chinese",
       subculture: "3k_main_chinese",
     },
+    characterDb: null,
+    ccoDocs: null,
+    ccoShorthand: null,
+    characters: {},
     templates: {},
+    createdLayouts: {},
     loc: {},
+    scriptConn: { id: null, path: null, text: null, status: "none" },
+    dataPackOverride: null,
+    scriptDraft: null,
+    previewState: {},
     backgrounds: [],
     background: null,
+    settings: DEFAULT_SETTINGS,
 
     setBackground: (path) =>
       set((s) => {
         s.background = path;
       }),
 
-    init: async () => {
+    updateSettings: (patch) =>
+      set((s) => {
+        s.settings = { ...s.settings, ...patch };
+      }),
+
+    setKeybind: (actionId, binding) =>
+      set((s) => {
+        if (binding === null) delete s.settings.keybinds[actionId];
+        else s.settings.keybinds[actionId] = binding;
+      }),
+
+    resetKeybinds: () =>
+      set((s) => {
+        s.settings.keybinds = {};
+      }),
+
+    setGame: async (name) => {
       try {
-        const root = await ipc.getDataRoot();
+        await ipc.setGame(name);
         set((s) => {
-          s.dataRoot = root;
+          s.game = name;
+          s.settings.lastGame = name; // remembered across sessions
+        });
+        // Reload data for the new game; `false` skips re-applying lastGame (no loop).
+        await get().init(false);
+      } catch (e) {
+        set((s) => {
+          s.status = `${e}`;
+        });
+      }
+    },
+
+    setCharacter: (role, templateKey) =>
+      set((s) => {
+        if (templateKey) s.characters[role] = templateKey;
+        else delete s.characters[role];
+      }),
+
+    connectScript: async (path) => {
+      try {
+        const text = await ipc.readScript(path);
+        set((s) => {
+          s.scriptConn = { id: s.scriptConn.id, path, text, status: "connected" };
+          s.dataPackOverride = null;
+          s.scriptDraft = null;
+          s.status = `Connected script: ${baseName(path)}`;
         });
       } catch (e) {
         set((s) => {
-          s.status = `Failed to read data root: ${e}`;
+          s.status = `Script error: ${e}`;
         });
       }
-      try {
-        const db = await ipc.loadContextDb();
-        set((s) => {
-          s.contextDb = db;
-        });
-      } catch (e) {
-        set((s) => {
-          s.status = `Failed to load DB: ${e}`;
-        });
-      }
-      try {
-        const loc = await ipc.loadLoc();
-        set((s) => {
-          s.loc = loc;
-        });
-      } catch {
-        /* localisation optional */
-      }
-      try {
-        const backgrounds = await ipc.listBackgrounds();
-        set((s) => {
+    },
+
+    clearScript: () =>
+      set((s) => {
+        s.scriptConn = { id: s.scriptConn.id, path: null, text: null, status: "none" };
+        s.dataPackOverride = null;
+        s.scriptDraft = null;
+      }),
+
+    setDataPackOverride: (pack) =>
+      set((s) => {
+        s.dataPackOverride = pack;
+      }),
+
+    setScriptDraft: (text) =>
+      set((s) => {
+        s.scriptDraft = text;
+      }),
+
+    setPreviewState: (guid, name) =>
+      set((s) => {
+        if (name === null) delete s.previewState[guid];
+        else s.previewState[guid] = name;
+      }),
+
+    init: async (applyPrefs = true) => {
+      // The backend reads are independent — load them concurrently so startup is
+      // bounded by the slowest, not their sum. Each settles into the store on its own.
+      const load = <T>(p: Promise<T>, apply: (s: AppStore, v: T) => void, onErr?: string) =>
+        p.then(
+          (v) => set((s) => apply(s, v)),
+          (e) => onErr && set((s) => { s.status = `${onErr}: ${e}`; })
+        );
+
+      await Promise.all([
+        load(ipc.getDataRoot(), (s, root) => { s.dataRoot = root; }, "Failed to read data root"),
+        Promise.all([ipc.listGames(), ipc.currentGame()]).then(
+          ([games, game]) => set((s) => { s.games = games; s.game = game; }),
+          () => {}
+        ),
+        load(ipc.loadContextDb(), (s, db) => { s.contextDb = db; }, "Failed to load DB"),
+        load(ipc.loadCharacterDb(), (s, cdb) => { s.characterDb = cdb; }),
+        load(ipc.loadCcoDocs(), (s, docs) => { s.ccoDocs = docs; }),
+        load(ipc.loadCcoShorthand(), (s, sh) => { s.ccoShorthand = sh; }),
+        load(ipc.loadLoc(), (s, loc) => { s.loc = loc; }),
+        load(ipc.listBackgrounds(), (s, backgrounds) => {
           s.backgrounds = backgrounds;
-          const def = "background/campaign.png";
-          s.background = backgrounds.includes(def) ? def : backgrounds[0] ?? null;
-        });
-      } catch {
-        /* backgrounds optional */
+          // Keep a persisted/user-chosen background if it still exists; else default.
+          if (!s.background || !backgrounds.includes(s.background)) {
+            const def = "background/campaign.png";
+            s.background = backgrounds.includes(def) ? def : backgrounds[0] ?? null;
+          }
+        }),
+      ]);
+
+      // Apply persisted preferences (after the loads above so games/db are known).
+      const st = get();
+      if (st.settings.perspective) {
+        set((s) => { s.context = { ...st.settings.perspective! }; });
+      }
+      if (!st.settings.visualizer.restoreView) {
+        set((s) => { s.view = { ...DEFAULT_VIEW }; });
+      }
+      if (
+        applyPrefs &&
+        st.settings.lastGame &&
+        st.games.includes(st.settings.lastGame) &&
+        st.settings.lastGame !== st.game
+      ) {
+        await get().setGame(st.settings.lastGame); // setGame reloads with applyPrefs=false
+      }
+
+      // Reopen the last file on first launch, when opted in and nothing is open yet.
+      const cur = get();
+      if (applyPrefs && cur.settings.editor.rememberLastFile && cur.settings.lastFile && !cur.doc) {
+        void cur.openFile(cur.settings.lastFile);
       }
     },
 
@@ -215,8 +419,30 @@ export const useStore = create<AppStore>()(
           s.undoStack = [];
           s.redoStack = [];
           s.templates = {};
+          s.createdLayouts = {};
+          s.scriptConn = { id: null, path: null, text: null, status: "none" };
+          s.dataPackOverride = null;
+          s.scriptDraft = null;
+          s.previewState = {};
           s.status = `Loaded ${baseName(path)}`;
+          if (s.settings.editor.rememberLastFile) s.settings.lastFile = path;
         });
+        // Auto-connect the page's backing Lua script (from its script_id).
+        const scriptId = pageScriptId(doc);
+        if (scriptId) {
+          try {
+            const hit = await ipc.findScript(scriptId);
+            set((s) => {
+              s.scriptConn = hit
+                ? { id: scriptId, path: hit.path, text: hit.text, status: "connected" }
+                : { id: scriptId, path: null, text: null, status: "missing" };
+            });
+          } catch {
+            set((s) => {
+              s.scriptConn = { id: scriptId, path: null, text: null, status: "missing" };
+            });
+          }
+        }
         // Resolve referenced templates for the visualizer (best-effort).
         const ids = collectTemplateIds(doc);
         if (ids.length) {
@@ -230,6 +456,32 @@ export const useStore = create<AppStore>()(
           } catch {
             /* templates are optional; ignore */
           }
+        }
+        // Resolve ComponentCreator sub-layouts, recursively (sub-layouts may embed
+        // more). Depth-capped; a `visited` set prevents reloading/cycles.
+        try {
+          const created: Record<string, TwuiDocument> = {};
+          let frontier = collectCreatorPaths(doc);
+          for (let depth = 0; depth < 4 && frontier.length; depth++) {
+            const want = frontier.filter((p) => !(p in created));
+            if (!want.length) break;
+            const loaded = await ipc.loadLayouts(want);
+            Object.assign(created, loaded);
+            frontier = Object.values(loaded).flatMap((sub) => collectCreatorPaths(sub));
+          }
+          if (Object.keys(created).length) set((s) => { s.createdLayouts = created; });
+          // Sub-layouts reference their own templates (e.g. the court slot's `frame` is a
+          // `part_of_template` child of the `character_slot` template). Load those too so
+          // templated children resolve their visuals.
+          const subIds = [...new Set(Object.values(created).flatMap(collectTemplateIds))];
+          const have = get().templates;
+          const missing = subIds.filter((id) => !(id in have));
+          if (missing.length) {
+            const extra = await ipc.loadTemplates(missing);
+            set((s) => { s.templates = { ...s.templates, ...extra }; });
+          }
+        } catch {
+          /* ComponentCreator layouts are optional; ignore */
         }
       } catch (e) {
         set((s) => {
@@ -279,6 +531,7 @@ export const useStore = create<AppStore>()(
           s.dataRoot = path;
           s.status = `Data root: ${path}`;
         });
+        await get().init(false);
       } catch (e) {
         set((s) => {
           s.status = `${e}`;
@@ -305,10 +558,11 @@ export const useStore = create<AppStore>()(
       const cur = get().doc;
       if (!cur) return;
       const snapshot: TwuiDocument = JSON.parse(JSON.stringify(cur));
+      const limit = Math.max(0, get().settings.editor.undoLimit);
       set((s) => {
         if (!s.doc) return;
         s.undoStack.push(snapshot);
-        if (s.undoStack.length > MAX_UNDO) s.undoStack.shift();
+        while (s.undoStack.length > limit) s.undoStack.shift();
         s.redoStack = [];
         fn(s.doc);
         s.dirty = true;
@@ -321,6 +575,28 @@ export const useStore = create<AppStore>()(
         // hierarchy node that shares a component's GUID.
         const el = findComponentElement(doc, guid);
         if (el) setAttr(el, key, value);
+      });
+    },
+
+    // Edit a Context* callback's `context_function_id` (a script binding). The
+    // index matches cco.callbacks() document order; values are XML-encoded.
+    setCallbackFunc: (guid, index, value) => {
+      get().mutate((doc) => {
+        const el = findComponentElement(doc, guid);
+        if (!el) return;
+        let i = 0;
+        for (const tag of ["callbackwithcontextlist", "callbacks_with_context"]) {
+          const list = childByTag(el, tag);
+          if (!list) continue;
+          for (const cb of elementChildren(list)) {
+            if (cb.tag !== "callback_with_context") continue;
+            if (i === index) {
+              setAttr(cb, "context_function_id", encodeEntities(value));
+              return;
+            }
+            i++;
+          }
+        }
       });
     },
 
@@ -348,9 +624,10 @@ export const useStore = create<AppStore>()(
       const cur = get().doc;
       if (!cur) return;
       const snapshot: TwuiDocument = JSON.parse(JSON.stringify(cur));
+      const limit = Math.max(0, get().settings.editor.undoLimit);
       set((s) => {
         s.undoStack.push(snapshot);
-        if (s.undoStack.length > MAX_UNDO) s.undoStack.shift();
+        while (s.undoStack.length > limit) s.undoStack.shift();
         s.redoStack = [];
       });
     },
@@ -436,5 +713,18 @@ export const useStore = create<AppStore>()(
         s.doc = next;
         s.dirty = true;
       }),
-  }))
+    })),
+    {
+      name: "twui-settings",
+      version: 1,
+      // Persist only the prefs subset; `view` only when the user opts to restore it
+      // (else pan/zoom would write to localStorage constantly).
+      partialize: (s) => ({
+        settings: s.settings,
+        background: s.background,
+        ...(s.settings.visualizer.restoreView ? { view: s.view } : {}),
+      }),
+      merge: (persisted, current) => mergePersisted(current as AppStore, persisted),
+    }
+  )
 );

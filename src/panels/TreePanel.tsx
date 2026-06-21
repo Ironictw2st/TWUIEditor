@@ -8,6 +8,7 @@ import {
   guidOf,
   hierarchyRoot,
 } from "../twui/doc";
+import { inheritingGuids } from "../twui/inherit";
 import { RawElement } from "../types/twui";
 
 function isHidden(comp: RawElement | undefined): boolean {
@@ -25,6 +26,7 @@ function Row({
   toggle,
   compMap,
   ancestorHidden,
+  inheriting,
 }: {
   node: RawElement;
   parentGuid: string | null;
@@ -33,6 +35,7 @@ function Row({
   toggle: (g: string) => void;
   compMap: Map<string, RawElement>;
   ancestorHidden: boolean;
+  inheriting: Set<string>;
 }) {
   const guid = guidOf(node) ?? "";
   const kids = elementChildren(node);
@@ -105,6 +108,11 @@ function Row({
         >
           {node.tag}
         </span>
+        {inheriting.has(guid) && (
+          <span className="shrink-0 text-[10px] text-gray-500 opacity-70" title="Inherits context from a parent">
+            ⛓
+          </span>
+        )}
         <span
           className={`w-4 text-center shrink-0 ${ownHidden ? "" : "opacity-60 hover:opacity-100"}`}
           title={ownHidden ? "Show (remove visible=\"false\")" : "Hide (set visible=\"false\")"}
@@ -127,6 +135,7 @@ function Row({
             toggle={toggle}
             compMap={compMap}
             ancestorHidden={dimmed}
+            inheriting={inheriting}
           />
         ))}
     </div>
@@ -145,6 +154,7 @@ export default function TreePanel() {
     () => (doc ? componentMap(doc) : new Map<string, RawElement>()),
     [doc]
   );
+  const inheriting = useMemo(() => (doc ? inheritingGuids(doc) : new Set<string>()), [doc]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -228,6 +238,7 @@ export default function TreePanel() {
             toggle={toggle}
             compMap={compMap}
             ancestorHidden={false}
+            inheriting={inheriting}
           />
         ) : (
           <div className="text-gray-500 text-[12px] p-3">Open a .twui.xml file to begin.</div>

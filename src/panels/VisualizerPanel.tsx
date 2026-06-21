@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../state/store";
-import { computeLayout, imageDrawRect, LayoutResult, Rect } from "../layout/compute";
+import { computeLayout, imageDrawRect, LayoutResult, Rect, Scrollable, Sim } from "../layout/compute";
 import { deriveTokens } from "../twui/context";
-import { guidOf } from "../twui/doc";
+import { extractDataPack, LuaValue } from "../twui/lua";
+import { buildPlayersContext } from "../twui/players";
+import { componentMap, guidOf } from "../twui/doc";
+import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
 import { imageUrl } from "../ipc/commands";
 
-// Images the game replaces at runtime (faction flags, dynamic icons, unit cards).
-function isPlaceholder(path: string): boolean {
-  return /placeholer|placeholder|ph_|_placeholer/i.test(path);
+type Mode = "view" | "move" | "sim" | "tooltip";
+const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
+
+// Images the game replaces at runtime (faction flags, dynamic icons, unit cards)
+// plus runtime portrait/character-render textures (masks, empty faces, body
+// silhouettes) — all drawn faint so they don't dominate as opaque blocks.
+function isFaint(path: string): boolean {
+  return /placeholer|placeholder|ph_|_placeholer|mask|empty_face|halfbody|fullbody_character/i.test(path);
 }
 
 function parseAlpha(colour: string | undefined): number {
@@ -33,28 +40,72 @@ export default function VisualizerPanel() {
   const liveSetOffset = useStore((s) => s.liveSetOffset);
   const context = useStore((s) => s.context);
   const contextDb = useStore((s) => s.contextDb);
+  const characterDb = useStore((s) => s.characterDb);
+  const characters = useStore((s) => s.characters);
   const templates = useStore((s) => s.templates);
+  const createdLayouts = useStore((s) => s.createdLayouts);
   const loc = useStore((s) => s.loc);
+  const scriptText = useStore((s) => s.scriptConn.text);
+  const scriptId = useStore((s) => s.scriptConn.id);
+  const dataPackOverride = useStore((s) => s.dataPackOverride);
+  const previewState = useStore((s) => s.previewState);
   const background = useStore((s) => s.background);
-  const setDataRoot = useStore((s) => s.setDataRoot);
+  const ccoShorthand = useStore((s) => s.ccoShorthand);
 
+  // Seed the visualizer's mode + bounds from the persisted defaults (read once).
+  const vizDefaults = useStore((s) => s.settings.visualizer);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [, forceTick] = useState(0);
   const [hover, setHover] = useState<string | null>(null);
-  const [showBounds, setShowBounds] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showBounds, setShowBounds] = useState(vizDefaults.showBounds);
   const [showPanel, setShowPanel] = useState(true);
+  const [mode, setMode] = useState<Mode>(vizDefaults.defaultMode);
+  // Tooltip mode interacts like Simulation (scroll/click-sim, no selection).
+  const simLike = mode === "sim" || mode === "tooltip";
+  const [sim, setSim] = useState<Sim>(EMPTY_SIM);
+  const [tipPos, setTipPos] = useState<{ x: number; y: number } | null>(null);
+
+  // Simulation state is per-document.
+  useEffect(() => setSim(EMPTY_SIM), [doc]);
 
   const tokens = useMemo(() => deriveTokens(contextDb), [contextDb]);
+  const dataPack = useMemo(
+    () =>
+      (dataPackOverride as LuaValue | null) ??
+      (scriptText && scriptId ? extractDataPack(scriptText, scriptId) : null),
+    [dataPackOverride, scriptText, scriptId]
+  );
+  // The Inspector's state preview rides in sim.state (preview wins per component).
+  const effectiveSim = useMemo(
+    () => ({ ...sim, state: { ...sim.state, ...previewState } }),
+    [sim, previewState]
+  );
+  // DB-record contexts (PlayersFaction name + per-role character portraits).
+  const staticVars = useMemo(
+    () => buildPlayersContext(context, contextDb, loc, characters, characterDb),
+    [context, contextDb, loc, characters, characterDb]
+  );
   const layout: LayoutResult = useMemo(
     () =>
       doc
-        ? computeLayout(doc, context, tokens, templates, loc)
-        : { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 } },
-    [doc, context, tokens, templates, loc]
+        ? computeLayout(
+            doc,
+            context,
+            tokens,
+            templates,
+            loc,
+            dataPack,
+            effectiveSim,
+            staticVars,
+            mode === "tooltip",
+            createdLayouts,
+            ccoShorthand
+          )
+        : { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] },
+    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand]
   );
 
   const getImage = useCallback((path: string): HTMLImageElement | null => {
@@ -135,7 +186,7 @@ export default function VisualizerPanel() {
           // Size to the image's natural pixels when no explicit size was given.
           const r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
           // Runtime-swapped placeholders are drawn faint so they don't dominate.
-          ctx.globalAlpha = parseAlpha(di.colour) * (isPlaceholder(di.imagepath) ? 0.25 : 1);
+          ctx.globalAlpha = parseAlpha(di.colour) * (isFaint(di.imagepath) ? 0.25 : 1);
           try {
             ctx.drawImage(img, r.x, r.y, r.w, r.h);
           } catch {
@@ -174,16 +225,32 @@ export default function VisualizerPanel() {
       ctx.lineWidth = wdt / zoom;
       ctx.strokeRect(it.rect.x, it.rect.y, it.rect.w, it.rect.h);
     };
-    hi(hover, "rgba(201,162,39,0.6)", 1.5);
-    hi(selectedGuid, "#c9a227", 2);
+    // Hover highlight everywhere except Simulation; selection only in View/Move.
+    if (mode !== "sim") hi(hover, "rgba(201,162,39,0.6)", 1.5);
+    if (!simLike) hi(selectedGuid, "#c9a227", 2);
+
+    // Scrollbars for clipped, overflowing lists (draggable in Sim/Tooltip mode).
+    // Skip any viewport that has a real slider component — its handle IS the thumb.
+    const sliderViewports = new Set(layout.sliderLinks.map((l) => l.viewportGuid));
+    for (const sc of layout.scrollables) {
+      if (sliderViewports.has(sc.guid)) continue;
+      const sb = scrollbarRects(sc, sim.scroll[sc.guid] ?? 0);
+      ctx.fillStyle = "rgba(18,20,28,0.55)";
+      ctx.fillRect(sb.track.x, sb.track.y, sb.track.w, sb.track.h);
+      ctx.fillStyle = simLike ? "rgba(201,162,39,0.9)" : "rgba(150,160,190,0.55)";
+      ctx.fillRect(sb.thumb.x, sb.thumb.y, sb.thumb.w, sb.thumb.h);
+    }
 
     ctx.restore();
-  }, [doc, layout, view, size, selectedGuid, hover, getImage, showBounds, background]);
+  }, [doc, layout, view, size, selectedGuid, hover, getImage, showBounds, background, sim, mode]);
 
-  // Interaction: pan background / move a component (changes offset) / zoom / select.
+  // Interaction depends on the mode: View pans, Move edits offsets, Simulation
+  // scrolls lists / clicks widgets.
   type DragState =
     | { kind: "pan"; x: number; y: number; panX: number; panY: number; moved: boolean }
-    | { kind: "move"; guid: string; startWX: number; startWY: number; offX: number; offY: number; moved: boolean };
+    | { kind: "move"; guid: string; startWX: number; startWY: number; offX: number; offY: number; moved: boolean }
+    | { kind: "scroll"; sc: Scrollable; startWY: number; startScroll: number }
+    | { kind: "sliderdrag"; sc: Scrollable; travel: number; startWY: number; startScroll: number };
   const drag = useRef<DragState | null>(null);
 
   // Absolute rect of a component's parent (for converting a drag delta to offset).
@@ -213,30 +280,97 @@ export default function VisualizerPanel() {
     return null;
   };
 
+  const inRect = (wx: number, wy: number, r: Rect) =>
+    wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
+  const scrollableAt = (wx: number, wy: number): Scrollable | undefined =>
+    layout.scrollables.find((s) => inRect(wx, wy, s.clip));
+  const thumbAt = (wx: number, wy: number): Scrollable | undefined =>
+    layout.scrollables.find((s) => inRect(wx, wy, scrollbarRects(s, sim.scroll[s.guid] ?? 0).thumb));
+  // The real slider handle the pointer is over (its rect travels with the scroll),
+  // plus the scrollable it drives and the handle's travel distance along the track.
+  const sliderHandleAt = (wx: number, wy: number): { sc: Scrollable; travel: number } | undefined => {
+    for (const link of layout.sliderLinks) {
+      const handle = link.handleGuid ? layout.items.find((i) => i.guid === link.handleGuid) : undefined;
+      if (!handle || !inRect(wx, wy, handle.rect)) continue;
+      const sc = layout.scrollables.find((s) => s.guid === link.viewportGuid);
+      if (sc) return { sc, travel: Math.max(1, link.track.h - handle.rect.h) };
+    }
+    return undefined;
+  };
+  const setScroll = (guid: string, v: number, sc: Scrollable) => {
+    const max = Math.max(0, sc.contentHeight - sc.viewHeight);
+    setSim((s) => ({ ...s, scroll: { ...s.scroll, [guid]: Math.min(max, Math.max(0, v)) } }));
+  };
+
   const onWheel = (e: React.WheelEvent) => {
     e.preventDefault();
+    const w = toWorld(e.clientX, e.clientY);
+    const sc = simLike ? scrollableAt(w.x, w.y) : undefined;
+    if (sc) {
+      setScroll(sc.guid, (sim.scroll[sc.guid] ?? 0) + (e.deltaY > 0 ? 60 : -60), sc);
+      return;
+    }
     const rect = canvasRef.current!.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     const newZoom = Math.min(8, Math.max(0.05, view.zoom * factor));
-    // Keep point under cursor stable.
     const wx = (mx - view.panX) / view.zoom;
     const wy = (my - view.panY) / view.zoom;
     setView({ zoom: newZoom, panX: mx - wx * newZoom, panY: my - wy * newZoom });
   };
 
+  // Click in Simulation mode: switch tabs (button group) or toggle press state.
+  // It never selects/highlights — that's reserved for View/Move.
+  const simClick = (guid: string) => {
+    if (!doc) return;
+    const bg = buttonGroup(doc, guid);
+    if (bg && bg.panels.length === bg.buttons.length && bg.panels[bg.buttonIndex]) {
+      const show = bg.panels[bg.buttonIndex];
+      const hide = bg.panels.filter((p) => p !== show);
+      setSim((s) => ({ ...s, show: [show], hide, state: { ...s.state, [bg.buttonGuid]: "selected" } }));
+      return;
+    }
+    const target = interactiveTarget(doc, guid);
+    if (target) {
+      const tcomp = componentMap(doc).get(target);
+      const states = tcomp ? clickableStates(tcomp) : [];
+      setSim((s) => {
+        const next = { ...s.state };
+        if (next[target]) delete next[target];
+        else if (states[0]) next[target] = states[0];
+        return { ...s, state: next };
+      });
+    }
+  };
+
   const onMouseDown = (e: React.MouseEvent) => {
     const w = toWorld(e.clientX, e.clientY);
-    const guid = hitTest(w.x, w.y);
-    if (guid) {
-      // Grab a component: drag moves it (updates offset). Seed the offset from
-      // its current position relative to the parent (works even with no offset
-      // attr / docking, so it doesn't jump).
-      const item = layout.items.find((i) => i.guid === guid);
-      const parent = parentRectOf(guid) ?? layout.canvas;
-      select(guid);
-      if (item) {
+    if (simLike) {
+      // The real slider handle (its viewport's synthetic scrollbar is suppressed).
+      const sh = sliderHandleAt(w.x, w.y);
+      if (sh) {
+        drag.current = {
+          kind: "sliderdrag",
+          sc: sh.sc,
+          travel: sh.travel,
+          startWY: w.y,
+          startScroll: sim.scroll[sh.sc.guid] ?? 0,
+        };
+        return;
+      }
+      const sc = thumbAt(w.x, w.y);
+      if (sc) {
+        drag.current = { kind: "scroll", sc, startWY: w.y, startScroll: sim.scroll[sc.guid] ?? 0 };
+        return;
+      }
+    }
+    if (mode === "move") {
+      const guid = hitTest(w.x, w.y);
+      const item = guid ? layout.items.find((i) => i.guid === guid) : undefined;
+      if (guid && item) {
+        const parent = parentRectOf(guid) ?? layout.canvas;
+        select(guid);
         drag.current = {
           kind: "move",
           guid,
@@ -246,10 +380,10 @@ export default function VisualizerPanel() {
           offY: item.rect.y - parent.y,
           moved: false,
         };
+        return;
       }
-    } else {
-      drag.current = { kind: "pan", x: e.clientX, y: e.clientY, panX: view.panX, panY: view.panY, moved: false };
     }
+    drag.current = { kind: "pan", x: e.clientX, y: e.clientY, panX: view.panX, panY: view.panY, moved: false };
   };
   const onMouseMove = (e: React.MouseEvent) => {
     const d = drag.current;
@@ -269,18 +403,33 @@ export default function VisualizerPanel() {
         beginDrag(); // one undo entry for the whole drag
       }
       liveSetOffset(d.guid, d.offX + dx, d.offY + dy);
+    } else if (d?.kind === "scroll") {
+      const w = toWorld(e.clientX, e.clientY);
+      const sc = d.sc;
+      const thumbH = Math.max(20, sc.clip.h * (sc.viewHeight / sc.contentHeight));
+      const max = Math.max(1, sc.contentHeight - sc.viewHeight);
+      const travel = Math.max(1, sc.clip.h - thumbH);
+      setScroll(sc.guid, d.startScroll + ((w.y - d.startWY) / travel) * max, sc);
+    } else if (d?.kind === "sliderdrag") {
+      const w = toWorld(e.clientX, e.clientY);
+      const max = Math.max(1, d.sc.contentHeight - d.sc.viewHeight);
+      setScroll(d.sc.guid, d.startScroll + ((w.y - d.startWY) / d.travel) * max, d.sc);
     } else {
       const w = toWorld(e.clientX, e.clientY);
-      setHover(hitTest(w.x, w.y));
+      setHover(mode === "sim" ? null : hitTest(w.x, w.y));
+      if (mode === "tooltip") setTipPos({ x: e.clientX, y: e.clientY });
     }
   };
   const onMouseUp = (e: React.MouseEvent) => {
     const d = drag.current;
     drag.current = null;
-    // A pan that didn't move = a click on empty space → clear selection.
+    // A pan that didn't move = a click → interact in Sim/Tooltip, else select.
     if (d?.kind === "pan" && !d.moved) {
       const w = toWorld(e.clientX, e.clientY);
-      select(hitTest(w.x, w.y));
+      const guid = hitTest(w.x, w.y);
+      if (simLike) {
+        if (guid) simClick(guid);
+      } else select(guid);
     }
   };
 
@@ -297,11 +446,6 @@ export default function VisualizerPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc]);
 
-  const pickRoot = async () => {
-    const dir = await open({ directory: true, defaultPath: dataRoot ?? undefined });
-    if (typeof dir === "string") setDataRoot(dir);
-  };
-
   return (
     <div className="h-full flex flex-col">
       <div className="relative px-3 h-9 flex items-center gap-2 border-b border-edge shrink-0 bg-panel">
@@ -310,15 +454,28 @@ export default function VisualizerPanel() {
           {layout.items.length} components · {layout.canvas.w}×{layout.canvas.h}
         </span>
         <div className="flex-1" />
-        <button
-          className={`px-2 py-0.5 rounded border border-edge text-[12px] leading-none ${
-            showSettings ? "bg-accent/30 border-accent" : "bg-[#2a2d3a] hover:bg-[#343849]"
-          }`}
-          onClick={() => setShowSettings((s) => !s)}
-          title="Settings"
-        >
-          ⚙
-        </button>
+        <div className="flex rounded border border-edge overflow-hidden mr-1">
+          {(["view", "move", "sim", "tooltip"] as Mode[]).map((m) => (
+            <button
+              key={m}
+              className={`px-2 py-0.5 text-[11px] capitalize ${
+                mode === m ? "bg-accent/30 text-accent" : "bg-[#2a2d3a] hover:bg-[#343849]"
+              }`}
+              onClick={() => setMode(m)}
+              title={
+                m === "view"
+                  ? "Pan & zoom only"
+                  : m === "move"
+                  ? "Drag components to edit their offset"
+                  : m === "sim"
+                  ? "Scroll lists & click widgets like in-game"
+                  : "Like Simulation, plus hover to resolve tooltips"
+              }
+            >
+              {m === "sim" ? "Simulation" : m}
+            </button>
+          ))}
+        </div>
         <button
           className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
           onClick={fit}
@@ -326,23 +483,6 @@ export default function VisualizerPanel() {
           Fit
         </button>
         <span className="text-[11px] text-gray-500 w-14 text-right">{Math.round(view.zoom * 100)}%</span>
-
-        {showSettings && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setShowSettings(false)} />
-            <div className="absolute z-20 right-2 top-9 w-72 bg-panel border border-edge rounded shadow-lg p-3 text-[12px]">
-              <div className="font-semibold mb-2">Settings</div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">3K data root</div>
-              <div className="text-[11px] text-gray-300 break-all mb-2">{dataRoot ?? "not set"}</div>
-              <button
-                className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
-                onClick={pickRoot}
-              >
-                Change…
-              </button>
-            </div>
-          </>
-        )}
       </div>
       <div ref={wrapRef} className="flex-1 min-h-0 relative overflow-hidden">
         {!doc && (
@@ -352,7 +492,7 @@ export default function VisualizerPanel() {
         )}
         {doc && !dataRoot && (
           <div className="absolute top-2 left-2 right-2 text-[11px] text-amber-300/80 bg-amber-900/30 border border-amber-700/40 rounded px-2 py-1">
-            3K data root not set — images won't load. Set it from the toolbar.
+            Data root not set — images won't load. Set it from Settings.
           </div>
         )}
         <canvas
@@ -360,7 +500,13 @@ export default function VisualizerPanel() {
           style={{
             width: size.w,
             height: size.h,
-            cursor: drag.current ? "grabbing" : hover ? "move" : "default",
+            cursor: drag.current
+              ? "grabbing"
+              : mode === "move" && hover
+              ? "move"
+              : simLike
+              ? "pointer"
+              : "grab",
           }}
           onWheel={onWheel}
           onMouseDown={onMouseDown}
@@ -369,8 +515,24 @@ export default function VisualizerPanel() {
           onMouseLeave={() => {
             drag.current = null;
             setHover(null);
+            setTipPos(null);
           }}
         />
+        {mode === "tooltip" &&
+          tipPos &&
+          hover &&
+          (() => {
+            const tip = layout.items.find((i) => i.guid === hover)?.tooltip;
+            if (!tip) return null;
+            return (
+              <div
+                className="fixed z-40 max-w-[320px] px-2 py-1 rounded bg-[#0c0d12] border border-edge text-[11px] text-gray-200 whitespace-pre-wrap pointer-events-none shadow-lg"
+                style={{ left: tipPos.x + 14, top: tipPos.y + 14 }}
+              >
+                {tip}
+              </div>
+            );
+          })()}
       </div>
       <BottomControls
         showBounds={showBounds}
@@ -498,6 +660,17 @@ function BottomControls({
   );
 }
 
+const SCROLLBAR_W = 8;
+/** Track + thumb rects (world coords) for a scrollable list at a given scroll. */
+function scrollbarRects(sc: Scrollable, scroll: number): { track: Rect; thumb: Rect } {
+  const x = sc.clip.x + sc.clip.w - SCROLLBAR_W;
+  const track: Rect = { x, y: sc.clip.y, w: SCROLLBAR_W, h: sc.clip.h };
+  const max = Math.max(1, sc.contentHeight - sc.viewHeight);
+  const thumbH = Math.max(20, sc.clip.h * (sc.viewHeight / sc.contentHeight));
+  const frac = Math.min(1, Math.max(0, scroll / max));
+  return { track, thumb: { x, y: sc.clip.y + frac * (sc.clip.h - thumbH), w: SCROLLBAR_W, h: thumbH } };
+}
+
 function drawPlaceholder(ctx: CanvasRenderingContext2D, r: Rect, zoom: number) {
   if (r.w <= 0 || r.h <= 0) return;
   ctx.save();
@@ -513,7 +686,7 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D, r: Rect, zoom: number) {
   ctx.restore();
 }
 
-function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; textHAlign?: string; textVAlign?: string }) {
+function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; textHAlign?: string; textVAlign?: string; textOffset?: { x: number; y: number } }) {
   if (!item.text) return;
   const size = item.fontSize ?? 13;
   ctx.save();
@@ -522,8 +695,11 @@ function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: stri
   ctx.textBaseline = "middle";
   const ha = item.textHAlign ?? "Left";
   ctx.textAlign = ha === "Center" ? "center" : ha === "Right" ? "right" : "left";
-  const tx = ha === "Center" ? item.rect.x + item.rect.w / 2 : ha === "Right" ? item.rect.x + item.rect.w : item.rect.x;
-  const ty = item.rect.y + item.rect.h / 2;
+  // `textxoffset` shifts the text within the rect (clears a bullet/icon on the left).
+  const ox = item.textOffset?.x ?? 0;
+  const oy = item.textOffset?.y ?? 0;
+  const tx = (ha === "Center" ? item.rect.x + item.rect.w / 2 : ha === "Right" ? item.rect.x + item.rect.w : item.rect.x) + ox;
+  const ty = item.rect.y + item.rect.h / 2 + oy;
   ctx.fillText(item.text, tx, ty);
   ctx.restore();
 }

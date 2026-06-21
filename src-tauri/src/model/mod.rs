@@ -54,7 +54,7 @@ mod roundtrip_tests {
     use super::{parse, serialize};
 
     fn check(rel: &str) {
-        let path = format!("{}/../3K/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = format!("{}/../games/3K/{}", env!("CARGO_MANIFEST_DIR"), rel);
         let original = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {path}: {e}"));
         let doc = parse::parse(&original).expect("parse");

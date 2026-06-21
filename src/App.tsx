@@ -1,9 +1,13 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./state/store";
+import { runMatchingAction } from "./keybinds";
 import TreePanel from "./panels/TreePanel";
 import InspectorPanel from "./panels/InspectorPanel";
 import VisualizerPanel from "./panels/VisualizerPanel";
+import CharactersPanel from "./panels/CharactersPanel";
+import ScriptPanel from "./panels/ScriptPanel";
+import SettingsPanel from "./panels/SettingsPanel";
 
 function Toolbar() {
   const {
@@ -11,8 +15,10 @@ function Toolbar() {
     openFile,
     save: saveFile,
     saveAs,
-    setDataRoot,
     dataRoot,
+    games,
+    game,
+    setGame,
     fileName,
     dirty,
     status,
@@ -43,10 +49,10 @@ function Toolbar() {
     if (path) saveAs(path);
   };
 
-  const onPickRoot = async () => {
-    const dir = await open({ directory: true, defaultPath: dataRoot ?? undefined });
-    if (typeof dir === "string") setDataRoot(dir);
-  };
+  const [showCharacters, setShowCharacters] = useState(false);
+  const [showScript, setShowScript] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const scriptConnected = useStore((s) => s.scriptConn.status === "connected");
 
   const btn =
     "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px] disabled:opacity-40";
@@ -65,49 +71,71 @@ function Toolbar() {
       </button>
       <div className="w-px h-5 bg-edge mx-1" />
       <button className={btn} onClick={undo} disabled={undoStack.length === 0}>
-        ↶ Undo
+        Undo
       </button>
       <button className={btn} onClick={redo} disabled={redoStack.length === 0}>
-        ↷ Redo
+        Redo
       </button>
       <div className="w-px h-5 bg-edge mx-1" />
-      <button className={btn} onClick={onPickRoot} title={dataRoot ?? "not set"}>
-        3K Root: {dataRoot ? "set" : "none"}
+      {games.length > 0 && (
+        <select
+          className="px-2 py-1 rounded bg-[#2a2d3a] border border-edge text-[12px]"
+          value={game ?? ""}
+          onChange={(e) => setGame(e.target.value)}
+          title="Active game (games/ folder)"
+        >
+          {!game && <option value="">Game…</option>}
+          {games.map((g) => (
+            <option key={g} value={g}>
+              {g}
+            </option>
+          ))}
+        </select>
+      )}
+      <button
+        className={btn}
+        onClick={() => setShowCharacters(true)}
+        title="Assign characters to this screen's roles"
+      >
+        Characters
       </button>
+      <button
+        className={btn}
+        onClick={() => setShowScript(true)}
+        disabled={!scriptConnected}
+        title="Tweak the connected script's data to visualize changes"
+      >
+        Script
+      </button>
+      <button className={btn} onClick={() => setShowSettings(true)} title="Game, keybinds & preferences">
+        Settings
+      </button>
+      {showCharacters && <CharactersPanel onClose={() => setShowCharacters(false)} />}
+      {showScript && <ScriptPanel onClose={() => setShowScript(false)} />}
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       <div className="flex-1" />
-      <span className="text-[12px] text-gray-300">
-        {fileName ? `${fileName}${dirty ? " *" : ""}` : "No file"}
+      <span className="text-[12px] text-gray-500 max-w-[420px] truncate">
+        {status}
+        {dirty ? " *" : ""}
       </span>
-      <span className="text-[12px] text-gray-500 ml-3 max-w-[360px] truncate">{status}</span>
     </div>
   );
 }
 
 export default function App() {
-  const { undo, redo, save: saveFile, deleteSelected, selectedGuid } = useStore();
-
+  // Global shortcuts run through the central keybinding registry (src/keybinds.ts),
+  // resolving each action's binding from the user's persisted overrides. Reading the
+  // store via getState() inside the handler keeps it current without re-registering.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey;
       const tag = (e.target as HTMLElement)?.tagName;
       const editing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-      if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) {
-        e.preventDefault();
-        undo();
-      } else if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) {
-        e.preventDefault();
-        redo();
-      } else if (mod && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        saveFile();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && !editing && selectedGuid) {
-        e.preventDefault();
-        deleteSelected();
-      }
+      const s = useStore.getState();
+      runMatchingAction(e, s.settings.keybinds, s, editing);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, saveFile, deleteSelected, selectedGuid]);
+  }, []);
 
   return (
     <div className="h-full flex flex-col">

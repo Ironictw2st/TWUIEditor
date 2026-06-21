@@ -7,6 +7,7 @@
 *.tsbuildinfo
 
 # Game data & generated artifacts (large, reproducible — not tracked)
+/games
 /3K
 /output
 /reference

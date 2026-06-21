@@ -1,8 +1,12 @@
+mod cco_docs;
+mod cco_shorthand;
+mod character;
 mod commands;
 mod db;
 mod image;
 mod loc;
 mod model;
+mod script;
 mod state;
 
 use state::AppState;
@@ -45,13 +49,22 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_data_root,
             commands::set_data_root,
+            commands::list_games,
+            commands::current_game,
+            commands::set_game,
             commands::read_layout,
             commands::save_layout,
             commands::roundtrip_check,
             commands::image_status,
             commands::load_context_db,
+            commands::load_character_db,
+            commands::load_cco_docs,
+            commands::load_cco_shorthand,
             commands::load_loc,
+            commands::find_script,
+            commands::read_script,
             commands::load_templates,
+            commands::load_layouts,
             commands::serialize_element,
             commands::parse_element,
             commands::list_backgrounds,

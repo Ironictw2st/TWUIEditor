@@ -71,3 +71,48 @@ export interface FactionContext {
   culture: string;
   subculture: string;
 }
+
+/** A character generation template + its resolved adult portrait folder + unitcard. */
+export interface CharacterTemplate {
+  key: string;
+  /** Portrait folder prefix, e.g. `3k_dlc06_hero_special_king_wutugu/` (may be empty). */
+  portrait: string;
+  /** Unitcard image name (arts `card` column), e.g. `3k_dlc06_hero_special_king_wutugu`. */
+  card: string;
+}
+
+export interface CharacterDb {
+  templates: CharacterTemplate[];
+}
+
+/** A CCO function's signature from the UI documentation (Inspector hints). */
+export interface CcoFunc {
+  ret: string;
+  args: string;
+  desc: string;
+}
+
+/** CCO symbol table: object name -> (function name -> definition). */
+export interface CcoDocs {
+  objects: Record<string, Record<string, CcoFunc>>;
+}
+
+/** One clause of a `select`-form shorthand macro (a clause with no `cond` is the default). */
+export interface ShorthandClause {
+  cond: string | null;
+  ret: string;
+}
+
+/** A content-defined CCO shorthand macro (`ui/cco/*.json`): a named expression. */
+export interface ShorthandDef {
+  name: string;
+  /** Direct return expression (simple form); null for a `select` macro. */
+  ret: string | null;
+  /** Conditional clauses (the `select` form); empty for the simple form. */
+  select: ShorthandClause[];
+}
+
+/** Shorthand macro registry: cco type (lowercased file stem) -> (macro name -> def). */
+export interface CcoShorthand {
+  objects: Record<string, Record<string, ShorthandDef>>;
+}
