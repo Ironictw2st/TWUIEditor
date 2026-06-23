@@ -1,43 +1,48 @@
 # Releasing & auto-update
 
-TWUI Editor auto-updates from this repo's GitHub Releases. The installed app checks
-`https://github.com/Ironictw2st/TWUIEditor/releases/latest/download/latest.json` on startup and
-prompts the user to install a newer signed version.
-
-## One-time setup (required before the first release)
-
-The release workflow signs updates with the updater key generated locally at
-`src-tauri/.tauri-updater.key` (gitignored — keep it safe; if lost, existing installs can no longer
-auto-update). Add it to the repo so CI can sign:
-
-GitHub repo -> **Settings -> Secrets and variables -> Actions -> New repository secret**:
-
-- `TAURI_SIGNING_PRIVATE_KEY` = the full contents of `src-tauri/.tauri-updater.key`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = the key password (empty if you generated it without one)
-
-The matching **public** key is already committed in `src-tauri/tauri.conf.json`
-(`plugins.updater.pubkey`); the app verifies downloads against it.
+TWUI Editor is distributed as a **portable Windows exe** and self-updates from this repo's
+GitHub Releases (RPFM-style): the running app checks the latest release, downloads the new
+`TWUI-Editor-x64.exe`, swaps itself in place, and relaunches. No installer and no signing key.
 
 ## Cutting a release
 
-1. Bump the version in **both** `src-tauri/tauri.conf.json` and `package.json` (same semver, e.g.
-   `0.0.2`).
+1. Bump the version (same semver) in all four places:
+   - `package.json`
+   - `src-tauri/tauri.conf.json`
+   - `src-tauri/Cargo.toml`
+   - `src-tauri/Cargo.lock` (the `twui-editor` package entry)
 2. Commit the bump.
 3. Tag and push:
    ```
-   git tag v0.0.2
-   git push origin v0.0.2
+   git tag v0.0.3
+   git push origin v0.0.3
    ```
-4. The **Release** workflow (`.github/workflows/release.yml`) builds the Windows installer, signs it,
-   and publishes a GitHub Release with the installer + `latest.json`.
-5. Anyone running an older installed build is prompted to **Install & Restart** on next launch.
+4. The **Release** workflow (`.github/workflows/release.yml`) builds the frontend + a release
+   `cargo build`, then publishes a GitHub Release with the portable **`TWUI-Editor-x64.exe`**.
+5. Anyone running an older copy is prompted (startup banner, or Settings -> About / Updates ->
+   Check for updates) to download and relaunch into the new version.
+
+## How the updater works
+
+- Rust commands in `src-tauri/src/update.rs`:
+  - `check_update` queries `https://api.github.com/repos/<OWNER>/<REPO>/releases/latest`,
+    compares the release tag to `CARGO_PKG_VERSION`, and returns the portable asset URL when
+    newer. (Edit the `OWNER`/`REPO`/`ASSET_NAME` consts there if the repo or asset name changes.)
+  - `install_update` streams the exe down (emitting `update-progress`), replaces the running
+    binary with the `self-replace` crate, and calls `app.restart()`.
+- The frontend wrapper is `src/updater.ts`; the UI is `src/panels/UpdateBanner.tsx` (startup,
+  release builds only) and the **About / Updates** section in `src/panels/SettingsPanel.tsx`.
+- Debug builds never report an update, so `npm run tauri dev` won't try to self-replace.
 
 ## Notes
 
-- Auto-update only works from a build that already contains the updater (this version onward) and
-  that was installed via the released installer (not a raw `target/debug` exe).
-- The updater uses a minisign signature for integrity; it is independent of Windows Authenticode
-  code-signing. Without an Authenticode certificate, Windows SmartScreen may warn on first install,
-  but auto-update still functions.
-- To test the whole loop: install a release, bump + tag the next version, let CI publish, reopen the
-  installed app, and confirm the update prompt -> install -> relaunch on the new version.
+- **WebView2 Runtime** must be present (preinstalled on current Windows 10/11). The portable exe
+  doesn't bundle the installer's WebView2 bootstrapper, so on a machine missing it the app won't
+  start until the Evergreen runtime is installed.
+- Trust model is HTTPS + GitHub release authenticity (no minisign signature). The old updater
+  signing key (`src-tauri/.tauri-updater.key*`) is **no longer used** and can be deleted.
+- Without an Authenticode certificate, Windows SmartScreen may warn the first time the exe runs.
+- The GitHub API check is unauthenticated (~60 requests/hour/IP) — ample for a desktop app.
+- To test the full loop: build the current portable exe and run it from a folder, publish a
+  higher-version release containing `TWUI-Editor-x64.exe`, then in the running older exe use
+  Check for updates and confirm download -> self-replace -> relaunch on the new version.

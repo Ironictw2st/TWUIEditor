@@ -392,7 +392,7 @@ function UpdatesSection() {
     if (result?.status !== "available") return;
     setBusy(true);
     try {
-      await installAndRelaunch(result.info.update, setProgress);
+      await installAndRelaunch(result.info, setProgress);
     } catch {
       setBusy(false); // install/relaunch failed; allow retry
     }
@@ -403,7 +403,7 @@ function UpdatesSection() {
       <SectionTitle>Updates</SectionTitle>
       {import.meta.env.DEV && (
         <p className="text-[11px] text-gray-500 mb-3">
-          Auto-update runs only in installed builds; a check here in dev will report an error.
+          Auto-update runs only in release builds; in dev the check always reports up-to-date.
         </p>
       )}
       <Row label="Application updates" hint="Downloaded from the official signed release">

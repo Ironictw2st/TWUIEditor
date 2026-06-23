@@ -1,28 +1,28 @@
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+// Portable self-update: the Rust side (src-tauri/src/update.rs) checks the latest GitHub
+// release, downloads the portable exe, swaps the running binary in place, and relaunches.
 
 export interface UpdateInfo {
   version: string;
   notes: string;
-  update: Update;
+  /** Direct download URL for the portable exe asset (from check_update). */
+  assetUrl: string;
 }
 
-/** Check the configured GitHub endpoint for a newer signed release. Returns null when up to date,
- *  in dev, or on any error (offline / no release / no updater config) — the caller stays quiet. */
+/** Check for a newer release. Returns null when up to date, in dev, or on any error
+ *  (offline / no release) — the caller stays quiet. */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   try {
-    const update = await check();
-    if (update && update.available) {
-      return { version: update.version, notes: update.body ?? "", update };
-    }
-    return null;
+    return await invoke<UpdateInfo | null>("check_update");
   } catch {
     return null;
   }
 }
 
-/** Verbose check for the manual "Check for updates" button, which (unlike the silent banner)
- *  needs to distinguish up-to-date from a failed check (offline / dev / no updater config). */
+/** Verbose check for the manual "Check for updates" button — distinguishes up-to-date from
+ *  a failed check (offline / dev / no release). */
 export type CheckResult =
   | { status: "available"; info: UpdateInfo }
   | { status: "current" }
@@ -30,33 +30,21 @@ export type CheckResult =
 
 export async function checkForUpdateVerbose(): Promise<CheckResult> {
   try {
-    const update = await check();
-    if (update && update.available) {
-      return { status: "available", info: { version: update.version, notes: update.body ?? "", update } };
-    }
-    return { status: "current" };
+    const info = await invoke<UpdateInfo | null>("check_update");
+    return info ? { status: "available", info } : { status: "current" };
   } catch (e) {
     return { status: "error", message: String(e) };
   }
 }
 
-/** Download + install the update (reporting progress 0..1), then relaunch into the new version. */
-export async function installAndRelaunch(update: Update, onProgress?: (fraction: number) => void): Promise<void> {
-  let total = 0;
-  let downloaded = 0;
-  await update.downloadAndInstall((event) => {
-    switch (event.event) {
-      case "Started":
-        total = event.data.contentLength ?? 0;
-        break;
-      case "Progress":
-        downloaded += event.data.chunkLength;
-        if (total > 0) onProgress?.(Math.min(1, downloaded / total));
-        break;
-      case "Finished":
-        onProgress?.(1);
-        break;
-    }
-  });
-  await relaunch();
+/** Download the new exe (reporting progress 0..1 via the `update-progress` event), replace the
+ *  running binary in place, and relaunch. The app restarts on success, so this normally does not
+ *  resolve. */
+export async function installAndRelaunch(info: UpdateInfo, onProgress?: (fraction: number) => void): Promise<void> {
+  const unlisten = await listen<number>("update-progress", (e) => onProgress?.(e.payload));
+  try {
+    await invoke("install_update", { assetUrl: info.assetUrl });
+  } finally {
+    unlisten();
+  }
 }

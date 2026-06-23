@@ -8,6 +8,7 @@ mod loc;
 mod model;
 mod script;
 mod state;
+mod update;
 
 use state::AppState;
 use std::borrow::Cow;
@@ -26,8 +27,6 @@ fn rel_from_uri(uri: &tauri::http::Uri) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .manage(AppState::new())
         .register_uri_scheme_protocol("twuiimg", |ctx, request| {
             let app = ctx.app_handle();
@@ -70,6 +69,8 @@ pub fn run() {
             commands::serialize_element,
             commands::parse_element,
             commands::list_backgrounds,
+            update::check_update,
+            update::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

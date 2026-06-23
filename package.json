@@ -17,8 +17,6 @@
     "@fontsource/noto-sans-tc": "^5.2.9",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
     "dockview": "^7.0.2",
     "dockview-react": "^7.0.2",
     "immer": "^10.1.1",

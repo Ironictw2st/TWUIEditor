@@ -24,7 +24,7 @@ export default function UpdateBanner() {
   const install = async () => {
     setBusy(true);
     try {
-      await installAndRelaunch(info.update, setProgress);
+      await installAndRelaunch(info, setProgress);
     } catch {
       setBusy(false); // install/relaunch failed; allow retry
     }
