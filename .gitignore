@@ -12,6 +12,10 @@
 /output
 /reference
 
+# Updater signing keys (private key must never be committed; pub is embedded in tauri.conf.json)
+/src-tauri/.tauri-updater.key
+/src-tauri/.tauri-updater.key.pub
+
 # Editor / OS cruft
 .DS_Store
 Thumbs.db

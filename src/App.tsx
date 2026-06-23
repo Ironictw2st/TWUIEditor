@@ -15,6 +15,7 @@ import DockLayout, { dockShowPanel, dockHidePanel } from "./panels/DockLayout";
 import ToolsPanel from "./panels/ToolsPanel";
 import SettingsPanel from "./panels/SettingsPanel";
 import SearchPalette from "./panels/SearchPalette";
+import UpdateBanner from "./panels/UpdateBanner";
 
 const PANEL_TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -209,6 +210,7 @@ export default function App() {
         <DockLayout />
       </div>
       {searchOpen && <SearchPalette onClose={closeSearch} />}
+      {import.meta.env.PROD && <UpdateBanner />}
     </div>
   );
 }
