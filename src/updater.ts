@@ -21,6 +21,25 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   }
 }
 
+/** Verbose check for the manual "Check for updates" button, which (unlike the silent banner)
+ *  needs to distinguish up-to-date from a failed check (offline / dev / no updater config). */
+export type CheckResult =
+  | { status: "available"; info: UpdateInfo }
+  | { status: "current" }
+  | { status: "error"; message: string };
+
+export async function checkForUpdateVerbose(): Promise<CheckResult> {
+  try {
+    const update = await check();
+    if (update && update.available) {
+      return { status: "available", info: { version: update.version, notes: update.body ?? "", update } };
+    }
+    return { status: "current" };
+  } catch (e) {
+    return { status: "error", message: String(e) };
+  }
+}
+
 /** Download + install the update (reporting progress 0..1), then relaunch into the new version. */
 export async function installAndRelaunch(update: Update, onProgress?: (fraction: number) => void): Promise<void> {
   let total = 0;

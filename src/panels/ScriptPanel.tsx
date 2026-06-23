@@ -74,7 +74,7 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
   const tabBtn = (t: Tab, label: string) => (
     <button
       className={`px-2 py-0.5 rounded text-[11px] border ${
-        tab === t ? "bg-accent/30 border-accent" : "bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+        tab === t ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
       }`}
       onClick={() => {
         setTab(t);
@@ -97,7 +97,7 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
             : "fixed z-40 left-1/2 top-12 -translate-x-1/2 w-[680px] max-h-[82vh] flex flex-col bg-panel border border-edge rounded shadow-xl text-[12px]"
         }
       >
-        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f]">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-panelHeader">
           {!embedded && <span className="font-semibold">Script</span>}
           <span className="text-gray-500 truncate">{conn.id ?? "(no script_id)"}</span>
           {override != null && <span className="text-amber-300/80 text-[10px]">· tweaked</span>}
@@ -105,7 +105,7 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
           {tabBtn("clean", "Clean (JSON)")}
           {tabBtn("raw", "Raw (Lua)")}
           {!embedded && (
-            <button className="ml-1 text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose}>
+            <button className="ml-1 text-textMuted hover:text-text text-[14px]" onClick={onClose}>
               ✕
             </button>
           )}
@@ -121,7 +121,7 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
             <div className="flex-1 min-h-0 overflow-hidden p-2">
               {tab === "clean" ? (
                 <textarea
-                  className="w-full h-full min-h-[360px] font-mono text-[11px] leading-snug bg-[#0e0f15] border border-edge rounded px-2 py-1.5 outline-none resize-none whitespace-pre"
+                  className="w-full h-full min-h-[360px] font-mono text-[11px] leading-snug bg-codebg border border-edge rounded px-2 py-1.5 outline-none resize-none whitespace-pre"
                   style={{ tabSize: 2 }}
                   spellCheck={false}
                   value={jsonText}
@@ -129,7 +129,7 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
                 />
               ) : (
                 <textarea
-                  className="w-full h-full min-h-[360px] font-mono text-[11px] leading-snug bg-[#0e0f15] border border-edge rounded px-2 py-1.5 outline-none resize-none whitespace-pre"
+                  className="w-full h-full min-h-[360px] font-mono text-[11px] leading-snug bg-codebg border border-edge rounded px-2 py-1.5 outline-none resize-none whitespace-pre"
                   style={{ tabSize: 4 }}
                   spellCheck={false}
                   value={luaText}
@@ -150,13 +150,13 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
               </span>
               <div className="flex-1" />
               <button
-                className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
+                className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]"
                 onClick={reseed}
               >
                 Revert
               </button>
               <button
-                className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px] disabled:opacity-40"
+                className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px] disabled:opacity-40"
                 onClick={reset}
                 disabled={!override && !draft}
               >

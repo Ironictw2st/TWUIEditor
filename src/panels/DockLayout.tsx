@@ -25,7 +25,7 @@ const TITLES: Record<PanelId, string> = {
 // --- panel content (the dockview panel body) -----------------------------------------------------
 const HierarchyView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><TreePanel /></div>;
 const InspectorView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><InspectorPanel /></div>;
-const VisualizerView = (_p: IDockviewPanelProps) => <div className="h-full bg-[#101118]"><VisualizerPanel /></div>;
+const VisualizerView = (_p: IDockviewPanelProps) => <div className="h-full bg-canvas"><VisualizerPanel /></div>;
 const PerspectiveView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><PerspectivePanel /></div>;
 
 const components = {
@@ -62,7 +62,7 @@ function PanelTab(props: IDockviewPanelHeaderProps) {
     <div className="flex items-center gap-2 px-2 h-full text-[12px]">
       <span className="truncate">{props.api.title ?? TITLES[id]}</span>
       <button
-        className="text-gray-400 hover:text-accent"
+        className="text-textMuted hover:text-accent"
         title="Pop out into its own window"
         onMouseDown={(e) => e.stopPropagation()}
         onClick={pop}

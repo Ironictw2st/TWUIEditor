@@ -20,7 +20,8 @@ import {
   hierarchyRoot,
   parseVec2,
 } from "../twui/doc";
-import { ContextTokens, conditionDecision, contextDecision } from "../twui/context";
+import { ContextTokens } from "../twui/context";
+import { isComponentVisible } from "../twui/visibility";
 import { postTitle } from "../twui/posts";
 import { isTemplated, ResolvedLayer, resolveAgainst, resolveTemplated, templateIdMap } from "../twui/template";
 import { LuaValue } from "../twui/lua";
@@ -36,7 +37,6 @@ import {
   resolveInlineTokens,
   Scope,
   scriptNodes,
-  scriptVisibility,
   toEntries,
 } from "../twui/cco";
 import { cqiRoleOf, portraitImagePath } from "../twui/players";
@@ -268,51 +268,80 @@ function dockFrac(docking: string | undefined): [number, number] {
   return [hf, vf];
 }
 
-function positionChild(parent: Rect, comp: RawElement, w: number, h: number): Rect {
+/** Resize-aware size: when the parent is rendered larger/smaller than its authored
+ *  (design) size, a child grows by the same delta on each axis unless it opts out via
+ *  `allowhorizontalresize`/`allowverticalresize="false"` (the game's resize flags).
+ *  Templated widgets keep their authored pixel size. When parentActual == parentDesign
+ *  (the default resolution), this returns `designChild` unchanged. */
+function resolveSize(
+  comp: RawElement,
+  designChild: { w: number; h: number },
+  parentActual: Rect,
+  parentDesign: { w: number; h: number }
+): { w: number; h: number } {
+  if (isTemplated(comp)) return designChild;
+  const dW = parentActual.w - parentDesign.w;
+  const dH = parentActual.h - parentDesign.h;
+  const hResize = getAttr(comp, "allowhorizontalresize") !== "false";
+  const vResize = getAttr(comp, "allowverticalresize") !== "false";
+  return {
+    w: hResize ? designChild.w + dW : designChild.w,
+    h: vResize ? designChild.h + dH : designChild.h,
+  };
+}
+
+/** Resolution-aware port of `positionChild`. Identical to `positionChild` when the
+ *  parent renders at its design size and the child isn't grown; otherwise it re-applies
+ *  the docking term against the ACTUAL parent/child sizes. The baked `offset` (authored
+ *  at design res) is split back into its docking term + dock_offset nudge so the nudge is
+ *  preserved while the docking term tracks the real parent size — letting edge-docked
+ *  panels follow the screen edges at other resolutions. */
+function positionChildRes(
+  parent: Rect,
+  parentDesign: { w: number; h: number },
+  comp: RawElement,
+  w: number,
+  h: number,
+  designChild: { w: number; h: number }
+): Rect {
   const docking = getAttr(comp, "docking");
   const dockPoint = getAttr(comp, "dock_point");
   const offsetAttr = getAttr(comp, "offset");
   const [ox, oy] = parseVec2(offsetAttr, [0, 0]);
 
-  // Templated instances dock via `dock_point`, and their `offset` is a small nudge
-  // RELATIVE to the dock anchor (e.g. a Top-Right vslider with offset="12,0", a
-  // Center slot with offset="0,5") — NOT a cached absolute position. So apply the
-  // dock term and add the offset; using offset directly would drop the docking and
-  // strand the component near the parent's top-left.
+  // Templated instances: `offset` is a nudge relative to the dock anchor (see positionChild).
   if (docking === undefined && dockPoint !== undefined) {
     const { hf, vf, extAxis } = dockInfo(dockPoint);
     const defAx = extAxis === "h" ? 1 - hf : hf;
     const defAy = extAxis === "v" ? 1 - vf : vf;
     const [ax, ay] = parseVec2(getAttr(comp, "component_anchor_point"), [defAx, defAy]);
+    return { x: parent.x + hf * parent.w - ax * w + ox, y: parent.y + vf * parent.h - ay * h + oy, w, h };
+  }
+
+  // Regular component with a baked `offset`: recover the dock_offset nudge at design res
+  // (offset − dockingTerm(designParent, designChild)) and re-apply the docking term against
+  // the actual sizes. Reduces exactly to `parent + offset` when actual == design.
+  if (offsetAttr !== undefined) {
+    const { hf, vf, extAxis } = dockInfo(docking);
+    const defAx = extAxis === "h" ? 1 - hf : hf;
+    const defAy = extAxis === "v" ? 1 - vf : vf;
+    const [ax, ay] = parseVec2(getAttr(comp, "component_anchor_point"), [defAx, defAy]);
+    const dockOffX = ox - (hf * parentDesign.w - ax * designChild.w);
+    const dockOffY = oy - (vf * parentDesign.h - ay * designChild.h);
     return {
-      x: parent.x + hf * parent.w - ax * w + ox,
-      y: parent.y + vf * parent.h - ay * h + oy,
+      x: parent.x + hf * parent.w - ax * w + dockOffX,
+      y: parent.y + vf * parent.h - ay * h + dockOffY,
       w,
       h,
     };
   }
 
-  // Regular components: `offset` is the child's top-left relative to the parent's
-  // top-left and ALREADY bakes in docking/anchor (the editor's cached layout
-  // position, equal to `dockingTerm + dock_offset`). Use it directly — applying the
-  // docking term again double-counts (shifts components off their spot).
-  if (offsetAttr !== undefined) {
-    return { x: parent.x + ox, y: parent.y + oy, w, h };
-  }
-
-  // No explicit offset: derive position purely from docking + anchor.
-  // `dock_offset` is the editor's CACHED value and is unreliable (e.g. the topbar
-  // container has dock_offset="-426" but should sit at top-left) — never apply it.
+  // No offset: pure docking + anchor against the actual parent/child sizes.
   const { hf, vf, extAxis } = dockInfo(docking);
   const defAx = extAxis === "h" ? 1 - hf : hf;
   const defAy = extAxis === "v" ? 1 - vf : vf;
   const [ax, ay] = parseVec2(getAttr(comp, "component_anchor_point"), [defAx, defAy]);
-  return {
-    x: parent.x + hf * parent.w - ax * w,
-    y: parent.y + vf * parent.h - ay * h,
-    w,
-    h,
-  };
+  return { x: parent.x + hf * parent.w - ax * w, y: parent.y + vf * parent.h - ay * h, w, h };
 }
 
 type Templates = Record<string, TwuiDocument>;
@@ -455,13 +484,6 @@ function characterPortrait(comp: RawElement, scope: Scope): string | null {
   return portraitImagePath(portrait, sizeType);
 }
 
-/** A component is hidden when EITHER its tag or its active state says so. */
-function isVisible(comp: RawElement, state: RawElement | undefined): boolean {
-  const hidden = (el: RawElement | undefined) =>
-    !!el && (getAttr(el, "visible") === "false" || getAttr(el, "is_visible") === "false");
-  return !hidden(comp) && !hidden(state);
-}
-
 function intersectRect(a: Rect | null, b: Rect): Rect {
   if (!a) return b;
   const x = Math.max(a.x, b.x);
@@ -539,7 +561,8 @@ export function computeLayout(
   ccoShorthand?: CcoShorthand | null,
   componentDataPacks: Record<string, LuaValue> = {},
   measureText?: MeasureText,
-  posts?: MinisterialPosition[]
+  posts?: MinisterialPosition[],
+  renderResolution?: { w: number; h: number } | null
 ): LayoutResult {
   activeMeasureText = measureText;
   const items: RenderItem[] = [];
@@ -585,11 +608,15 @@ export function computeLayout(
 
   const rootComp = cmap.get(guidOf(root) ?? "");
   const rootState = rootComp ? activeState(rootComp) : undefined;
+  // The root's authored state size is the design resolution; the canvas renders at the
+  // chosen target resolution (or the design size when unset). Components reflow against the
+  // delta between the two (see resolveSize/positionChildRes) — at the design size it's a no-op.
+  const rootDesign = { w: num(rootState, "width", 1920), h: num(rootState, "height", 1080) };
   const canvas: Rect = {
     x: 0,
     y: 0,
-    w: num(rootState, "width", 1920),
-    h: num(rootState, "height", 1080),
+    w: renderResolution?.w ?? rootDesign.w,
+    h: renderResolution?.h ?? rootDesign.h,
   };
 
   // Root binding scope: the connected script's data pack drives list population
@@ -619,25 +646,7 @@ export function computeLayout(
     comp: RawElement,
     state: RawElement | undefined,
     scope: Scope
-  ): boolean => {
-    const g = guidOf(comp);
-    if (g && sim) {
-      if (sim.hide.includes(g)) return false;
-      if (sim.show.includes(g)) return true;
-    }
-    const sv = scriptVisibility(comp, scope);
-    if (sv === "show") return true;
-    if (sv === "hide") return false;
-    if (ctx) {
-      if (conditionDecision(comp, ctx) === "hide") return false;
-      if (tokens) {
-        const d = contextDecision(getAttr(comp, "id"), ctx, tokens);
-        if (d === "show") return true;
-        if (d === "hide") return false;
-      }
-    }
-    return isVisible(comp, state);
-  };
+  ): boolean => isComponentVisible(comp, state, scope, ctx, tokens, sim);
 
   const pushItem = (
     hierNode: RawElement,
@@ -776,12 +785,15 @@ export function computeLayout(
     clip: Rect | null,
     scope: Scope,
     cmap: Map<string, RawElement>,
-    lDoc: TwuiDocument
+    lDoc: TwuiDocument,
+    childDesign: { w: number; h: number }
   ): number => {
     pushItem(child, comp, state, rect, parentRect, depth, clip, scope, cmap, lDoc);
     const childClip =
       getAttr(comp, "clipchildren") === "true" ? intersectRect(clip, rect) : clip;
-    const sub = recurse(child, rect, depth + 1, childClip, scope, cmap, lDoc);
+    // Pass the child's DESIGN size (not its possibly-grown rect) so a fixed-size panel's
+    // subtree renders at design (delta 0) while a resized container's children reflow.
+    const sub = recurse(child, rect, depth + 1, childClip, scope, cmap, lDoc, childDesign);
     return Math.max(rect.y + rect.h, sub);
   };
 
@@ -819,7 +831,10 @@ export function computeLayout(
     if (!le || getAttr(le, "sizetocontent") !== "true") return undefined;
     if (callbacks(comp).some((c) => c.id === "List" || c.id === "ContextList")) return undefined;
     const visible = buildVisible(hierNode, scope, cm);
-    if (!visible.length) return undefined;
+    // A sizetocontent container with no visible children collapses to zero (it has no content),
+    // so a parent's LayoutEngine reserves no slot for it — rather than falling back to its state
+    // size, which would leave a phantom gap (e.g. an all-hidden dlc_buttons keeping its 490px).
+    if (!visible.length) return { w: 0, h: 0 };
     const st = activeState(comp);
     const box = { x: 0, y: 0, w: num(st, "width", 0), h: num(st, "height", 0) };
     const anchored = getAttr(comp, "component_anchor_point") !== undefined;
@@ -843,7 +858,8 @@ export function computeLayout(
     clip: Rect | null,
     scope: Scope,
     cmap: Map<string, RawElement>,
-    lDoc: TwuiDocument
+    lDoc: TwuiDocument,
+    parentDesign: { w: number; h: number }
   ): number => {
     const comp = cmap.get(guidOf(hierNode) ?? "");
     const children = elementChildren(hierNode);
@@ -897,7 +913,7 @@ export function computeLayout(
           // to its 1920×1080 canvas) is irrelevant once embedded.
           const { w, h } = sizeFor(wcomp, st, origin, templates);
           track(
-            emit(widget, wcomp, st, { x: origin.x, y: origin.y, w, h }, origin, depth, clip, wscope, subCmap, sub)
+            emit(widget, wcomp, st, { x: origin.x, y: origin.y, w, h }, origin, depth, clip, wscope, subCmap, sub, { w, h })
           );
         }
         return finish();
@@ -924,13 +940,13 @@ export function computeLayout(
         }));
         if (le) {
           for (const p of layoutEngine(le, instances, origin, templates)) {
-            track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc));
+            track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }));
           }
         } else {
           let y = origin.y;
           for (const inst of instances) {
             const { w, h } = sizeFor(inst.comp, inst.state, origin, templates);
-            track(emit(inst.node, inst.comp, inst.state, { x: origin.x, y, w, h }, origin, depth, clip, inst.scope, cmap, lDoc));
+            track(emit(inst.node, inst.comp, inst.state, { x: origin.x, y, w, h }, origin, depth, clip, inst.scope, cmap, lDoc, { w, h }));
             y += h;
           }
         }
@@ -946,18 +962,28 @@ export function computeLayout(
       // Anchored containers (e.g. the court `holder`) shrink to content and re-centre per their
       // anchor; non-anchored ones (rows/tiers) honour each static child's cached offset instead.
       const anchored = !!comp && getAttr(comp, "component_anchor_point") !== undefined;
-      let placed = layoutEngine(le, visible, origin, templates, !anchored, containerContentSize, cmap);
+      // When some siblings are script/context-hidden, the survivors' cached offsets no longer pack
+      // (they leave gaps), so fall back to cumulative stacking. Fully-visible containers keep
+      // honouring offsets — zero behaviour change unless something is actually hidden.
+      const renderable = children.filter((c) => cmap.get(guidOf(c) ?? "")).length;
+      const hasHidden = visible.length < renderable;
+      let placed = layoutEngine(le, visible, origin, templates, !anchored && !hasHidden, containerContentSize, cmap);
       if (comp && anchored) placed = recenterSizeToContent(placed, le, comp, origin);
       for (const p of placed) {
-        track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc));
+        track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }));
       }
       return finish();
     }
 
+    // Static children: size at the parent's DESIGN dimensions, then grow per the parent's
+    // render-vs-design delta (resolveSize) and position against the actual parent (positionChildRes).
+    // At the design resolution these reduce to the old sizeFor/positionChild path exactly.
+    const parentDesignRect: Rect = { x: 0, y: 0, w: parentDesign.w, h: parentDesign.h };
     for (const { node, comp: cc, state, scope: cs } of visible) {
-      const { w, h } = sizeFor(cc, state, origin, templates);
-      const rect = positionChild(origin, cc, w, h);
-      track(emit(node, cc, state, rect, origin, depth, clip, cs, cmap, lDoc));
+      const designChild = sizeFor(cc, state, parentDesignRect, templates);
+      const { w, h } = resolveSize(cc, designChild, origin, parentDesign);
+      const rect = positionChildRes(origin, parentDesign, cc, w, h, designChild);
+      track(emit(node, cc, state, rect, origin, depth, clip, cs, cmap, lDoc, designChild));
     }
     return finish();
   };
@@ -966,7 +992,7 @@ export function computeLayout(
   if (rootComp) {
     pushItem(root, rootComp, rootState, canvas, canvas, 0, null, rootScope, cmap, doc);
     const rootClip = getAttr(rootComp, "clipchildren") === "true" ? canvas : null;
-    recurse(root, canvas, 1, rootClip, rootScope, cmap, doc);
+    recurse(root, canvas, 1, rootClip, rootScope, cmap, doc, rootDesign);
   }
 
   // Wire rendered vsliders to the scrollable they control and turn each slider's

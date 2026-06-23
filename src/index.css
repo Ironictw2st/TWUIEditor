@@ -2,6 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Semantic colour tokens, stored as space-separated RGB channels so Tailwind can
+ * compose opacity modifiers (e.g. bg-accent/30) via the rgb(var(--x) / <alpha>) form
+ * in tailwind.config.js. Dark is the default (:root); light overrides via the
+ * data-theme="light" attribute that src/theme.ts sets on <html>. --accent is
+ * overwritten at runtime from settings.theme.accent. */
+:root {
+  --bg: 21 22 28;
+  --panel: 30 31 38;
+  --panel-alt: 38 40 51;
+  --panel-header: 35 37 47;
+  --canvas: 16 17 24;
+  --edge: 52 55 74;
+  --accent: 201 162 39;
+  --text: 230 230 236;
+  --text-muted: 154 160 173;
+  --hover: 52 56 73;
+  --button: 42 45 58;
+  --button-hover: 52 56 73;
+  --sunken: 12 13 18;
+  --code-bg: 14 15 21;
+  --scrollbar: 58 61 79;
+  --selected: 59 58 31;
+  --drop: 44 61 44;
+
+  font-size: 16px;
+}
+
+:root[data-theme="light"] {
+  --bg: 244 245 247;
+  --panel: 255 255 255;
+  --panel-alt: 236 238 242;
+  --panel-header: 231 233 238;
+  --canvas: 217 219 225;
+  --edge: 210 213 221;
+  --text: 28 30 38;
+  --text-muted: 92 98 112;
+  --hover: 227 230 236;
+  --button: 233 235 240;
+  --button-hover: 220 223 230;
+  --sunken: 240 241 244;
+  --code-bg: 246 247 249;
+  --scrollbar: 194 197 207;
+  --selected: 243 237 201;
+  --drop: 216 236 216;
+}
+
+/* Density: Tailwind spacing/gaps are rem-based, so scaling the root font-size
+ * tightens the whole UI uniformly. px-pinned font sizes are unaffected. */
+:root[data-density="compact"] {
+  font-size: 14px;
+}
+
 html,
 body,
 #root {
@@ -10,8 +62,8 @@ body,
 }
 
 body {
-  background: #15161c;
-  color: #e6e6ec;
+  background: rgb(var(--bg));
+  color: rgb(var(--text));
   font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
   font-size: 13px;
   overflow: hidden;
@@ -26,7 +78,7 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3a3d4f;
+  background: rgb(var(--scrollbar));
   border-radius: 5px;
 }
 ::-webkit-scrollbar-track {
@@ -35,17 +87,17 @@ body {
 
 input,
 select {
-  background: #15161c;
-  border: 1px solid #34374a;
+  background: rgb(var(--bg));
+  border: 1px solid rgb(var(--edge));
   border-radius: 4px;
-  color: #e6e6ec;
+  color: rgb(var(--text));
   padding: 2px 6px;
   font-size: 12px;
   outline: none;
 }
 input:focus,
 select:focus {
-  border-color: #c9a227;
+  border-color: rgb(var(--accent));
 }
 button {
   cursor: pointer;
@@ -53,35 +105,35 @@ button {
 
 /* Match the dockview (abyss) theme to the app palette. The descendant selector outranks
  * dockview's own `.dockview-theme-abyss` rule, so these CSS variables win and cascade to its
- * tabs / borders / resize handles. Palette: panel #1e1f26, edge #34374a, accent #c9a227, canvas
- * #101118, header #23252f. */
+ * tabs / borders / resize handles. They reference the semantic tokens so dockview flips with
+ * the active theme. */
 .twui-dock .dockview-theme-abyss {
-  --dv-color-abyss-dark: #101118; /* group / empty area background (canvas) */
-  --dv-color-abyss: #23252f; /* tab bar + inactive tab background (panel header) */
-  --dv-color-abyss-light: #1e1f26; /* active tab background (panel body) */
-  --dv-color-abyss-lighter: #34374a; /* separators / tab dividers (edge) */
-  --dv-color-abyss-accent: #c9a227;
-  --dv-color-abyss-primary-text: #e6e6ec;
-  --dv-color-abyss-secondary-text: #9aa0ad;
+  --dv-color-abyss-dark: rgb(var(--canvas)); /* group / empty area background (canvas) */
+  --dv-color-abyss: rgb(var(--panel-header)); /* tab bar + inactive tab background (panel header) */
+  --dv-color-abyss-light: rgb(var(--panel)); /* active tab background (panel body) */
+  --dv-color-abyss-lighter: rgb(var(--edge)); /* separators / tab dividers (edge) */
+  --dv-color-abyss-accent: rgb(var(--accent));
+  --dv-color-abyss-primary-text: rgb(var(--text));
+  --dv-color-abyss-secondary-text: rgb(var(--text-muted));
 
-  --dv-tabs-and-actions-container-background-color: #23252f;
-  --dv-group-view-background-color: #1e1f26;
-  --dv-activegroup-visiblepanel-tab-background-color: #1e1f26;
-  --dv-activegroup-hiddenpanel-tab-background-color: #23252f;
-  --dv-inactivegroup-visiblepanel-tab-background-color: #23252f;
-  --dv-inactivegroup-hiddenpanel-tab-background-color: #23252f;
-  --dv-activegroup-visiblepanel-tab-color: #e6e6ec;
-  --dv-activegroup-hiddenpanel-tab-color: rgba(230, 230, 236, 0.5);
-  --dv-inactivegroup-visiblepanel-tab-color: rgba(230, 230, 236, 0.55);
-  --dv-inactivegroup-hiddenpanel-tab-color: rgba(230, 230, 236, 0.3);
+  --dv-tabs-and-actions-container-background-color: rgb(var(--panel-header));
+  --dv-group-view-background-color: rgb(var(--panel));
+  --dv-activegroup-visiblepanel-tab-background-color: rgb(var(--panel));
+  --dv-activegroup-hiddenpanel-tab-background-color: rgb(var(--panel-header));
+  --dv-inactivegroup-visiblepanel-tab-background-color: rgb(var(--panel-header));
+  --dv-inactivegroup-hiddenpanel-tab-background-color: rgb(var(--panel-header));
+  --dv-activegroup-visiblepanel-tab-color: rgb(var(--text));
+  --dv-activegroup-hiddenpanel-tab-color: rgb(var(--text-muted));
+  --dv-inactivegroup-visiblepanel-tab-color: rgb(var(--text-muted));
+  --dv-inactivegroup-hiddenpanel-tab-color: rgb(var(--text-muted));
 
-  --dv-separator-border: #34374a;
-  --dv-tab-divider-color: #34374a;
-  --dv-paneview-header-border-color: #34374a;
+  --dv-separator-border: rgb(var(--edge));
+  --dv-tab-divider-color: rgb(var(--edge));
+  --dv-paneview-header-border-color: rgb(var(--edge));
   --dv-sash-color: transparent;
-  --dv-active-sash-color: #c9a227;
-  --dv-paneview-active-outline-color: #c9a227;
-  --dv-drag-over-background-color: rgba(201, 162, 39, 0.15);
-  --dv-drag-over-border-color: #c9a227;
-  --dv-icon-hover-background-color: rgba(201, 162, 39, 0.18);
+  --dv-active-sash-color: rgb(var(--accent));
+  --dv-paneview-active-outline-color: rgb(var(--accent));
+  --dv-drag-over-background-color: rgb(var(--accent) / 0.15);
+  --dv-drag-over-border-color: rgb(var(--accent));
+  --dv-icon-hover-background-color: rgb(var(--accent) / 0.18);
 }

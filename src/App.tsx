@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./state/store";
 import type { PanelId } from "./state/store";
 import { PANEL_IDS } from "./state/store";
@@ -32,10 +31,9 @@ function Logo() {
 function Toolbar() {
   const {
     init,
-    openFile,
+    openFileDialog,
     save: saveFile,
-    saveAs,
-    dataRoot,
+    saveAsDialog,
     games,
     game,
     setGame,
@@ -48,45 +46,28 @@ function Toolbar() {
     init();
   }, [init]);
 
-  const onOpen = async () => {
-    const path = await open({
-      multiple: false,
-      filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
-      defaultPath: dataRoot ?? undefined,
-    });
-    if (typeof path === "string") openFile(path);
-  };
-
-  const onSaveAs = async () => {
-    const path = await save({
-      filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
-      defaultPath: dataRoot ?? undefined,
-    });
-    if (path) saveAs(path);
-  };
-
   const [showTools, setShowTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const btn =
-    "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px] disabled:opacity-40";
+    "px-2.5 py-1 rounded bg-button hover:bg-buttonHover border border-edge text-[12px] disabled:opacity-40";
 
   return (
     <div className="flex items-center gap-2 px-3 h-11 border-b border-edge bg-panel shrink-0">
       <Logo />
-      <button className={btn} onClick={onOpen}>
+      <button className={btn} onClick={() => openFileDialog()}>
         Open…
       </button>
       <button className={btn} onClick={() => saveFile()} disabled={!fileName}>
         Save
       </button>
-      <button className={btn} onClick={onSaveAs} disabled={!fileName}>
+      <button className={btn} onClick={() => saveAsDialog()} disabled={!fileName}>
         Save As…
       </button>
       <div className="w-px h-5 bg-edge mx-1" />
       {games.length > 0 && (
         <select
-          className="px-2 py-1 rounded bg-[#2a2d3a] border border-edge text-[12px]"
+          className="px-2 py-1 rounded bg-button border border-edge text-[12px]"
           value={game ?? ""}
           onChange={(e) => setGame(e.target.value)}
           title="Active game (games/ folder)"
@@ -126,7 +107,7 @@ function PanelsMenu() {
   const [open, setOpen] = useState(false);
   const docked = useStore((s) => s.dockedPanels);
   const popped = useStore((s) => s.poppedPanels);
-  const btn = "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px]";
+  const btn = "px-2.5 py-1 rounded bg-button hover:bg-buttonHover border border-edge text-[12px]";
 
   const toggle = (id: PanelId) => {
     if (popped[id]) {
@@ -149,13 +130,13 @@ function PanelsMenu() {
       {open && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute z-40 mt-1 left-0 w-44 rounded-md bg-[#0c0d12] border border-edge shadow-xl p-1">
+          <div className="absolute z-40 mt-1 left-0 w-44 rounded-md bg-sunken border border-edge shadow-xl p-1">
             {PANEL_IDS.map((id) => {
               const state = popped[id] ? "window" : docked.includes(id) ? "shown" : "hidden";
               return (
                 <button
                   key={id}
-                  className="w-full flex items-center gap-2 text-left px-2 py-1 rounded text-[11px] text-gray-200 hover:bg-[#23252f]"
+                  className="w-full flex items-center gap-2 text-left px-2 py-1 rounded text-[11px] text-text hover:bg-panelHeader"
                   onClick={() => toggle(id)}
                 >
                   <span className={`w-2 h-2 rounded-full shrink-0 ${state === "shown" ? "bg-accent" : "border border-gray-600"}`} />
@@ -176,7 +157,7 @@ function PanelWindow({ panel }: { panel: PanelId }) {
   if (panel === "hierarchy") return <div className="h-full flex flex-col bg-panel">{<TreePanel />}</div>;
   if (panel === "inspector") return <div className="h-full flex flex-col bg-panel">{<InspectorPanel />}</div>;
   if (panel === "perspective") return <div className="h-full overflow-auto bg-panel">{<PerspectivePanel />}</div>;
-  return <div className="h-full bg-[#101118]">{<VisualizerPanel />}</div>;
+  return <div className="h-full bg-canvas">{<VisualizerPanel />}</div>;
 }
 
 export default function App() {

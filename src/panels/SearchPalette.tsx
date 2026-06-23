@@ -63,7 +63,7 @@ export default function SearchPalette({ onClose }: { onClose: () => void }) {
   const toggle = (m: "find" | "refs", label: string, disabled?: boolean) => (
     <button
       className={`px-2 py-0.5 rounded text-[11px] border disabled:opacity-40 ${
-        mode === m ? "bg-accent/30 border-accent" : "bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+        mode === m ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
       }`}
       disabled={disabled}
       onClick={() => openSearch(m)}
@@ -76,13 +76,13 @@ export default function SearchPalette({ onClose }: { onClose: () => void }) {
     <>
       <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
       <div className="fixed z-40 left-1/2 top-16 -translate-x-1/2 w-[560px] max-h-[70vh] flex flex-col bg-panel border border-edge rounded shadow-xl text-[12px]">
-        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f]">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-panelHeader">
           <span className="font-semibold">Go to component</span>
           <div className="flex-1" />
           {toggle("find", "Find")}
           {toggle("refs", "References", !selectedGuid)}
           <button
-            className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
+            className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]"
             onClick={onClose}
           >
             Close
@@ -104,7 +104,7 @@ export default function SearchPalette({ onClose }: { onClose: () => void }) {
         ) : (
           <div
             ref={refsRef}
-            className="px-3 py-2 border-b border-edge text-[11px] text-gray-400 outline-none"
+            className="px-3 py-2 border-b border-edge text-[11px] text-textMuted outline-none"
             onKeyDown={onKeyDown}
             tabIndex={0}
           >
@@ -123,13 +123,13 @@ export default function SearchPalette({ onClose }: { onClose: () => void }) {
             results.map((hit, i) => (
               <div
                 key={hit.guid}
-                className={`px-3 py-1 cursor-pointer ${i === hi ? "bg-accent/20" : "hover:bg-[#23252f]"}`}
+                className={`px-3 py-1 cursor-pointer ${i === hi ? "bg-accent/20" : "hover:bg-panelHeader"}`}
                 onMouseEnter={() => setHi(i)}
                 onClick={() => choose(hit)}
               >
                 <div className="flex items-baseline gap-2">
                   <span className={`text-[12px] truncate ${hit.hidden ? "opacity-50" : ""}`}>{hit.tag}</span>
-                  {hit.id && <span className="text-[11px] text-gray-400 truncate">{hit.id}</span>}
+                  {hit.id && <span className="text-[11px] text-textMuted truncate">{hit.id}</span>}
                   <div className="flex-1" />
                   <span className="text-[10px] text-gray-600 shrink-0">{MATCH_LABEL[hit.matchKind]}</span>
                 </div>

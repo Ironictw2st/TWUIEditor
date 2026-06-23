@@ -10,8 +10,9 @@ import {
   formatBinding,
   normalizeEvent,
 } from "../keybinds";
+import { checkForUpdateVerbose, installAndRelaunch, type CheckResult } from "../updater";
 
-type Category = "game" | "keybinds" | "perspective" | "visualizer" | "editor" | "theme";
+type Category = "game" | "keybinds" | "perspective" | "visualizer" | "editor" | "theme" | "about";
 
 const CATEGORIES: { id: Category; label: string }[] = [
   { id: "game", label: "Game & Data" },
@@ -20,18 +21,19 @@ const CATEGORIES: { id: Category; label: string }[] = [
   { id: "visualizer", label: "Visualizer" },
   { id: "editor", label: "Editor" },
   { id: "theme", label: "Theme" },
+  { id: "about", label: "About / Updates" },
 ];
 
 const btn =
-  "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px] disabled:opacity-40";
-const sel = "bg-[#15161c] border border-edge rounded text-[12px] px-1.5 py-1";
+  "px-2.5 py-1 rounded bg-button hover:bg-buttonHover border border-edge text-[12px] disabled:opacity-40";
+const sel = "bg-bg border border-edge rounded text-[12px] px-1.5 py-1";
 
 /** A labelled row: caption on the left, control on the right. */
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-3 mb-2.5">
       <div className="w-44 shrink-0">
-        <div className="text-[12px] text-gray-200">{label}</div>
+        <div className="text-[12px] text-text">{label}</div>
         {hint && <div className="text-[10px] text-gray-500">{hint}</div>}
       </div>
       <div className="flex-1 min-w-0">{children}</div>
@@ -41,7 +43,7 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="inline-flex items-center gap-2 cursor-pointer text-[12px] text-gray-300">
+    <label className="inline-flex items-center gap-2 cursor-pointer text-[12px] text-text">
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span>{checked ? "On" : "Off"}</span>
     </label>
@@ -76,7 +78,7 @@ function KeyCaptureField({ binding, onCapture }: { binding: string; onCapture: (
   return (
     <button
       className={`px-2 py-0.5 rounded text-[11px] border min-w-[96px] ${
-        capturing ? "bg-accent/30 border-accent" : "bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+        capturing ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
       }`}
       onClick={() => setCapturing((c) => !c)}
       title={capturing ? "Press a key combination, or Esc to cancel" : "Click to rebind"}
@@ -120,7 +122,7 @@ function GameSection() {
           <button className={btn} onClick={pick}>
             Change…
           </button>
-          <span className="text-[11px] text-gray-400 truncate">{dataRoot ?? "not set"}</span>
+          <span className="text-[11px] text-textMuted truncate">{dataRoot ?? "not set"}</span>
         </div>
       </Row>
     </div>
@@ -152,7 +154,7 @@ function KeybindsSection() {
             const overridden = a.id in keybinds;
             return (
               <div key={a.id} className="flex items-center gap-3 mb-1.5">
-                <span className="w-44 shrink-0 text-[12px] text-gray-200">{a.label}</span>
+                <span className="w-44 shrink-0 text-[12px] text-text">{a.label}</span>
                 {a.kind === "mouse" ? (
                   <select
                     className={sel}
@@ -343,8 +345,18 @@ function ThemeSection() {
   const patch = (p: Partial<typeof theme>) => updateSettings({ theme: { ...theme, ...p } });
   return (
     <div>
-      <SectionTitle>Theme & density</SectionTitle>
-      <p className="text-[11px] text-gray-500 mb-3">Saved for a future release; no visual effect yet.</p>
+      <SectionTitle>Appearance</SectionTitle>
+      <Row label="Colour scheme">
+        <select
+          className={sel}
+          value={theme.mode}
+          onChange={(e) => patch({ mode: e.target.value as "system" | "light" | "dark" })}
+        >
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </Row>
       <Row label="Accent colour">
         <input type="color" value={theme.accent} onChange={(e) => patch({ accent: e.target.value })} />
       </Row>
@@ -362,13 +374,92 @@ function ThemeSection() {
   );
 }
 
+function UpdatesSection() {
+  const [result, setResult] = useState<CheckResult | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  const check = async () => {
+    setChecking(true);
+    setResult(null);
+    const r = await checkForUpdateVerbose();
+    setResult(r);
+    setChecking(false);
+  };
+
+  const install = async () => {
+    if (result?.status !== "available") return;
+    setBusy(true);
+    try {
+      await installAndRelaunch(result.info.update, setProgress);
+    } catch {
+      setBusy(false); // install/relaunch failed; allow retry
+    }
+  };
+
+  return (
+    <div>
+      <SectionTitle>Updates</SectionTitle>
+      {import.meta.env.DEV && (
+        <p className="text-[11px] text-gray-500 mb-3">
+          Auto-update runs only in installed builds; a check here in dev will report an error.
+        </p>
+      )}
+      <Row label="Application updates" hint="Downloaded from the official signed release">
+        <button className={btn} onClick={check} disabled={checking || busy}>
+          {checking ? "Checking…" : "Check for updates"}
+        </button>
+      </Row>
+
+      {result?.status === "current" && (
+        <p className="text-[12px] text-textMuted">You're running the latest version.</p>
+      )}
+      {result?.status === "error" && (
+        <p className="text-[12px] text-amber-300/80">
+          Update check failed.
+          <span className="block text-[10px] text-gray-500 mt-0.5 break-words">{result.message}</span>
+        </p>
+      )}
+      {result?.status === "available" && (
+        <div className="rounded border border-accent/50 bg-accent/10 p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="font-semibold text-accent">Update available</span>
+            <span className="text-textMuted">v{result.info.version}</span>
+          </div>
+          {result.info.notes && (
+            <div className="text-[11px] text-textMuted max-h-32 overflow-auto whitespace-pre-wrap mb-2">
+              {result.info.notes}
+            </div>
+          )}
+          {busy ? (
+            <div>
+              <div className="h-1.5 rounded bg-button overflow-hidden">
+                <div className="h-full bg-accent transition-[width]" style={{ width: `${Math.round(progress * 100)}%` }} />
+              </div>
+              <div className="text-[10px] text-gray-500 mt-1">Downloading… {Math.round(progress * 100)}%</div>
+            </div>
+          ) : (
+            <button
+              className="px-2.5 py-1 rounded bg-accent/30 hover:bg-accent/40 border border-accent text-[11px]"
+              onClick={install}
+            >
+              Install &amp; Restart
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [cat, setCat] = useState<Category>("game");
   return (
     <>
       <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
       <div className="fixed z-40 left-1/2 top-12 -translate-x-1/2 w-[760px] max-h-[82vh] flex flex-col bg-panel border border-edge rounded shadow-xl text-[12px]">
-        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f]">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-panelHeader">
           <span className="font-semibold">Settings</span>
           <div className="flex-1" />
           <button className={btn} onClick={onClose}>
@@ -381,7 +472,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
               <button
                 key={c.id}
                 className={`w-full text-left px-3 py-1.5 text-[12px] ${
-                  cat === c.id ? "bg-accent/20 text-accent border-l-2 border-accent" : "text-gray-300 hover:bg-[#272a36] border-l-2 border-transparent"
+                  cat === c.id ? "bg-accent/20 text-accent border-l-2 border-accent" : "text-text hover:bg-panelAlt border-l-2 border-transparent"
                 }`}
                 onClick={() => setCat(c.id)}
               >
@@ -396,6 +487,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             {cat === "visualizer" && <VisualizerSection />}
             {cat === "editor" && <EditorSection />}
             {cat === "theme" && <ThemeSection />}
+            {cat === "about" && <UpdatesSection />}
           </div>
         </div>
       </div>

@@ -81,8 +81,8 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
   const body = (
     <>
       <div className="px-3 py-2 border-b border-edge">
-        <span className="text-gray-400">Faction (from Perspective): </span>
-        <span className="text-gray-100">{factionName}</span>
+        <span className="text-textMuted">Faction (from Perspective): </span>
+        <span className="text-text">{factionName}</span>
       </div>
 
       <div className="px-3 py-3">
@@ -100,7 +100,7 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
               </div>
               {roles.map((role) => (
                 <div key={role} className="flex items-start gap-2">
-                  <div className="w-12 h-12 shrink-0 bg-[#0c0d12] border border-edge rounded overflow-hidden flex items-center justify-center">
+                  <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded overflow-hidden flex items-center justify-center">
                     {portraitFor(role) ? (
                       <img
                         src={portraitFor(role)!}
@@ -113,7 +113,7 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-gray-300 mb-1">{roleLabel(role)}</div>
+                    <div className="text-text mb-1">{roleLabel(role)}</div>
                     <div className="flex items-center gap-1">
                       <TemplatePicker
                         role={role}
@@ -123,7 +123,7 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
                       />
                       {characters[role] && (
                         <button
-                          className="px-1.5 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge"
+                          className="px-1.5 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge"
                           onClick={() => setCharacter(role, null)}
                           title="Clear"
                         >
@@ -146,10 +146,10 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
     <>
       <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
       <div className="fixed z-40 left-1/2 top-16 -translate-x-1/2 w-[520px] max-h-[75vh] overflow-auto bg-panel border border-edge rounded shadow-xl text-[12px]">
-        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f] sticky top-0">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-panelHeader sticky top-0">
           <span className="font-semibold">Characters</span>
           <div className="flex-1" />
-          <button className="text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose} title="Close">
+          <button className="text-textMuted hover:text-text text-[14px]" onClick={onClose} title="Close">
             ✕
           </button>
         </div>

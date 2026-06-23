@@ -17,8 +17,23 @@ export default function PerspectivePanel() {
   const setBackground = useStore((s) => s.setBackground);
   const showBounds = useStore((s) => s.showBounds);
   const setShowBounds = useStore((s) => s.setShowBounds);
+  const renderResolution = useStore((s) => s.renderResolution);
+  const setRenderResolution = useStore((s) => s.setRenderResolution);
 
-  const sel = "w-full bg-[#15161c] border border-edge rounded text-[11px] px-1.5 py-0.5";
+  // Render resolution: "root" = the file's authored design size (no reflow), "auto" = the
+  // monitor resolution, plus common presets. Edge-docked panels reflow at non-root sizes.
+  const resPresets = ["1920x1080", "2560x1440", "3840x2160", "1600x900"];
+  const resValue = renderResolution ? `${renderResolution.w}x${renderResolution.h}` : "root";
+  const onResChange = (v: string) => {
+    if (v === "root") setRenderResolution(null);
+    else if (v === "auto") setRenderResolution({ w: window.screen.width, h: window.screen.height });
+    else {
+      const [w, h] = v.split("x").map(Number);
+      if (w > 0 && h > 0) setRenderResolution({ w, h });
+    }
+  };
+
+  const sel = "w-full bg-bg border border-edge rounded text-[11px] px-1.5 py-0.5";
   const lbl = "text-[10px] text-gray-500 uppercase tracking-wide";
 
   const hasDb = !!db && db.factions.length > 0;
@@ -74,12 +89,32 @@ export default function PerspectivePanel() {
         "Bounds",
         <button
           className={`w-full px-1.5 py-0.5 rounded border text-[11px] ${
-            showBounds ? "bg-accent/30 border-accent" : "bg-[#15161c] border-edge hover:bg-[#23252f]"
+            showBounds ? "bg-accent/30 border-accent" : "bg-bg border-edge hover:bg-panelHeader"
           }`}
           onClick={() => setShowBounds(!showBounds)}
         >
           {showBounds ? "On" : "Off"}
         </button>
+      )}
+      {cell(
+        "Resolution",
+        <select
+          className={sel}
+          value={resValue}
+          onChange={(e) => onResChange(e.target.value)}
+          title="Render resolution — 'Root' is the file's authored design size (no reflow); other sizes reflow edge-docked panels like the game does at that screen resolution."
+        >
+          <option value="root">Root (authored)</option>
+          <option value="auto">Auto (monitor)</option>
+          {resPresets.map((p) => (
+            <option key={p} value={p}>
+              {p.replace("x", " × ")}
+            </option>
+          ))}
+          {renderResolution && !resPresets.includes(resValue) && (
+            <option value={resValue}>{resValue.replace("x", " × ")}</option>
+          )}
+        </select>
       )}
     </div>
   );

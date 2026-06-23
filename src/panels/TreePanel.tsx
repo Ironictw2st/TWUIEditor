@@ -9,6 +9,8 @@ import {
   hierarchyRoot,
 } from "../twui/doc";
 import { inheritingGuids } from "../twui/inherit";
+import { hiddenGuids } from "../twui/visibility";
+import { useLayoutInputs } from "../state/useLayoutInputs";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { RawElement } from "../types/twui";
 
@@ -32,6 +34,7 @@ function Row({
   compMap,
   ancestorHidden,
   inheriting,
+  hidden,
   draggingGuid,
   setDraggingGuid,
 }: {
@@ -45,6 +48,7 @@ function Row({
   compMap: Map<string, RawElement>;
   ancestorHidden: boolean;
   inheriting: Set<string>;
+  hidden: Set<string>;
   draggingGuid: string | null;
   setDraggingGuid: (g: string | null) => void;
 }) {
@@ -56,9 +60,15 @@ function Row({
   const keybinds = useStore((s) => s.settings.keybinds);
   const move = useStore((s) => s.move);
   const toggleVisible = useStore((s) => s.toggleVisible);
+  const setRevealed = useStore((s) => s.setRevealed);
+  const isRevealed = useStore((s) => s.revealed[guid] === true);
   const isOpen = expanded.has(guid);
 
-  const ownHidden = isHidden(compMap.get(guid));
+  // Visibility sources: static `visible="false"` vs a script/context binding. A script-hidden
+  // node can be force-revealed from here (non-destructive); a revealed one is no longer dimmed.
+  const ownStaticHidden = isHidden(compMap.get(guid));
+  const scriptHidden = hidden.has(guid);
+  const ownHidden = ownStaticHidden || (scriptHidden && !isRevealed);
   const dimmed = ownHidden || ancestorHidden;
 
   const [dropHint, setDropHint] = useState<DropHint>("none");
@@ -104,10 +114,10 @@ function Row({
         data-guid={guid}
         className={`relative flex items-center gap-1 pr-1 cursor-pointer rounded select-none ${
           dropHint === "into"
-            ? "ring-1 ring-accent bg-[#2c3d2c]"
+            ? "ring-1 ring-accent bg-drop"
             : selected
-            ? "bg-[#3b3a1f] outline outline-1 outline-accent"
-            : "hover:bg-[#23252f]"
+            ? "bg-selected outline outline-1 outline-accent"
+            : "hover:bg-panelHeader"
         }`}
         style={{ paddingLeft: depth * 12 + 4 }}
         draggable
@@ -129,7 +139,7 @@ function Row({
           <div className="absolute -bottom-px left-0 right-0 h-0.5 bg-accent z-10" />
         )}
         <span
-          className="w-4 text-center text-gray-500"
+          className="w-4 shrink-0 text-center text-gray-500"
           onClick={(e) => {
             e.stopPropagation();
             if (kids.length) toggle(guid);
@@ -137,7 +147,7 @@ function Row({
         >
           {kids.length ? (isOpen ? "▾" : "▸") : ""}
         </span>
-        <span className={`text-[12px] truncate mr-auto ${dimmed ? "opacity-50" : ""}`}>
+        <span className={`text-[12px] truncate min-w-0 mr-auto ${dimmed ? "opacity-50" : ""}`}>
           {node.tag}
         </span>
         {inheriting.has(guid) && (
@@ -146,11 +156,25 @@ function Row({
           </span>
         )}
         <span
-          className={`w-4 text-center shrink-0 ${ownHidden ? "" : "opacity-60 hover:opacity-100"}`}
-          title={ownHidden ? "Show (remove visible=\"false\")" : "Hide (set visible=\"false\")"}
+          className={`w-4 text-center shrink-0 ${
+            isRevealed ? "text-accent opacity-100" : ownHidden ? "" : "opacity-60 hover:opacity-100"
+          }`}
+          title={
+            scriptHidden && !ownStaticHidden
+              ? isRevealed
+                ? "Forced visible (overriding script) — click to hide again"
+                : "Hidden by a script binding — click to force visible"
+              : ownHidden
+              ? "Show (remove visible=\"false\")"
+              : "Hide (set visible=\"false\")"
+          }
           onClick={(e) => {
             e.stopPropagation();
-            if (guid) toggleVisible(guid);
+            if (!guid) return;
+            // Script/context-hidden nodes get a non-destructive force-show toggle; statically
+            // hidden/visible nodes keep editing the `visible` attribute.
+            if (scriptHidden && !ownStaticHidden) setRevealed(guid, !isRevealed);
+            else toggleVisible(guid);
           }}
         >
           {ownHidden ? "🚫" : "👁"}
@@ -170,6 +194,7 @@ function Row({
             compMap={compMap}
             ancestorHidden={dimmed}
             inheriting={inheriting}
+            hidden={hidden}
             draggingGuid={draggingGuid}
             setDraggingGuid={setDraggingGuid}
           />
@@ -193,6 +218,16 @@ export default function TreePanel() {
     [doc]
   );
   const inheriting = useMemo(() => (doc ? inheritingGuids(doc) : new Set<string>()), [doc]);
+  // Guids hidden by a script/context binding (evaluated like the canvas does), so the tree
+  // dims them — and their subtree — exactly like a static visible="false" node.
+  const { dataPack, staticVars, tokens, context, ccoShorthand } = useLayoutInputs();
+  const hidden = useMemo(
+    () =>
+      doc
+        ? hiddenGuids(doc, { dataPack, vars: staticVars, shorthand: ccoShorthand ?? undefined }, context, tokens)
+        : new Set<string>(),
+    [doc, dataPack, staticVars, ccoShorthand, context, tokens]
+  );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [draggingGuid, setDraggingGuid] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -242,7 +277,7 @@ export default function TreePanel() {
     setExpanded(all);
   };
 
-  const btn = "px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px] disabled:opacity-40";
+  const btn = "px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px] disabled:opacity-40";
 
   return (
     <>
@@ -286,6 +321,7 @@ export default function TreePanel() {
             compMap={compMap}
             ancestorHidden={false}
             inheriting={inheriting}
+            hidden={hidden}
             draggingGuid={draggingGuid}
             setDraggingGuid={setDraggingGuid}
           />

@@ -45,7 +45,9 @@ export const ACTIONS: KeyAction[] = [
     id: "redo", label: "Redo", category: "Editor", defaultBinding: "Mod+Y",
     aliases: ["Mod+Shift+Z"], allowInInput: true, run: (s) => s.redo(),
   },
+  { id: "open", label: "Open file", category: "File", defaultBinding: "Mod+O", allowInInput: true, run: (s) => s.openFileDialog() },
   { id: "save", label: "Save", category: "File", defaultBinding: "Mod+S", allowInInput: true, run: (s) => s.save() },
+  { id: "save-as", label: "Save As", category: "File", defaultBinding: "Mod+Shift+S", allowInInput: true, run: (s) => s.saveAsDialog() },
   {
     id: "search", label: "Go to component", category: "Navigation", defaultBinding: "Mod+F",
     allowInInput: true, run: (s) => s.openSearch("find"),
@@ -62,6 +64,8 @@ export const ACTIONS: KeyAction[] = [
   { id: "tool-move", label: "Move tool", category: "Tools", defaultBinding: "M", allowInInput: false, run: (s) => s.setMode("move") },
   { id: "tool-create", label: "Create tool", category: "Tools", defaultBinding: "N", allowInInput: false, run: (s) => s.setMode("create") },
   { id: "tool-align", label: "Align tool", category: "Tools", defaultBinding: "A", allowInInput: false, run: (s) => s.setMode("align") },
+  { id: "tool-sim", label: "Simulate tool", category: "Tools", defaultBinding: "S", allowInInput: false, run: (s) => s.setMode("sim") },
+  { id: "tool-tooltip", label: "Tooltip tool", category: "Tools", defaultBinding: "T", allowInInput: false, run: (s) => s.setMode("tooltip") },
   { id: "copy", label: "Copy component", category: "Editor", defaultBinding: "Mod+C", allowInInput: false, run: (s) => s.copy() },
   { id: "paste", label: "Paste component", category: "Editor", defaultBinding: "Mod+V", allowInInput: false, run: (s) => s.paste() },
   { id: MULTI_SELECT, label: "Multi-select (add to selection)", category: "Selection", defaultBinding: "Shift", kind: "mouse" },

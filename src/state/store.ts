@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
 import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, TwuiDocument } from "../types/twui";
 import * as ipc from "../ipc/commands";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   childByTag,
   componentMap,
@@ -63,10 +64,17 @@ export interface Settings {
   keybinds: Record<string, string>;
   /** Default perspective applied on load (null = the built-in default). */
   perspective: FactionContext | null;
-  visualizer: { defaultMode: Mode; showBounds: boolean; restoreView: boolean };
+  visualizer: {
+    defaultMode: Mode;
+    showBounds: boolean;
+    restoreView: boolean;
+    /** Floating tool palette position (canvas-relative; null = default left-center) and hidden state. */
+    palette: { x: number | null; y: number | null; hidden: boolean };
+  };
   editor: { undoLimit: number; rememberLastFile: boolean };
-  /** Stub for future theming; wired but no visual effect yet. */
-  theme: { accent: string; density: "comfortable" | "compact" };
+  /** Appearance: colour scheme (system follows the OS), accent colour, and UI density.
+   *  Applied by src/theme.ts. */
+  theme: { mode: "system" | "light" | "dark"; accent: string; density: "comfortable" | "compact" };
   /** Serialized dockview layout (`api.toJSON()`), restored on load. Pop-out state is session-only. */
   dockLayout: unknown | null;
   lastGame: string | null;
@@ -78,9 +86,14 @@ const DEFAULT_VIEW: View = { zoom: 0.5, panX: 40, panY: 40 };
 const DEFAULT_SETTINGS: Settings = {
   keybinds: {},
   perspective: null,
-  visualizer: { defaultMode: "view", showBounds: false, restoreView: false },
+  visualizer: {
+    defaultMode: "view",
+    showBounds: false,
+    restoreView: false,
+    palette: { x: null, y: null, hidden: false },
+  },
   editor: { undoLimit: 100, rememberLastFile: false },
-  theme: { accent: "#c9a227", density: "comfortable" },
+  theme: { mode: "system", accent: "#c9a227", density: "comfortable" },
   dockLayout: null,
   lastGame: null,
   lastFile: null,
@@ -164,6 +177,9 @@ export interface AppStore {
   scriptDraft: string | null;
   /** Non-persistent per-component state preview (Inspector → Visualizer). */
   previewState: Record<string, string>;
+  /** Per-component force-show overrides from the hierarchy (session-only): reveal a
+   *  component that a script/context binding would otherwise hide. Beats script visibility. */
+  revealed: Record<string, boolean>;
   /** Quick-find palette: open state + mode ("find" by query, "refs" to selected guid). */
   searchOpen: boolean;
   searchMode: "find" | "refs";
@@ -171,6 +187,9 @@ export interface AppStore {
   background: string | null;
   /** Active visualizer tool (left tool palette). */
   mode: Mode;
+  /** Target render resolution for the visualizer; null = the doc's authored root size
+   *  (no reflow). Session-only — never persisted, so a fresh doc always starts safe. */
+  renderResolution: { w: number; h: number } | null;
   /** Whether the visualizer draws component bounds outlines (Perspective panel toggle). */
   showBounds: boolean;
   /** Panels currently popped out into their own OS window (session-only). */
@@ -193,6 +212,7 @@ export interface AppStore {
   setDataPackOverride: (pack: LuaValue | null) => void;
   setScriptDraft: (text: string | null) => void;
   setPreviewState: (guid: string, name: string | null) => void;
+  setRevealed: (guid: string, on: boolean) => void;
   openSearch: (mode?: "find" | "refs") => void;
   closeSearch: () => void;
   setBackground: (path: string | null) => void;
@@ -201,8 +221,10 @@ export interface AppStore {
   setCulture: (key: string) => void;
   setSubculture: (key: string) => void;
   openFile: (path: string) => Promise<void>;
+  openFileDialog: () => Promise<void>;
   save: () => Promise<void>;
   saveAs: (path: string) => Promise<void>;
+  saveAsDialog: () => Promise<void>;
   setDataRoot: (path: string) => Promise<void>;
   select: (guid: string | null) => void;
   toggleSelect: (guid: string | null) => void;
@@ -231,6 +253,7 @@ export interface AppStore {
   setPanelPopped: (id: PanelId, popped: boolean) => void;
   setShowBounds: (v: boolean) => void;
   setMode: (m: Mode) => void;
+  setRenderResolution: (r: { w: number; h: number } | null) => void;
   copy: () => void;
   paste: () => void;
   createAt: (parentGuid: string | null, x: number, y: number) => void;
@@ -280,12 +303,14 @@ export const useStore = create<AppStore>()(
     componentDataPacks: {},
     scriptDraft: null,
     previewState: {},
+    revealed: {},
     searchOpen: false,
     searchMode: "find",
     backgrounds: [],
     background: null,
     mode: DEFAULT_SETTINGS.visualizer.defaultMode,
     showBounds: DEFAULT_SETTINGS.visualizer.showBounds,
+    renderResolution: null,
     clipboard: null,
     settings: DEFAULT_SETTINGS,
 
@@ -365,6 +390,11 @@ export const useStore = create<AppStore>()(
         s.scriptDraft = text;
       }),
 
+    setRevealed: (guid, on) =>
+      set((s) => {
+        if (on) s.revealed[guid] = true;
+        else delete s.revealed[guid];
+      }),
     setPreviewState: (guid, name) =>
       set((s) => {
         if (name === null) delete s.previewState[guid];
@@ -501,6 +531,7 @@ export const useStore = create<AppStore>()(
           s.fileName = baseName(path);
           s.dirty = false;
           s.selectedGuid = null;
+          s.revealed = {};
           s.undoStack = [];
           s.redoStack = [];
           s.templates = {};
@@ -627,6 +658,25 @@ export const useStore = create<AppStore>()(
           s.status = `Save error: ${e}`;
         });
       }
+    },
+
+    // Open/Save-As dialogs live here so the toolbar and keybinds share one path.
+    openFileDialog: async () => {
+      const path = await openDialog({
+        multiple: false,
+        filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
+        defaultPath: get().dataRoot ?? undefined,
+      });
+      if (typeof path === "string") await get().openFile(path);
+    },
+
+    saveAsDialog: async () => {
+      if (!get().doc) return;
+      const path = await saveDialog({
+        filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
+        defaultPath: get().dataRoot ?? undefined,
+      });
+      if (path) await get().saveAs(path);
     },
 
     setDataRoot: async (path) => {
@@ -919,6 +969,7 @@ export const useStore = create<AppStore>()(
     setShowBounds: (v) => set((s) => { s.showBounds = v; }),
 
     setMode: (m) => set((s) => { s.mode = m; }),
+    setRenderResolution: (r) => set((s) => { s.renderResolution = r; }),
 
     copy: () => {
       const g = get().selectedGuid;

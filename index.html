@@ -21,6 +21,14 @@
       .boot-name { font-size: 13px; letter-spacing: 0.04em; color: #c9a227; font-weight: 600; }
       .boot-sub { font-size: 11px; color: #6b7081; }
       @keyframes boot-rot { to { transform: rotate(360deg); } }
+      /* Follow the OS scheme before JS runs (the app's System default); the resolver
+         takes over once mounted. */
+      @media (prefers-color-scheme: light) {
+        html, body { background: #f4f5f7; }
+        .boot { background: #f4f5f7; color: #1c1e26; }
+        .boot-spin { border-color: #d0d3dc; border-top-color: #c9a227; }
+        .boot-sub { color: #8a8f9c; }
+      }
     </style>
   </head>
   <body>

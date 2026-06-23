@@ -4,9 +4,8 @@ import ToolPalette from "./ToolPalette";
 import { computeLayout, imageDrawRect, LayoutResult, nineSliceRegions, Rect, Scrollable, Sim, textAnchor } from "../layout/compute";
 import { parseColour } from "../twui/colour";
 import { fontSpec } from "../twui/fonts";
-import { deriveTokens } from "../twui/context";
-import { extractDataPack, LuaValue } from "../twui/lua";
-import { buildPlayersContext } from "../twui/players";
+import { LuaValue } from "../twui/lua";
+import { useLayoutInputs } from "../state/useLayoutInputs";
 import { componentMap, guidOf } from "../twui/doc";
 import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
@@ -78,6 +77,7 @@ function drawImageTinted(
 
 export default function VisualizerPanel() {
   const doc = useStore((s) => s.doc);
+  const filePath = useStore((s) => s.filePath);
   const dataRoot = useStore((s) => s.dataRoot);
   const selectedGuid = useStore((s) => s.selectedGuid);
   const selectedGuids = useStore((s) => s.selectedGuids);
@@ -90,16 +90,12 @@ export default function VisualizerPanel() {
   const createAt = useStore((s) => s.createAt);
   const context = useStore((s) => s.context);
   const contextDb = useStore((s) => s.contextDb);
-  const characterDb = useStore((s) => s.characterDb);
-  const characters = useStore((s) => s.characters);
   const templates = useStore((s) => s.templates);
   const createdLayouts = useStore((s) => s.createdLayouts);
   const loc = useStore((s) => s.loc);
-  const scriptText = useStore((s) => s.scriptConn.text);
-  const scriptId = useStore((s) => s.scriptConn.id);
-  const dataPackOverride = useStore((s) => s.dataPackOverride);
   const componentDataPacks = useStore((s) => s.componentDataPacks);
   const previewState = useStore((s) => s.previewState);
+  const revealed = useStore((s) => s.revealed);
   const background = useStore((s) => s.background);
   const ccoShorthand = useStore((s) => s.ccoShorthand);
 
@@ -112,6 +108,10 @@ export default function VisualizerPanel() {
   const [hover, setHover] = useState<string | null>(null);
   const showBounds = useStore((s) => s.showBounds);
   const mode = useStore((s) => s.mode);
+  const viz = useStore((s) => s.settings.visualizer);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const paletteHidden = viz.palette.hidden;
+  const renderResolution = useStore((s) => s.renderResolution);
   // Tooltip mode interacts like Simulation (scroll/click-sim, no selection).
   const simLike = mode === "sim" || mode === "tooltip";
   const [sim, setSim] = useState<Sim>(EMPTY_SIM);
@@ -130,22 +130,19 @@ export default function VisualizerPanel() {
     };
   }, []);
 
-  const tokens = useMemo(() => deriveTokens(contextDb), [contextDb]);
-  const dataPack = useMemo(
-    () =>
-      (dataPackOverride as LuaValue | null) ??
-      (scriptText && scriptId ? extractDataPack(scriptText, scriptId) : null),
-    [dataPackOverride, scriptText, scriptId]
-  );
-  // The Inspector's state preview rides in sim.state (preview wins per component).
+  // Script data pack, DB-record contexts (PlayersFaction etc.) and perspective tokens —
+  // shared with the hierarchy tree so visibility decisions agree.
+  const { dataPack, staticVars, tokens } = useLayoutInputs();
+  // The Inspector's state preview rides in sim.state (preview wins per component); the
+  // hierarchy's force-show overrides ride in sim.show so a script-hidden component the user
+  // revealed renders on the canvas too.
   const effectiveSim = useMemo(
-    () => ({ ...sim, state: { ...sim.state, ...previewState } }),
-    [sim, previewState]
-  );
-  // DB-record contexts (PlayersFaction name + per-role character portraits).
-  const staticVars = useMemo(
-    () => buildPlayersContext(context, contextDb, loc, characters, characterDb),
-    [context, contextDb, loc, characters, characterDb]
+    () => ({
+      ...sim,
+      state: { ...sim.state, ...previewState },
+      show: [...sim.show, ...Object.keys(revealed).filter((g) => revealed[g])],
+    }),
+    [sim, previewState, revealed]
   );
   const layout: LayoutResult = useMemo(
     () =>
@@ -164,12 +161,13 @@ export default function VisualizerPanel() {
             ccoShorthand,
             componentDataPacks as Record<string, LuaValue>,
             measureText,
-            contextDb?.ministerial_positions
+            contextDb?.ministerial_positions,
+            renderResolution
           )
         : { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] },
     // `fontsReady` is a dep so layout re-measures once the bundled fonts load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb]
+    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb, renderResolution]
   );
 
   const getImage = useCallback((path: string): HTMLImageElement | null => {
@@ -543,10 +541,11 @@ export default function VisualizerPanel() {
   }, [layout, size, setView]);
 
   useEffect(() => {
-    // Auto-fit when a new document loads.
+    // Auto-fit when a new document loads (keyed on filePath, not doc — every edit
+    // replaces doc and would otherwise snap the view back to fit).
     if (doc) fit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc]);
+  }, [filePath]);
 
   return (
     <div className="h-full flex flex-col">
@@ -560,7 +559,22 @@ export default function VisualizerPanel() {
         </span>
         <div className="flex-1" />
         <button
-          className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
+          className={`px-2 py-0.5 rounded border border-edge text-[11px] ${
+            paletteHidden
+              ? "bg-button hover:bg-buttonHover"
+              : "bg-accent/25 text-accent ring-1 ring-accent/50"
+          }`}
+          title={paletteHidden ? "Show tool palette" : "Hide tool palette"}
+          onClick={() =>
+            updateSettings({
+              visualizer: { ...viz, palette: { ...viz.palette, hidden: !paletteHidden } },
+            })
+          }
+        >
+          Tools
+        </button>
+        <button
+          className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]"
           onClick={fit}
         >
           Fit
@@ -612,7 +626,7 @@ export default function VisualizerPanel() {
             if (!tip) return null;
             return (
               <div
-                className="fixed z-40 max-w-[320px] px-2 py-1 rounded bg-[#0c0d12] border border-edge text-[11px] text-gray-200 whitespace-pre-wrap pointer-events-none shadow-lg"
+                className="fixed z-40 max-w-[320px] px-2 py-1 rounded bg-sunken border border-edge text-[11px] text-text whitespace-pre-wrap pointer-events-none shadow-lg"
                 style={{ left: tipPos.x + 14, top: tipPos.y + 14 }}
               >
                 {tip}

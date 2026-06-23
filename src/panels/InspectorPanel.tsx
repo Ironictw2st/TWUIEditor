@@ -54,7 +54,7 @@ function Field({
 
   return (
     <label className="flex items-center gap-2 mb-1">
-      {label && <span className="text-gray-400 text-[11px] w-28 shrink-0">{label}</span>}
+      {label && <span className="text-textMuted text-[11px] w-28 shrink-0">{label}</span>}
       <input
         className="flex-1"
         style={{ width }}
@@ -81,7 +81,7 @@ function cssColour(v: string): string {
   return /^#([0-9a-fA-F]{6})$/.test(t) ? t : "transparent";
 }
 
-const LABEL_CLS = "text-gray-400 text-[11px] w-28 shrink-0";
+const LABEL_CLS = "text-textMuted text-[11px] w-28 shrink-0";
 
 /** Schema-driven attribute field: picks the control (enum/bool/colour/number/vec2/text)
  *  from the TWUI attribute schema, with a description tooltip, default placeholder, and
@@ -237,7 +237,7 @@ function Section({ title, children, defaultOpen = true }: { title: string; child
   return (
     <div className="border-b border-edge">
       <div
-        className="px-3 py-1.5 flex items-center gap-2 cursor-pointer bg-[#23252f] hover:bg-[#272a36] select-none"
+        className="px-3 py-1.5 flex items-center gap-2 cursor-pointer bg-panelHeader hover:bg-panelAlt select-none"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="text-gray-500 text-[10px]">{open ? "▾" : "▸"}</span>
@@ -277,7 +277,7 @@ function LayoutEngineSection({ guid, comp }: { guid: string; comp: RawElement })
     <Section title="Layout Engine" defaultOpen={!!le}>
       {!le ? (
         <button
-          className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
+          className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]"
           onClick={() => addLayoutEngine(guid)}
         >
           + Add Layout Engine
@@ -301,7 +301,7 @@ function ImageBlock({ img, dataRoot }: { img: RawElement; dataRoot: string | nul
   const path = getAttr(img, "imagepath");
   return (
     <div className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
-      <div className="w-12 h-12 shrink-0 bg-[#0c0d12] border border-edge rounded flex items-center justify-center overflow-hidden">
+      <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
         {path && dataRoot ? (
           <img
             src={imageUrl(path)}
@@ -350,7 +350,7 @@ export default function InspectorPanel() {
   const tab = (m: "clean" | "raw", label: string) => (
     <button
       className={`px-2 py-0.5 rounded text-[11px] border ${
-        mode === m ? "bg-accent/30 border-accent" : "bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+        mode === m ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
       }`}
       onClick={() => setMode(m)}
     >
@@ -364,7 +364,7 @@ export default function InspectorPanel() {
         <span className="font-semibold text-[12px] truncate">{comp.tag}</span>
         <div className="flex-1" />
         <button
-          className="px-2 py-0.5 rounded text-[11px] border bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+          className="px-2 py-0.5 rounded text-[11px] border bg-button border-edge hover:bg-buttonHover"
           onClick={() => openSearch("refs")}
           title="Find components that reference this one"
         >
@@ -431,7 +431,7 @@ function GuidsSection({ guid, label }: { guid: string; label: string }) {
   const regenGuids = useStore((s) => s.regenGuids);
   const regenComponentGuids = useStore((s) => s.regenComponentGuids);
   const regenSubtreeGuids = useStore((s) => s.regenSubtreeGuids);
-  const b = "w-full text-left px-2 py-1 mb-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]";
+  const b = "w-full text-left px-2 py-1 mb-1 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]";
   return (
     <Section title="GUIDs" defaultOpen={false}>
       <div className="text-[10px] text-gray-500 mb-2">
@@ -508,11 +508,11 @@ function RawEditor({
 
   return (
     <div className="border-b border-edge">
-      <div className="px-3 py-1.5 flex items-center gap-2 bg-[#23252f]">
+      <div className="px-3 py-1.5 flex items-center gap-2 bg-panelHeader">
         <span className="text-[12px] font-medium">{title}</span>
         <div className="flex-1" />
         <button
-          className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px] disabled:opacity-40"
+          className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px] disabled:opacity-40"
           onClick={reseed}
           disabled={!dirty}
         >
@@ -527,7 +527,7 @@ function RawEditor({
         </button>
       </div>
       <textarea
-        className="w-full font-mono text-[11px] leading-snug bg-[#0e0f15] border-0 px-3 py-2 outline-none resize-none whitespace-pre"
+        className="w-full font-mono text-[11px] leading-snug bg-codebg border-0 px-3 py-2 outline-none resize-none whitespace-pre"
         style={{ tabSize: 4 }}
         value={text}
         spellCheck={false}
@@ -560,8 +560,8 @@ function InheritanceSection({ doc, guid }: { doc: TwuiDocument; guid: string }) 
     <Section title="Inheritance">
       {items.map((it, i) => (
         <div key={i} className="flex items-center gap-2 mb-1 text-[12px]">
-          <span className="text-gray-400 w-16 shrink-0">{INHERIT_LABEL[it.kind]}</span>
-          {it.label && <span className="text-gray-200 truncate">{it.label}</span>}
+          <span className="text-textMuted w-16 shrink-0">{INHERIT_LABEL[it.kind]}</span>
+          {it.label && <span className="text-text truncate">{it.label}</span>}
           <button
             className="ml-auto text-[11px] text-accent hover:underline shrink-0"
             onClick={() => select(it.fromGuid)}
@@ -643,7 +643,7 @@ function ExprField({ guid, index, expr }: { guid: string; index: number; expr: s
   };
   return (
     <textarea
-      className="w-full text-[10px] font-mono leading-snug bg-[#0e0f15] border border-edge rounded px-1.5 py-1 outline-none resize-none"
+      className="w-full text-[10px] font-mono leading-snug bg-codebg border border-edge rounded px-1.5 py-1 outline-none resize-none"
       rows={Math.min(6, Math.max(1, Math.ceil(local.length / 48)))}
       spellCheck={false}
       value={local}
@@ -665,9 +665,9 @@ function EmbeddedLayoutSection({ comp }: { comp: RawElement }) {
   if (!layout) return null;
   return (
     <Section title="Embedded layout">
-      <div className="text-[11px] text-gray-300 break-all mb-1.5 font-mono">{layout}</div>
+      <div className="text-[11px] text-text break-all mb-1.5 font-mono">{layout}</div>
       <button
-        className="text-[11px] px-2 py-1 rounded bg-[#2a2d3a] border border-edge hover:bg-[#333845] disabled:opacity-40"
+        className="text-[11px] px-2 py-1 rounded bg-button border border-edge hover:bg-buttonHover disabled:opacity-40"
         onClick={() => dataRoot && openFile(`${dataRoot}/${layout}.twui.xml`)}
         disabled={!dataRoot}
         title="Open this ComponentCreator template as the root layout"
@@ -710,20 +710,20 @@ function BindingsSection({ doc, comp, guid }: { doc: TwuiDocument; comp: RawElem
         return (
           <div key={i} className="mb-2">
             <div className="flex items-baseline gap-2 mb-0.5">
-              <span className="text-gray-400 text-[11px] w-16 shrink-0">{r.label}</span>
+              <span className="text-textMuted text-[11px] w-16 shrink-0">{r.label}</span>
               <span className="text-[12px] text-accent break-all">{r.value}</span>
             </div>
             <ExprField guid={guid} index={r.index} expr={r.expr} />
             {hint && (
               <div className="text-[10px] text-gray-500 mt-0.5 break-words">
-                <span className="text-gray-400">{hint.name}</span>
+                <span className="text-textMuted">{hint.name}</span>
                 <span className="text-gray-600"> → {hint.def.ret}</span>
                 {hint.def.desc && <> · {hint.def.desc}</>}
               </div>
             )}
             {macro && (
               <div className="text-[10px] text-gray-500 mt-0.5 break-words">
-                <span className="text-gray-400">{macro.name}</span>
+                <span className="text-textMuted">{macro.name}</span>
                 <span className="text-gray-600"> = {macro.expansion}</span>
                 <span className="text-gray-600"> · macro ({macro.ccoType})</span>
               </div>
@@ -747,7 +747,7 @@ function StatesSection({ guid, states }: { guid: string; states: RawElement[] })
       ) : (
         <>
           <label className="flex items-center gap-2 mb-2">
-            <span className="text-gray-400 text-[11px] w-28 shrink-0">preview state</span>
+            <span className="text-textMuted text-[11px] w-28 shrink-0">preview state</span>
             <select
               className="flex-1"
               value={preview ?? ""}
@@ -791,12 +791,12 @@ function ScriptSection({ scriptId }: { scriptId: string }) {
   };
 
   const btn =
-    "px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]";
+    "px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]";
 
   return (
     <Section title="Script">
       <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">script_id</div>
-      <div className="text-[12px] text-gray-200 break-all mb-2">{scriptId}</div>
+      <div className="text-[12px] text-text break-all mb-2">{scriptId}</div>
       {matches && conn.status === "connected" ? (
         <div className="text-[11px] text-emerald-300/90 break-all mb-2" title={conn.path ?? ""}>
           ✓ {fileName}

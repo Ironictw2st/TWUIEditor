@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 import { useStore } from "../state/store";
 import { ACTIONS, formatBinding } from "../keybinds";
 import { componentMap, getAttr } from "../twui/doc";
@@ -128,6 +128,22 @@ const RedoIcon = () => (
   </Svg>
 );
 
+const GripIcon = () => (
+  <Svg>
+    <circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none" />
+  </Svg>
+);
+const CloseIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+    <path d="M6 6l12 12M18 6L6 18" />
+  </svg>
+);
+
 function ToolButton({
   active,
   disabled,
@@ -153,12 +169,12 @@ function ToolButton({
             ? "bg-accent/25 text-accent ring-1 ring-accent/50"
             : disabled
             ? "text-gray-600 cursor-default"
-            : "text-gray-400 hover:bg-[#2a2d3a] hover:text-gray-100"
+            : "text-textMuted hover:bg-button hover:text-text"
         }`}
       >
         {children}
       </button>
-      <div className="pointer-events-none absolute left-11 top-1/2 -translate-y-1/2 z-20 hidden group-hover:flex items-center gap-2 whitespace-nowrap rounded bg-[#0c0d12] border border-edge px-2 py-1 text-[11px] text-gray-200 shadow-lg">
+      <div className="pointer-events-none absolute left-11 top-1/2 -translate-y-1/2 z-20 hidden group-hover:flex items-center gap-2 whitespace-nowrap rounded bg-sunken border border-edge px-2 py-1 text-[11px] text-text shadow-lg">
         <span>{label}</span>
         {shortcut && <span className="text-gray-500">{shortcut}</span>}
       </div>
@@ -197,12 +213,12 @@ function PickComponentPopover({
   return (
     <>
       <div className="fixed inset-0 z-20" onClick={onClose} />
-      <div className="absolute left-12 top-1/2 -translate-y-1/2 z-30 w-52 max-h-72 overflow-auto rounded-md bg-[#0c0d12] border border-edge shadow-xl p-1">
+      <div className="absolute left-12 top-1/2 -translate-y-1/2 z-30 w-52 max-h-72 overflow-auto rounded-md bg-sunken border border-edge shadow-xl p-1">
         <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-gray-500">{title}</div>
         {guids.map((g) => (
           <button
             key={g}
-            className="block w-full text-left px-2 py-1 rounded text-[11px] text-gray-200 hover:bg-[#23252f] truncate"
+            className="block w-full text-left px-2 py-1 rounded text-[11px] text-text hover:bg-panelHeader truncate"
             onClick={() => onPick(g)}
           >
             {labelOf(g)}
@@ -231,8 +247,65 @@ export default function ToolPalette() {
   const redo = useStore((s) => s.redo);
   const canUndo = useStore((s) => s.undoStack.length > 0);
   const canRedo = useStore((s) => s.redoStack.length > 0);
+  const viz = useStore((s) => s.settings.visualizer);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const palette = viz.palette;
   const [picker, setPicker] = useState<"alignX" | "alignY" | "center" | null>(null);
-  if (!doc) return null;
+
+  // Live drag position (canvas-relative). null = use the default left-center CSS position.
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(
+    palette.x != null && palette.y != null ? { x: palette.x, y: palette.y } : null
+  );
+  const drag = useRef<{ dx: number; dy: number } | null>(null);
+
+  // Keep the palette inside its container (the relative canvas wrapper it's positioned against).
+  const clamp = (x: number, y: number) => {
+    const el = ref.current;
+    const parent = el?.offsetParent as HTMLElement | null;
+    if (!el || !parent) return { x, y };
+    const maxX = Math.max(0, parent.clientWidth - el.offsetWidth);
+    const maxY = Math.max(0, parent.clientHeight - el.offsetHeight);
+    return { x: Math.min(Math.max(0, x), maxX), y: Math.min(Math.max(0, y), maxY) };
+  };
+
+  // Pull a persisted position back into view if the canvas is now smaller than when it was saved.
+  useLayoutEffect(() => {
+    setPos((p) => {
+      if (!p) return p;
+      const c = clamp(p.x, p.y);
+      return c.x === p.x && c.y === p.y ? p : c;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onHandleDown = (e: React.PointerEvent) => {
+    const el = ref.current;
+    if (!el) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    const r = el.getBoundingClientRect();
+    drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+  };
+  const onHandleMove = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    const parent = ref.current?.offsetParent as HTMLElement | null;
+    if (!parent) return;
+    const pr = parent.getBoundingClientRect();
+    setPos(clamp(e.clientX - pr.left - drag.current.dx, e.clientY - pr.top - drag.current.dy));
+  };
+  const onHandleUp = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    drag.current = null;
+    setPos((p) => {
+      if (p) updateSettings({ visualizer: { ...viz, palette: { ...palette, x: p.x, y: p.y } } });
+      return p;
+    });
+  };
+  const hide = () => updateSettings({ visualizer: { ...viz, palette: { ...palette, hidden: true } } });
+
+  if (!doc || palette.hidden) return null;
   const canAlign = selectedGuids.length >= 2;
   const canCenter = selectedGuids.length === 3;
   const canDistribute = selectedGuids.length >= 3;
@@ -255,8 +328,32 @@ export default function ToolPalette() {
     </ToolButton>
   );
 
+  const positioned = pos != null;
   return (
-    <div className="absolute left-2 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-0.5 p-1 rounded-lg bg-[#1a1b22]/95 border border-edge shadow-xl backdrop-blur-sm">
+    <div
+      ref={ref}
+      className={`absolute z-10 flex flex-col gap-0.5 p-1 rounded-lg bg-panel/95 border border-edge shadow-xl backdrop-blur-sm ${
+        positioned ? "" : "left-2 top-1/2 -translate-y-1/2"
+      }`}
+      style={positioned ? { left: pos.x, top: pos.y } : undefined}
+    >
+      <div
+        className="flex items-center justify-between px-0.5 mb-0.5 cursor-move select-none touch-none text-gray-500 hover:text-text"
+        title="Drag to move"
+        onPointerDown={onHandleDown}
+        onPointerMove={onHandleMove}
+        onPointerUp={onHandleUp}
+      >
+        <GripIcon />
+        <button
+          className="w-5 h-5 flex items-center justify-center rounded hover:bg-button hover:text-text"
+          title="Hide palette"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={hide}
+        >
+          <CloseIcon />
+        </button>
+      </div>
       {modeBtn("view", "Select", "tool-select", <SelectIcon />)}
       {modeBtn("move", "Move", "tool-move", <MoveIcon />)}
       {modeBtn("create", "Create", "tool-create", <CreateIcon />)}
