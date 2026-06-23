@@ -6,7 +6,7 @@
 // External docking is treated like its non-external edge for positioning v1
 // (the anchor/offset already place the child outside); refine later if needed.
 
-import { CcoShorthand, RawElement, TwuiDocument, FactionContext } from "../types/twui";
+import { CcoShorthand, MinisterialPosition, RawElement, TwuiDocument, FactionContext } from "../types/twui";
 import {
   activeState,
   childByTag,
@@ -21,6 +21,7 @@ import {
   parseVec2,
 } from "../twui/doc";
 import { ContextTokens, conditionDecision, contextDecision } from "../twui/context";
+import { postTitle } from "../twui/posts";
 import { isTemplated, ResolvedLayer, resolveAgainst, resolveTemplated, templateIdMap } from "../twui/template";
 import { LuaValue } from "../twui/lua";
 import {
@@ -29,10 +30,12 @@ import {
   evalExpr,
   evalImageSetter,
   evalTextLabel,
+  isScriptValueList,
   listSource,
   propagate,
   resolveInlineTokens,
   Scope,
+  scriptNodes,
   scriptVisibility,
   toEntries,
 } from "../twui/cco";
@@ -62,6 +65,38 @@ export interface DrawImage {
   /** Explicit size; when undefined the image draws at its natural pixel size. */
   w?: number;
   h?: number;
+  /** Nine-patch slice margins (left, top, right, bottom) in source pixels — when set,
+   *  the image draws as a 9-slice border (corners 1:1, edges/center stretched). */
+  margin?: [number, number, number, number];
+}
+
+/** Anchor a single line of text within a rect, given edge insets + alignment. Baseline
+ *  is "middle". `inset` is { left, right, top, bottom } (from textxoffset/textyoffset). */
+export function textAnchor(
+  rect: Rect,
+  inset: { left: number; right: number; top: number; bottom: number } | undefined,
+  hAlign: string | undefined,
+  vAlign: string | undefined,
+  fontSize: number
+): { tx: number; ty: number; align: CanvasTextAlign } {
+  const l = inset?.left ?? 0;
+  const r = inset?.right ?? 0;
+  const t = inset?.top ?? 0;
+  const b = inset?.bottom ?? 0;
+  const align: CanvasTextAlign = hAlign === "Center" ? "center" : hAlign === "Right" ? "right" : "left";
+  const tx =
+    hAlign === "Center"
+      ? rect.x + (l + (rect.w - r)) / 2
+      : hAlign === "Right"
+        ? rect.x + rect.w - r
+        : rect.x + l;
+  const ty =
+    vAlign === "Top"
+      ? rect.y + t + fontSize / 2
+      : vAlign === "Bottom"
+        ? rect.y + rect.h - b - fontSize / 2
+        : rect.y + (t + (rect.h - b)) / 2;
+  return { tx, ty, align };
 }
 
 /** Final draw rect for an image, using its natural size when no explicit size was given. */
@@ -76,6 +111,68 @@ export function imageDrawRect(di: DrawImage, naturalW: number, naturalH: number)
   };
 }
 
+/** Parse a `margin="l,t,r,b"` attribute into a non-zero 4-tuple, or undefined. */
+export function parseMargin(v: string | undefined): [number, number, number, number] | undefined {
+  if (!v) return undefined;
+  const n = v.split(",").map((s) => parseFloat(s.trim()));
+  if (n.length < 4 || n.some((x) => isNaN(x))) return undefined;
+  const m: [number, number, number, number] = [n[0], n[1], n[2], n[3]];
+  return m.some((x) => x !== 0) ? m : undefined;
+}
+
+/** Nine-patch regions: split the source texture and `dest` rect into a 3x3 grid where
+ *  corners are 1:1 (margin px) and the edges/center stretch. `m` = (left, top, right, bottom). */
+export function nineSliceRegions(
+  dest: Rect,
+  srcW: number,
+  srcH: number,
+  m: [number, number, number, number]
+): { src: Rect; dst: Rect }[] {
+  // Clamp corners so they never exceed the source or destination extents.
+  const ml = Math.min(m[0], srcW, dest.w);
+  const mt = Math.min(m[1], srcH, dest.h);
+  const mr = Math.min(m[2], srcW - ml, dest.w - ml);
+  const mb = Math.min(m[3], srcH - mt, dest.h - mt);
+  const sCols = [
+    { o: 0, w: ml },
+    { o: ml, w: srcW - ml - mr },
+    { o: srcW - mr, w: mr },
+  ];
+  const sRows = [
+    { o: 0, h: mt },
+    { o: mt, h: srcH - mt - mb },
+    { o: srcH - mb, h: mb },
+  ];
+  const dCols = [
+    { o: dest.x, w: ml },
+    { o: dest.x + ml, w: dest.w - ml - mr },
+    { o: dest.x + dest.w - mr, w: mr },
+  ];
+  const dRows = [
+    { o: dest.y, h: mt },
+    { o: dest.y + mt, h: dest.h - mt - mb },
+    { o: dest.y + dest.h - mb, h: mb },
+  ];
+  const out: { src: Rect; dst: Rect }[] = [];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      if (sCols[c].w <= 0 || sRows[r].h <= 0 || dCols[c].w <= 0 || dRows[r].h <= 0) continue;
+      out.push({
+        src: { x: sCols[c].o, y: sRows[r].o, w: sCols[c].w, h: sRows[r].h },
+        dst: { x: dCols[c].o, y: dRows[r].o, w: dCols[c].w, h: dRows[r].h },
+      });
+    }
+  }
+  return out;
+}
+
+/** Rough text width for `sizetocontent` layout (the pure layout pass has no DOM metrics).
+ *  `{{…}}` tokens collapse to ~2 chars; `length * fontSize * 0.5` approximates the advance. */
+export function estimateTextWidth(text: string, fontSize: number): number {
+  const plain = text.replace(/\{\{[\s\S]*?\}\}/g, "00");
+  return plain.length * fontSize * 0.5;
+}
+
 export interface RenderItem {
   guid: string;
   tag: string;
@@ -87,10 +184,12 @@ export interface RenderItem {
   text?: string;
   fontColour?: string;
   fontSize?: number;
+  fontName?: string;
   textHAlign?: string;
   textVAlign?: string;
-  /** State `textxoffset` — shifts the text within the rect (clears a bullet/icon). */
-  textOffset?: { x: number; y: number };
+  /** Text insets from the rect edges: `textxoffset`=(left,right), `textyoffset`=(top,bottom).
+   *  Defines the box the text is aligned within (clears icons on either side). */
+  textInset?: { left: number; right: number; top: number; bottom: number };
   images: DrawImage[];
   /** Resolved tooltip text (only populated in Tooltip mode). */
   tooltip?: string;
@@ -217,6 +316,11 @@ function positionChild(parent: Rect, comp: RawElement, w: number, h: number): Re
 }
 
 type Templates = Record<string, TwuiDocument>;
+
+/** Real text measurement (canvas metrics), injected by the visualizer so `sizetocontent`
+ *  widths match the drawn font. Absent in headless layout -> estimateTextWidth fallback. */
+export type MeasureText = (text: string, fontName: string | undefined, sizePx: number) => number;
+let activeMeasureText: MeasureText | undefined;
 
 /** Slider axis if the component is a vslider/hslider (by its VSlider/HSlider callback). */
 function sliderAxis(comp: RawElement): "v" | "h" | null {
@@ -415,6 +519,7 @@ function imagesFor(
       // Size precedence: image metric -> component_image -> natural (at draw).
       w: numOpt(img, "width") ?? ciSize.w,
       h: numOpt(img, "height") ?? ciSize.h,
+      margin: parseMargin(getAttr(img, "margin")),
     });
   }
   return out;
@@ -431,8 +536,12 @@ export function computeLayout(
   staticVars?: Record<string, LuaValue>,
   resolveTooltips?: boolean,
   created: Record<string, TwuiDocument> = {},
-  ccoShorthand?: CcoShorthand | null
+  ccoShorthand?: CcoShorthand | null,
+  componentDataPacks: Record<string, LuaValue> = {},
+  measureText?: MeasureText,
+  posts?: MinisterialPosition[]
 ): LayoutResult {
+  activeMeasureText = measureText;
   const items: RenderItem[] = [];
   const scrollables: Scrollable[] = [];
   const sliderLinks: SliderLink[] = [];
@@ -588,6 +697,11 @@ export function computeLayout(
           }
           if (Object.keys(vars).length) s = { ...scope, vars: { ...scope.vars, ...vars } };
         }
+      } else if (tlCb.objectId === "CcoCampaignCharacterPost" && typeof s.vars.__postKey === "string") {
+        // Court office label: resolve `Name` to the post's title (from the ministerial
+        // positions table) so `ToUpper(Name)` renders the office, not the `dy_` default.
+        const title = postTitle(s.vars.__postKey, ctx, posts, loc);
+        if (title !== undefined) s = { ...scope, vars: { ...scope.vars, Name: title } };
       }
       const t = evalTextLabel(tlCb.funcId, s, loc);
       if (t !== null) text = t;
@@ -621,9 +735,10 @@ export function computeLayout(
     // Tooltip mode: resolve the component's tooltip (script setter, else static).
     const tooltip = resolveTooltips ? resolveTooltip(comp, scope, loc) ?? undefined : undefined;
 
-    // `textxoffset` shifts the text within the rect (to clear a bullet/icon).
-    const txo = state ? getAttr(state, "textxoffset") : undefined;
-    const [tox, toy] = parseVec2(txo, [0, 0]);
+    // Text insets: `textxoffset`=(left,right), `textyoffset`=(top,bottom) — both clear
+    // side icons; they are NOT an (x,y) shift (a separate `textyoffset` carries vertical).
+    const [insL, insR] = parseVec2(state ? getAttr(state, "textxoffset") : undefined, [0, 0]);
+    const [insT, insB] = parseVec2(state ? getAttr(state, "textyoffset") : undefined, [0, 0]);
 
     items.push({
       guid: guidOf(hierNode) ?? "",
@@ -636,9 +751,13 @@ export function computeLayout(
       text,
       fontColour: state ? getAttr(state, "font_m_colour") : undefined,
       fontSize: state ? num(state, "font_m_size", 13) : undefined,
+      fontName: state ? getAttr(state, "font_m_font_name") : undefined,
       textHAlign: state ? getAttr(state, "texthalign") : undefined,
       textVAlign: state ? getAttr(state, "textvalign") : undefined,
-      textOffset: tox || toy ? { x: tox, y: toy } : undefined,
+      textInset:
+        insL || insR || insT || insB
+          ? { left: insL, right: insR, top: insT, bottom: insB }
+          : undefined,
       images,
       tooltip,
     });
@@ -666,6 +785,56 @@ export function computeLayout(
     return Math.max(rect.y + rect.h, sub);
   };
 
+  // Visible element children of a hierarchy node (applies the same propagate + state +
+  // visibility filter as recurse), in the given component map. Shared with the content measurer.
+  const buildVisible = (
+    hierNode: RawElement,
+    scope: Scope,
+    cm: Map<string, RawElement>
+  ): { node: RawElement; comp: RawElement; state?: RawElement; scope: Scope }[] => {
+    const out: { node: RawElement; comp: RawElement; state?: RawElement; scope: Scope }[] = [];
+    for (const child of elementChildren(hierNode)) {
+      const cc = cm.get(guidOf(child) ?? "");
+      if (!cc) continue;
+      const childScope = propagate(cc, scope);
+      const st = stateFor(cc);
+      if (!shouldRender(cc, st, childScope)) continue;
+      out.push({ node: child, comp: cc, state: st, scope: childScope });
+    }
+    return out;
+  };
+
+  // True content size of a sizetocontent, static-children layout-engine container (bbox of its
+  // laid-out children), so a parent positions/centres it by its real extent. Undefined otherwise
+  // (parent keeps the state size). Dynamic lists (List/ContextList) are excluded.
+  const measureContent = (
+    hierNode: RawElement,
+    comp: RawElement,
+    scope: Scope | undefined,
+    cm: Map<string, RawElement> | undefined,
+    depth: number
+  ): { w: number; h: number } | undefined => {
+    if (depth > 6 || !scope || !cm) return undefined;
+    const le = getLayoutEngine(comp);
+    if (!le || getAttr(le, "sizetocontent") !== "true") return undefined;
+    if (callbacks(comp).some((c) => c.id === "List" || c.id === "ContextList")) return undefined;
+    const visible = buildVisible(hierNode, scope, cm);
+    if (!visible.length) return undefined;
+    const st = activeState(comp);
+    const box = { x: 0, y: 0, w: num(st, "width", 0), h: num(st, "height", 0) };
+    const anchored = getAttr(comp, "component_anchor_point") !== undefined;
+    const placed = layoutEngine(
+      le, visible, box, templates, !anchored,
+      (n, c, s, m) => measureContent(n, c, s, m, depth + 1), cm
+    );
+    if (!placed.length) return undefined;
+    return {
+      w: Math.max(...placed.map((p) => p.rect.x + p.rect.w)),
+      h: Math.max(...placed.map((p) => p.rect.y + p.rect.h)),
+    };
+  };
+  const containerContentSize: ContentSizeFn = (n, c, s, m) => measureContent(n, c, s, m, 0);
+
   // Returns the max bottom Y of everything emitted under hierNode.
   const recurse = (
     hierNode: RawElement,
@@ -679,6 +848,12 @@ export function computeLayout(
     const comp = cmap.get(guidOf(hierNode) ?? "");
     const children = elementChildren(hierNode);
     const le = comp ? getLayoutEngine(comp) : undefined;
+
+    // A component with its own ContextInitScriptObject publishes its own data pack;
+    // switch the subtree's `dataPack` to it (like ComponentCreator switches cmap/lDoc),
+    // so a sub-scripted list (e.g. the schemes list_box) resolves its own table.
+    const ownPack = comp ? componentDataPacks[guidOf(comp) ?? ""] : undefined;
+    if (ownPack !== undefined) scope = { ...scope, dataPack: ownPack };
 
     // A clipchildren container is a scrollable viewport: shift its children up by
     // the sim scroll offset; the clip stays the (fixed) viewport.
@@ -734,28 +909,9 @@ export function computeLayout(
     // render nothing, never the stray prototype. (The child stays in the tree.)
     const listCb = comp ? callbacks(comp).find((c) => c.id === "List" || c.id === "ContextList") : undefined;
     if (listCb && children.length === 1) {
-      let entries: { key: string; value: LuaValue }[] = [];
-      if (listCb.funcId && /CharacterList/.test(listCb.funcId)) {
-        // Character-post list (`CcoCampaignCharacterPost.CharacterList`): the character
-        // the user assigned to the current post (`__postKey` from propagate), as a single
-        // entry carrying its `ArtContext` (from `__roleArt`). Unassigned → empty.
-        const postKey = scope.vars.__postKey;
-        const roleArt = scope.vars.__roleArt;
-        if (
-          typeof postKey === "string" &&
-          roleArt && typeof roleArt === "object" && !Array.isArray(roleArt)
-        ) {
-          const art = (roleArt as Record<string, LuaValue>)[postKey];
-          if (art !== undefined) entries = [{ key: postKey, value: { ArtContext: art } }];
-        }
-      } else {
-        const key = listSource(comp!);
-        const table =
-          key && scope.dataPack && typeof scope.dataPack === "object" && !Array.isArray(scope.dataPack)
-            ? (scope.dataPack as Record<string, LuaValue>)[key]
-            : undefined;
-        entries = table !== undefined ? toEntries(table) : [];
-      }
+      // With NO resolvable data the list is EMPTY — render nothing, never the stray
+      // prototype. (The child stays in the tree.) See `listEntries`.
+      const entries = listEntries(comp!, scope);
       const tmpl = children[0];
       const tcomp = cmap.get(guidOf(tmpl) ?? "");
       const tstate = tcomp ? activeState(tcomp) : undefined;
@@ -784,18 +940,15 @@ export function computeLayout(
 
     // Filter to visible children up front (so layout engines don't reserve
     // space for hidden ones). Apply any ContextPropagator sub-context per child.
-    const visible: { node: RawElement; comp: RawElement; state?: RawElement; scope: Scope }[] = [];
-    for (const child of children) {
-      const cc = cmap.get(guidOf(child) ?? "");
-      if (!cc) continue;
-      const childScope = propagate(cc, scope);
-      const st = stateFor(cc);
-      if (!shouldRender(cc, st, childScope)) continue;
-      visible.push({ node: child, comp: cc, state: st, scope: childScope });
-    }
+    const visible = buildVisible(hierNode, scope, cmap);
 
     if (le && visible.length) {
-      for (const p of layoutEngine(le, visible, origin, templates)) {
+      // Anchored containers (e.g. the court `holder`) shrink to content and re-centre per their
+      // anchor; non-anchored ones (rows/tiers) honour each static child's cached offset instead.
+      const anchored = !!comp && getAttr(comp, "component_anchor_point") !== undefined;
+      let placed = layoutEngine(le, visible, origin, templates, !anchored, containerContentSize, cmap);
+      if (comp && anchored) placed = recenterSizeToContent(placed, le, comp, origin);
+      for (const p of placed) {
         track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc));
       }
       return finish();
@@ -878,11 +1031,85 @@ interface Placed {
   scope?: Scope;
 }
 
-function layoutEngine(
+/** A list/ContextList container's data entries (empty when it resolves no data). Shared by
+ *  the render recursion and the layout-engine measurer so an empty list collapses identically.
+ *   - CharacterList: the character assigned to the propagated post (`__postKey`/`__roleArt`).
+ *   - CcoScriptObject `TableValue.Value`: the published table iterated as script nodes.
+ *   - otherwise: the named data-pack table. */
+export function listEntries(comp: RawElement, scope: Scope): { key: string; value: LuaValue }[] {
+  const listCb = callbacks(comp).find((c) => c.id === "List" || c.id === "ContextList");
+  if (!listCb) return [];
+  if (listCb.funcId && /CharacterList/.test(listCb.funcId)) {
+    const postKey = scope.vars.__postKey;
+    const roleArt = scope.vars.__roleArt;
+    if (typeof postKey === "string" && roleArt && typeof roleArt === "object" && !Array.isArray(roleArt)) {
+      const art = (roleArt as Record<string, LuaValue>)[postKey];
+      if (art !== undefined) return [{ key: postKey, value: { ArtContext: art } }];
+    }
+    return [];
+  }
+  if (isScriptValueList(listCb.funcId)) {
+    return scriptNodes(scope.dataPack).map((value, i) => ({ key: String(i), value }));
+  }
+  const key = listSource(comp);
+  const table =
+    key && scope.dataPack && typeof scope.dataPack === "object" && !Array.isArray(scope.dataPack)
+      ? (scope.dataPack as Record<string, LuaValue>)[key]
+      : undefined;
+  return table !== undefined ? toEntries(table) : [];
+}
+
+/** True when `comp` is a `sizetocontent` list with no data: in-game it collapses to nothing,
+ *  so a parent layout engine must reserve ZERO space for it (not its placeholder state size).
+ *  Lets a sibling (e.g. the court `empty_slot_holder`) reflect the real content width. */
+export function collapsesEmpty(comp: RawElement | undefined, scope: Scope | undefined): boolean {
+  if (!comp || !scope) return false;
+  const le = getLayoutEngine(comp);
+  if (!le || getAttr(le, "sizetocontent") !== "true") return false;
+  if (!callbacks(comp).some((c) => c.id === "List" || c.id === "ContextList")) return false;
+  return listEntries(comp, scope).length === 0;
+}
+
+/** Re-centre a `sizetocontent` container's laid-out content within its (state-sized) rect using
+ *  the container's OWN anchor. In-game such a container shrinks to its content and its docking
+ *  re-centres it; we keep the cached state-sized rect, so without this the content sits at the
+ *  rect's leading edge (e.g. the court `empty_slot_holder` lands in the holder's right half).
+ *  Only containers with an explicit `component_anchor_point` shift (default 0 = no-op), so
+ *  left/top-anchored rows are untouched. */
+export function recenterSizeToContent(placed: Placed[], le: RawElement, comp: RawElement, origin: Rect): Placed[] {
+  if (!placed.length || getAttr(le, "sizetocontent") !== "true") return placed;
+  const horizontal = (getAttr(le, "type") ?? "List") === "HorizontalList";
+  const [ax, ay] = parseVec2(getAttr(comp, "component_anchor_point"), [0, 0]);
+  const a = horizontal ? ax : ay;
+  if (a === 0) return placed;
+  if (horizontal) {
+    const contentW = Math.max(...placed.map((p) => p.rect.x + p.rect.w)) - origin.x;
+    const shift = a * (origin.w - contentW);
+    return Math.abs(shift) < 0.5 ? placed : placed.map((p) => ({ ...p, rect: { ...p.rect, x: p.rect.x + shift } }));
+  }
+  const contentH = Math.max(...placed.map((p) => p.rect.y + p.rect.h)) - origin.y;
+  const shift = a * (origin.h - contentH);
+  return Math.abs(shift) < 0.5 ? placed : placed.map((p) => ({ ...p, rect: { ...p.rect, y: p.rect.y + shift } }));
+}
+
+/** Measures a `sizetocontent` container's true content size (bbox of its laid-out children),
+ *  so a parent layout engine can position/centre it by its content rather than its state size.
+ *  Returns undefined for anything that should keep its state size. */
+export type ContentSizeFn = (
+  node: RawElement,
+  comp: RawElement,
+  scope: Scope | undefined,
+  cmap: Map<string, RawElement> | undefined
+) => { w: number; h: number } | undefined;
+
+export function layoutEngine(
   le: RawElement,
   children: { node: RawElement; comp: RawElement; state?: RawElement; scope?: Scope }[],
   parentRect: Rect,
-  templates: Templates
+  templates: Templates,
+  honorOffsets = false,
+  contentSizeOf?: ContentSizeFn,
+  cmap?: Map<string, RawElement>
 ): Placed[] {
   const type = getAttr(le, "type") ?? "List";
   const [sx, sy] = parseVec2(getAttr(le, "spacing"), [0, 0]);
@@ -891,6 +1118,40 @@ function layoutEngine(
   const valign = getAttr(le, "vertical_alignment");
   const halign = getAttr(le, "horizontal_alignment");
   const horizontal = type === "HorizontalList";
+  const sizeToContent = getAttr(le, "sizetocontent") === "true";
+
+  // Child size for the engine. With `sizetocontent`, a button that resizes to its text
+  // (`texthbehaviour="Resize"`) is measured at its (estimated) text width, not the state's
+  // design-time fallback (e.g. 828, which would space children off-screen). Fixed-width
+  // columns like `label_name` (no Resize) keep their declared size so siblings aren't bunched.
+  const measure = (
+    node: RawElement | undefined,
+    comp: RawElement,
+    state: RawElement | undefined,
+    scope?: Scope
+  ): { w: number; h: number } => {
+    // An empty sizetocontent list contributes no space (it collapses in-game).
+    if (collapsesEmpty(comp, scope)) return { w: 0, h: 0 };
+    // A sizetocontent container is measured by its real content, so a parent centres/stacks it
+    // by its true extent (e.g. top_row sized to leader+heir, not just the leader's state width).
+    const cs = node && contentSizeOf?.(node, comp, scope, cmap);
+    if (cs) return cs;
+    const s = sizeFor(comp, state, parentRect, templates);
+    if (sizeToContent && state && getAttr(state, "texthbehaviour") === "Resize") {
+      const t = getAttr(state, "text");
+      if (t) {
+        const [il, ir] = parseVec2(getAttr(state, "textxoffset"), [0, 0]);
+        const size = num(state, "font_m_size", 13);
+        const txt = decodeEntities(t);
+        // Real font metrics when available (visualizer), else the char-count estimate.
+        const tw = activeMeasureText
+          ? activeMeasureText(txt, getAttr(state, "font_m_font_name"), size)
+          : estimateTextWidth(txt, size);
+        return { w: tw + il + ir, h: s.h };
+      }
+    }
+    return s;
+  };
 
   // Fixed column widths from <columnwidths><column width=.../></columnwidths>.
   const colWidths: number[] = [];
@@ -920,8 +1181,10 @@ function layoutEngine(
     let rowH = 0;
     let x = parentRect.x + mx;
     for (const { node, comp, state, scope } of ordered) {
-      const { w, h } = sizeFor(comp, state, parentRect, templates);
-      const step = colWidths.length ? colWidths[Math.min(col, colWidths.length - 1)] : w;
+      const { w, h } = measure(node, comp, state, scope);
+      // `sizetocontent` packs columns to their content; fixed `columnwidths` apply only
+      // to non-content grids (else tiny items get spaced by the full column width).
+      const step = !sizeToContent && colWidths.length ? colWidths[Math.min(col, colWidths.length - 1)] : w;
       out.push({ node, comp, state, rect: { x, y: cy, w, h }, scope });
       rowH = Math.max(rowH, h);
       x += step + sx;
@@ -940,14 +1203,28 @@ function layoutEngine(
   let cx = parentRect.x + mx;
   let cy = parentRect.y + my;
   for (const { node, comp, state, scope } of ordered) {
-    const { w, h } = sizeFor(comp, state, parentRect, templates);
-    // NB: a child's `offset` inside a LayoutEngine is the editor's CACHED
-    // engine-computed position (like dock_offset). The engine fully controls
-    // placement, so we must NOT add it — doing so double-counts and spreads items.
+    const { w, h } = measure(node, comp, state, scope);
+    // A child's `offset` inside a LayoutEngine is normally the editor's CACHED
+    // engine-computed position, which the engine reproduces by stacking — so adding it would
+    // double-count. But for a STATIC child in a HorizontalList (honorOffsets, set when the
+    // container has no anchor) the offset is the child's real position relative to the parent
+    // (like positionChild) and may NOT equal the stacked position (e.g. a `faction_heir`
+    // overlapping the leader). Honour it as an ABSOLUTE position. Text-resize children re-stack
+    // by measured width, so their offset is skipped.
+    const offsetAttr = comp ? getAttr(comp, "offset") : undefined;
+    const useOffset =
+      honorOffsets &&
+      horizontal &&
+      offsetAttr !== undefined &&
+      !(sizeToContent && state && getAttr(state, "texthbehaviour") === "Resize");
 
     let x: number;
     let y: number;
-    if (horizontal) {
+    if (useOffset) {
+      const [ox, oy] = parseVec2(offsetAttr, [0, 0]);
+      x = parentRect.x + ox;
+      y = parentRect.y + oy;
+    } else if (horizontal) {
       x = cx;
       y = valign === "Center" ? parentRect.y + (parentRect.h - h) / 2 : cy;
     } else {
@@ -955,8 +1232,9 @@ function layoutEngine(
       y = cy;
     }
     out.push({ node, comp, state, rect: { x, y, w, h }, scope });
-    if (horizontal) cx += w + sx;
-    else cy += h + sy;
+    // A collapsed (zero-size) child consumes no spacing, so it leaves no phantom gap.
+    if (horizontal) cx += w ? w + sx : 0;
+    else cy += h ? h + sy : 0;
   }
   return out;
 }

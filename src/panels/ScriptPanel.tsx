@@ -9,7 +9,7 @@ type Tab = "clean" | "raw";
  * (overrides the parsed pack fed to the visualizer; never writes the .lua).
  * Clean = the data pack as editable JSON; Raw = the raw Lua text (re-parsed).
  */
-export default function ScriptPanel({ onClose }: { onClose: () => void }) {
+export default function ScriptPanel({ onClose, embedded }: { onClose: () => void; embedded?: boolean }) {
   const conn = useStore((s) => s.scriptConn);
   const override = useStore((s) => s.dataPackOverride);
   const draft = useStore((s) => s.scriptDraft);
@@ -89,18 +89,26 @@ export default function ScriptPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <>
-      <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
-      <div className="fixed z-40 left-1/2 top-12 -translate-x-1/2 w-[680px] max-h-[82vh] flex flex-col bg-panel border border-edge rounded shadow-xl text-[12px]">
+      {!embedded && <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />}
+      <div
+        className={
+          embedded
+            ? "w-full h-full flex flex-col bg-panel text-[12px]"
+            : "fixed z-40 left-1/2 top-12 -translate-x-1/2 w-[680px] max-h-[82vh] flex flex-col bg-panel border border-edge rounded shadow-xl text-[12px]"
+        }
+      >
         <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f]">
-          <span className="font-semibold">Script</span>
+          {!embedded && <span className="font-semibold">Script</span>}
           <span className="text-gray-500 truncate">{conn.id ?? "(no script_id)"}</span>
           {override != null && <span className="text-amber-300/80 text-[10px]">· tweaked</span>}
           <div className="flex-1" />
           {tabBtn("clean", "Clean (JSON)")}
           {tabBtn("raw", "Raw (Lua)")}
-          <button className="ml-1 text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose}>
-            ✕
-          </button>
+          {!embedded && (
+            <button className="ml-1 text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose}>
+              ✕
+            </button>
+          )}
         </div>
 
         {!connected ? (

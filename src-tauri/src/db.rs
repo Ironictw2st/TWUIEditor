@@ -13,10 +13,25 @@ pub struct ContextDb {
     /// subculture -> culture
     pub subcultures: Vec<Subculture>,
     pub cultures: Vec<String>,
-    /// campaign/start-pos keys, `3k_main_campaign_map` first.
+    /// campaign/start-pos keys, the primary `_main_` campaign first.
     pub campaigns: Vec<String>,
     /// campaign key -> faction keys playable in it.
     pub campaign_factions: std::collections::HashMap<String, Vec<String>>,
+    /// Court-office title variants (one per cultural row), resolved to display text.
+    pub ministerial_positions: Vec<MinisterialPosition>,
+}
+
+/// One cultural variant of a court office: which post it is, the context it applies
+/// to, and its resolved on-screen title. The frontend picks the best-matching variant
+/// for the selected perspective (see src/twui/posts.ts).
+#[derive(serde::Serialize, Default, Clone)]
+pub struct MinisterialPosition {
+    pub position_key: String,
+    pub culture: String,
+    pub faction: String,
+    pub subculture: String,
+    pub campaign: String,
+    pub title: String,
 }
 
 #[derive(serde::Serialize)]
@@ -138,18 +153,86 @@ pub fn load(state: &AppState) -> ContextDb {
         for list in out.campaign_factions.values_mut() {
             list.sort();
         }
-        // Campaign list with the main map first, then the rest alphabetically.
+        // Campaign list, alphabetical, but with the title's primary "main" campaign first.
+        // TW games name it `<game>_main_*` (3k_main_campaign_map, wh3_main_*, ...), so we
+        // promote the first `_main_` key generically rather than naming a specific game.
         let mut campaigns: Vec<String> = out.campaign_factions.keys().cloned().collect();
         campaigns.sort();
-        const MAIN: &str = "3k_main_campaign_map";
-        if let Some(pos) = campaigns.iter().position(|c| c == MAIN) {
-            campaigns.remove(pos);
-            campaigns.insert(0, MAIN.to_string());
+        if let Some(pos) = campaigns.iter().position(|c| c.contains("_main_")) {
+            let main = campaigns.remove(pos);
+            campaigns.insert(0, main);
         }
         out.campaigns = campaigns;
     }
 
+    // Court-office titles. The culture-details table maps each post (ministerial_position_key)
+    // + its context (culture/faction/subculture/campaign) to a localised_string_key; the
+    // on-screen title is `ministerial_positions_strings_on_screen_<localised_string_key>` in
+    // the loc table. We resolve the title per row here so the frontend just picks a variant.
+    {
+        let titles = read_on_screen_titles(&root);
+        if let Some((h, rows)) = read_tsv(
+            &db.join("ministerial_positions_culture_details_tables").join("data__.tsv"),
+        ) {
+            let (pk, cu, fa, sub, cam, ls) = (
+                col_index(&h, "ministerial_position_key"),
+                col_index(&h, "culture_key"),
+                col_index(&h, "faction_key"),
+                col_index(&h, "subculture_key"),
+                col_index(&h, "campaign_key"),
+                col_index(&h, "localised_string_key"),
+            );
+            for r in &rows {
+                let position_key = get(r, pk).to_string();
+                let ls_key = get(r, ls);
+                if position_key.is_empty() || ls_key.is_empty() {
+                    continue;
+                }
+                let title = match titles
+                    .get(&format!("ministerial_positions_strings_on_screen_{ls_key}"))
+                {
+                    Some(t) if !t.is_empty() => t.clone(),
+                    _ => continue,
+                };
+                out.ministerial_positions.push(MinisterialPosition {
+                    position_key,
+                    culture: get(r, cu).to_string(),
+                    faction: get(r, fa).to_string(),
+                    subculture: get(r, sub).to_string(),
+                    campaign: get(r, cam).to_string(),
+                    title,
+                });
+            }
+        }
+    }
+
     out
+}
+
+/// The court-office on-screen title strings, keyed by their full loc key.
+fn read_on_screen_titles(root: &Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let path = root
+        .join("text")
+        .join("db")
+        .join("ministerial_positions_strings__.loc.tsv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    let mut lines = text.lines();
+    lines.next(); // header
+    for line in lines {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        if let (Some(key), Some(value)) = (cols.next(), cols.next()) {
+            if key.starts_with("ministerial_positions_strings_on_screen_") {
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -188,5 +271,29 @@ mod tests {
         assert!(main.iter().any(|f| f == "3k_main_faction_cao_cao"));
         let eight = db.campaign_factions.get("8p_start_pos").expect("8p campaign");
         assert!(!eight.iter().any(|f| f == "3k_main_faction_cao_cao"));
+    }
+
+    #[test]
+    fn resolves_court_office_titles() {
+        let state = AppState::new();
+        assert!(state.data_root().is_some(), "3K data root not found for test");
+        let db = load(&state);
+        assert!(!db.ministerial_positions.is_empty(), "expected court office titles");
+
+        // The generic Han variant (no faction, 3k_main_chinese subculture) of minister_earth
+        // is "Chancellor"; the governor is "Administrator".
+        let han = |pos: &str| {
+            db.ministerial_positions
+                .iter()
+                .find(|p| {
+                    p.position_key == pos
+                        && p.faction.is_empty()
+                        && p.subculture == "3k_main_chinese"
+                })
+                .map(|p| p.title.as_str())
+        };
+        assert_eq!(han("3k_main_court_offices_minister_earth"), Some("Chancellor"));
+        assert_eq!(han("3k_main_court_offices_minister_fire"), Some("Grand Commandant"));
+        assert_eq!(han("3k_main_court_offices_governor"), Some("Administrator"));
     }
 }

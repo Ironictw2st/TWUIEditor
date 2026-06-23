@@ -6,6 +6,7 @@ import {
   componentMap,
   componentStates,
   getAttr,
+  getLayoutEngine,
   guidOf,
 } from "../twui/doc";
 import { componentScriptId } from "../twui/script";
@@ -99,6 +100,9 @@ function SchemaField({
   label?: string;
 }) {
   const editAttr = useStore((s) => s.editAttr);
+  const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
+  // The LayoutEngine child has no guid; its edits route through the component's guid.
+  const edit = kind === "layoutEngine" ? editLayoutEngineAttr : editAttr;
   const schema = schemaFor(attrKey, kind);
   const [local, setLocal] = useState(value ?? "");
   useEffect(() => setLocal(value ?? ""), [value, guid]);
@@ -106,7 +110,7 @@ function SchemaField({
   if (!schema) return <Field guid={guid} attrKey={attrKey} value={value} label={label ?? attrKey} />;
 
   const commit = () => {
-    if (local !== (value ?? "")) editAttr(guid, attrKey, local);
+    if (local !== (value ?? "")) edit(guid, attrKey, local);
   };
   const title = schema.description + (schema.default ? `  (default: ${schema.default})` : "");
   const labelEl = (
@@ -128,7 +132,7 @@ function SchemaField({
           value={local}
           onChange={(e) => {
             setLocal(e.target.value);
-            editAttr(guid, attrKey, e.target.value);
+            edit(guid, attrKey, e.target.value);
           }}
         >
           {!local && <option value="" />}
@@ -172,6 +176,8 @@ function SchemaField({
  *  element; choosing one writes its default so the new field appears. */
 function AddAttr({ guid, kind, present }: { guid: string; kind: AttrKind; present: string[] }) {
   const editAttr = useStore((s) => s.editAttr);
+  const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
+  const edit = kind === "layoutEngine" ? editLayoutEngineAttr : editAttr;
   const missing = attrsFor(kind).filter((s) => !present.includes(s.name));
   if (!missing.length) return null;
   return (
@@ -182,7 +188,7 @@ function AddAttr({ guid, kind, present }: { guid: string; kind: AttrKind; presen
         value=""
         onChange={(e) => {
           const name = e.target.value;
-          if (name) editAttr(guid, name, schemaFor(name, kind)?.default ?? "");
+          if (name) edit(guid, name, schemaFor(name, kind)?.default ?? "");
         }}
       >
         <option value="">Add…</option>
@@ -261,6 +267,35 @@ function StateBlock({ state, active }: { state: RawElement; active?: boolean }) 
   );
 }
 
+/** The component's `<LayoutEngine>` child (arranges its children as a list/grid/radial). Same
+ *  schema-driven add-attribute system as the Component/State sections; edits route through the
+ *  component guid since the LayoutEngine element has none of its own. */
+function LayoutEngineSection({ guid, comp }: { guid: string; comp: RawElement }) {
+  const le = getLayoutEngine(comp);
+  const addLayoutEngine = useStore((s) => s.addLayoutEngine);
+  return (
+    <Section title="Layout Engine" defaultOpen={!!le}>
+      {!le ? (
+        <button
+          className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
+          onClick={() => addLayoutEngine(guid)}
+        >
+          + Add Layout Engine
+        </button>
+      ) : (
+        <>
+          {["type", "spacing", "sizetocontent", "horizontal_alignment", "vertical_alignment", "margins", "reverse_order", "itemsperrow"].map(
+            (k) => (
+              <SchemaField key={k} guid={guid} attrKey={k} value={getAttr(le, k)} kind="layoutEngine" />
+            )
+          )}
+          <AddAttr guid={guid} kind="layoutEngine" present={le.attrs.map((x) => x[0])} />
+        </>
+      )}
+    </Section>
+  );
+}
+
 function ImageBlock({ img, dataRoot }: { img: RawElement; dataRoot: string | null }) {
   const guid = guidOf(img) ?? "";
   const path = getAttr(img, "imagepath");
@@ -294,6 +329,7 @@ export default function InspectorPanel() {
   const dataRoot = useStore((s) => s.dataRoot);
   const applyComponentRaw = useStore((s) => s.applyComponentRaw);
   const applyHierarchyRaw = useStore((s) => s.applyHierarchyRaw);
+  const openSearch = useStore((s) => s.openSearch);
   const [mode, setMode] = useState<"clean" | "raw">("clean");
 
   const comp =
@@ -327,6 +363,13 @@ export default function InspectorPanel() {
       <div className="px-3 h-9 flex items-center gap-2 border-b border-edge shrink-0">
         <span className="font-semibold text-[12px] truncate">{comp.tag}</span>
         <div className="flex-1" />
+        <button
+          className="px-2 py-0.5 rounded text-[11px] border bg-[#2a2d3a] border-edge hover:bg-[#343849]"
+          onClick={() => openSearch("refs")}
+          title="Find components that reference this one"
+        >
+          Refs
+        </button>
         {tab("clean", "Clean")}
         {tab("raw", "Raw")}
       </div>
@@ -360,6 +403,8 @@ export default function InspectorPanel() {
           <AddAttr guid={guid} kind="component" present={comp.attrs.map((x) => x[0])} />
         </Section>
 
+        <LayoutEngineSection guid={guid} comp={comp} />
+
         <EmbeddedLayoutSection comp={comp} />
 
         <BindingsSection doc={doc} comp={comp} guid={guid} />
@@ -372,9 +417,42 @@ export default function InspectorPanel() {
             <ImageBlock key={guidOf(im)} img={im} dataRoot={dataRoot} />
           ))}
         </Section>
+
+        <GuidsSection guid={guid} label={getAttr(comp, "id") ?? comp.tag} />
       </div>
       )}
     </>
+  );
+}
+
+/** Regenerate GUIDs (format-preserving; references stay linked) at three scopes. Lives here so the
+ *  user can pick this component, this component + its subtree, or the whole document. */
+function GuidsSection({ guid, label }: { guid: string; label: string }) {
+  const regenGuids = useStore((s) => s.regenGuids);
+  const regenComponentGuids = useStore((s) => s.regenComponentGuids);
+  const regenSubtreeGuids = useStore((s) => s.regenSubtreeGuids);
+  const b = "w-full text-left px-2 py-1 mb-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]";
+  return (
+    <Section title="GUIDs" defaultOpen={false}>
+      <div className="text-[10px] text-gray-500 mb-2">
+        Replace GUIDs with fresh ones of the same format; internal references stay linked. Undoable.
+      </div>
+      <button className={b} onClick={() => regenComponentGuids(guid)}>
+        Regen this component ({label})
+      </button>
+      <button className={b} onClick={() => regenSubtreeGuids(guid)}>
+        Regen this component + subtree
+      </button>
+      <button
+        className={b}
+        onClick={() => {
+          if (window.confirm("Replace EVERY GUID in this document with a fresh one? Internal references stay linked. This can be undone."))
+            regenGuids();
+        }}
+      >
+        Regen all GUIDs in document
+      </button>
+    </Section>
   );
 }
 

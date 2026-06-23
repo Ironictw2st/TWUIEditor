@@ -50,3 +50,38 @@ select:focus {
 button {
   cursor: pointer;
 }
+
+/* Match the dockview (abyss) theme to the app palette. The descendant selector outranks
+ * dockview's own `.dockview-theme-abyss` rule, so these CSS variables win and cascade to its
+ * tabs / borders / resize handles. Palette: panel #1e1f26, edge #34374a, accent #c9a227, canvas
+ * #101118, header #23252f. */
+.twui-dock .dockview-theme-abyss {
+  --dv-color-abyss-dark: #101118; /* group / empty area background (canvas) */
+  --dv-color-abyss: #23252f; /* tab bar + inactive tab background (panel header) */
+  --dv-color-abyss-light: #1e1f26; /* active tab background (panel body) */
+  --dv-color-abyss-lighter: #34374a; /* separators / tab dividers (edge) */
+  --dv-color-abyss-accent: #c9a227;
+  --dv-color-abyss-primary-text: #e6e6ec;
+  --dv-color-abyss-secondary-text: #9aa0ad;
+
+  --dv-tabs-and-actions-container-background-color: #23252f;
+  --dv-group-view-background-color: #1e1f26;
+  --dv-activegroup-visiblepanel-tab-background-color: #1e1f26;
+  --dv-activegroup-hiddenpanel-tab-background-color: #23252f;
+  --dv-inactivegroup-visiblepanel-tab-background-color: #23252f;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #23252f;
+  --dv-activegroup-visiblepanel-tab-color: #e6e6ec;
+  --dv-activegroup-hiddenpanel-tab-color: rgba(230, 230, 236, 0.5);
+  --dv-inactivegroup-visiblepanel-tab-color: rgba(230, 230, 236, 0.55);
+  --dv-inactivegroup-hiddenpanel-tab-color: rgba(230, 230, 236, 0.3);
+
+  --dv-separator-border: #34374a;
+  --dv-tab-divider-color: #34374a;
+  --dv-paneview-header-border-color: #34374a;
+  --dv-sash-color: transparent;
+  --dv-active-sash-color: #c9a227;
+  --dv-paneview-active-outline-color: #c9a227;
+  --dv-drag-over-background-color: rgba(201, 162, 39, 0.15);
+  --dv-drag-over-border-color: #c9a227;
+  --dv-icon-hover-background-color: rgba(201, 162, 39, 0.18);
+}

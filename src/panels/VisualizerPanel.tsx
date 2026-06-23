@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../state/store";
-import { computeLayout, imageDrawRect, LayoutResult, Rect, Scrollable, Sim } from "../layout/compute";
+import ToolPalette from "./ToolPalette";
+import { computeLayout, imageDrawRect, LayoutResult, nineSliceRegions, Rect, Scrollable, Sim, textAnchor } from "../layout/compute";
+import { parseColour } from "../twui/colour";
+import { fontSpec } from "../twui/fonts";
 import { deriveTokens } from "../twui/context";
 import { extractDataPack, LuaValue } from "../twui/lua";
 import { buildPlayersContext } from "../twui/players";
 import { componentMap, guidOf } from "../twui/doc";
 import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
+import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { imageUrl } from "../ipc/commands";
 
-type Mode = "view" | "move" | "sim" | "tooltip";
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
 
 // Images the game replaces at runtime (faction flags, dynamic icons, unit cards)
@@ -19,25 +22,72 @@ function isFaint(path: string): boolean {
   return /placeholer|placeholder|ph_|_placeholer|mask|empty_face|halfbody|fullbody_character/i.test(path);
 }
 
-function parseAlpha(colour: string | undefined): number {
-  if (!colour || colour[0] !== "#") return 1;
-  const hex = colour.slice(1);
-  if (hex.length >= 8) {
-    const a = parseInt(hex.slice(6, 8), 16);
-    return isNaN(a) ? 1 : a / 255;
+// Reused offscreen canvas for tinted blits (no per-image allocation).
+let tintCanvas: HTMLCanvasElement | null = null;
+
+// Reused offscreen 2d context for real text measurement (canvas metrics).
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureText(text: string, fontName: string | undefined, sizePx: number): number {
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  if (!measureCtx) return text.length * sizePx * 0.5;
+  measureCtx.font = fontSpec(fontName, sizePx);
+  return measureCtx.measureText(text).width;
+}
+
+/** Draw `img` into `rect` tinted by `rgb` (multiply) while keeping the texture's own
+ *  per-pixel alpha — so a black-tinted frame becomes a black border, not a black fill. */
+function drawImageTinted(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  rect: Rect,
+  rgb: string,
+  alpha: number,
+  src?: Rect
+): void {
+  const sx = src?.x ?? 0;
+  const sy = src?.y ?? 0;
+  const sw = src?.w ?? img.naturalWidth;
+  const sh = src?.h ?? img.naturalHeight;
+  const w = Math.max(1, Math.round(rect.w));
+  const h = Math.max(1, Math.round(rect.h));
+  if (!tintCanvas) tintCanvas = document.createElement("canvas");
+  const tc = tintCanvas;
+  tc.width = w;
+  tc.height = h;
+  const tctx = tc.getContext("2d");
+  if (!tctx) {
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(img, sx, sy, sw, sh, rect.x, rect.y, rect.w, rect.h);
+    ctx.globalAlpha = 1;
+    return;
   }
-  return 1;
+  tctx.clearRect(0, 0, w, h);
+  tctx.globalCompositeOperation = "source-over";
+  tctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+  tctx.globalCompositeOperation = "multiply";
+  tctx.fillStyle = rgb;
+  tctx.fillRect(0, 0, w, h);
+  // Restore the original texture alpha (multiply/fill ignored it).
+  tctx.globalCompositeOperation = "destination-in";
+  tctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+  tctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(tc, rect.x, rect.y, rect.w, rect.h);
+  ctx.globalAlpha = 1;
 }
 
 export default function VisualizerPanel() {
   const doc = useStore((s) => s.doc);
   const dataRoot = useStore((s) => s.dataRoot);
   const selectedGuid = useStore((s) => s.selectedGuid);
+  const selectedGuids = useStore((s) => s.selectedGuids);
   const select = useStore((s) => s.select);
+  const toggleSelect = useStore((s) => s.toggleSelect);
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
   const beginDrag = useStore((s) => s.beginDrag);
   const liveSetOffset = useStore((s) => s.liveSetOffset);
+  const createAt = useStore((s) => s.createAt);
   const context = useStore((s) => s.context);
   const contextDb = useStore((s) => s.contextDb);
   const characterDb = useStore((s) => s.characterDb);
@@ -48,21 +98,20 @@ export default function VisualizerPanel() {
   const scriptText = useStore((s) => s.scriptConn.text);
   const scriptId = useStore((s) => s.scriptConn.id);
   const dataPackOverride = useStore((s) => s.dataPackOverride);
+  const componentDataPacks = useStore((s) => s.componentDataPacks);
   const previewState = useStore((s) => s.previewState);
   const background = useStore((s) => s.background);
   const ccoShorthand = useStore((s) => s.ccoShorthand);
 
-  // Seed the visualizer's mode + bounds from the persisted defaults (read once).
-  const vizDefaults = useStore((s) => s.settings.visualizer);
+  const keybinds = useStore((s) => s.settings.keybinds);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [, forceTick] = useState(0);
   const [hover, setHover] = useState<string | null>(null);
-  const [showBounds, setShowBounds] = useState(vizDefaults.showBounds);
-  const [showPanel, setShowPanel] = useState(true);
-  const [mode, setMode] = useState<Mode>(vizDefaults.defaultMode);
+  const showBounds = useStore((s) => s.showBounds);
+  const mode = useStore((s) => s.mode);
   // Tooltip mode interacts like Simulation (scroll/click-sim, no selection).
   const simLike = mode === "sim" || mode === "tooltip";
   const [sim, setSim] = useState<Sim>(EMPTY_SIM);
@@ -70,6 +119,16 @@ export default function VisualizerPanel() {
 
   // Simulation state is per-document.
   useEffect(() => setSim(EMPTY_SIM), [doc]);
+
+  // Re-measure once the bundled fonts load, so sizetocontent widths use real metrics.
+  const [fontsReady, setFontsReady] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    document.fonts?.ready.then(() => alive && setFontsReady(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const tokens = useMemo(() => deriveTokens(contextDb), [contextDb]);
   const dataPack = useMemo(
@@ -102,10 +161,15 @@ export default function VisualizerPanel() {
             staticVars,
             mode === "tooltip",
             createdLayouts,
-            ccoShorthand
+            ccoShorthand,
+            componentDataPacks as Record<string, LuaValue>,
+            measureText,
+            contextDb?.ministerial_positions
           )
         : { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] },
-    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand]
+    // `fontsReady` is a dep so layout re-measures once the bundled fonts load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb]
   );
 
   const getImage = useCallback((path: string): HTMLImageElement | null => {
@@ -151,12 +215,13 @@ export default function VisualizerPanel() {
     ctx.save();
     ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * panX, dpr * panY);
 
-    // Canvas background (the design surface).
+    // Canvas background (the design surface). `@white`/`@black` are solid-colour choices; any
+    // other non-empty value is a background image path (the campaign map) behind the HUD.
     const cv = layout.canvas;
-    ctx.fillStyle = "#0c0d12";
+    const solidBg = background === "@white" ? "#ffffff" : background === "@black" ? "#000000" : null;
+    ctx.fillStyle = solidBg ?? "#0c0d12";
     ctx.fillRect(cv.x, cv.y, cv.w, cv.h);
-    // Optional selected background image (the campaign map) behind the HUD.
-    if (background) {
+    if (background && !solidBg) {
       const bg = getImage(background);
       if (bg && bg.complete && bg.naturalWidth > 0) {
         try {
@@ -185,14 +250,35 @@ export default function VisualizerPanel() {
         if (img && img.complete && img.naturalWidth > 0) {
           // Size to the image's natural pixels when no explicit size was given.
           const r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
+          // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
           // Runtime-swapped placeholders are drawn faint so they don't dominate.
-          ctx.globalAlpha = parseAlpha(di.colour) * (isFaint(di.imagepath) ? 0.25 : 1);
+          const { rgb, alpha } = parseColour(di.colour);
+          const a = alpha * (isFaint(di.imagepath) ? 0.25 : 1);
+          // A `margin` image draws as a nine-patch border (corners 1:1, edges/center
+          // stretched) so a bordered texture isn't smeared across the whole rect.
+          const regions = di.margin
+            ? nineSliceRegions(r, img.naturalWidth, img.naturalHeight, di.margin)
+            : null;
           try {
-            ctx.drawImage(img, r.x, r.y, r.w, r.h);
+            if (regions) {
+              for (const reg of regions) {
+                if (rgb) drawImageTinted(ctx, img, reg.dst, rgb, a, reg.src);
+                else {
+                  ctx.globalAlpha = a;
+                  ctx.drawImage(img, reg.src.x, reg.src.y, reg.src.w, reg.src.h, reg.dst.x, reg.dst.y, reg.dst.w, reg.dst.h);
+                  ctx.globalAlpha = 1;
+                }
+              }
+            } else if (rgb) {
+              drawImageTinted(ctx, img, r, rgb, a);
+            } else {
+              ctx.globalAlpha = a;
+              ctx.drawImage(img, r.x, r.y, r.w, r.h);
+              ctx.globalAlpha = 1;
+            }
           } catch {
             /* ignore */
           }
-          ctx.globalAlpha = 1;
         } else if (img && !img.complete) {
           // still loading; leave blank
         } else {
@@ -210,7 +296,7 @@ export default function VisualizerPanel() {
     if (showBounds) {
       ctx.lineWidth = 1 / zoom;
       for (const item of layout.items) {
-        if (item.guid === selectedGuid || item.guid === hover) continue;
+        if (selectedGuids.includes(item.guid) || item.guid === hover) continue;
         ctx.strokeStyle = "rgba(120,130,170,0.22)";
         ctx.strokeRect(item.rect.x, item.rect.y, item.rect.w, item.rect.h);
       }
@@ -225,9 +311,12 @@ export default function VisualizerPanel() {
       ctx.lineWidth = wdt / zoom;
       ctx.strokeRect(it.rect.x, it.rect.y, it.rect.w, it.rect.h);
     };
-    // Hover highlight everywhere except Simulation; selection only in View/Move.
+    // Hover highlight everywhere except Simulation; selection only in edit modes. The active
+    // component (shown in the Inspector) is drawn thicker; other multi-selected a touch lighter.
     if (mode !== "sim") hi(hover, "rgba(201,162,39,0.6)", 1.5);
-    if (!simLike) hi(selectedGuid, "#c9a227", 2);
+    if (!simLike) {
+      for (const g of selectedGuids) hi(g, "#c9a227", g === selectedGuid ? 2.5 : 1.5);
+    }
 
     // Scrollbars for clipped, overflowing lists (draggable in Sim/Tooltip mode).
     // Skip any viewport that has a real slider component — its handle IS the thumb.
@@ -242,7 +331,7 @@ export default function VisualizerPanel() {
     }
 
     ctx.restore();
-  }, [doc, layout, view, size, selectedGuid, hover, getImage, showBounds, background, sim, mode]);
+  }, [doc, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode]);
 
   // Interaction depends on the mode: View pans, Move edits offsets, Simulation
   // scrolls lists / clicks widgets.
@@ -366,11 +455,12 @@ export default function VisualizerPanel() {
       }
     }
     if (mode === "move") {
-      const guid = hitTest(w.x, w.y);
+      // Move operates on the CURRENTLY SELECTED component (chosen via the hierarchy or the
+      // Select tool) — dragging anywhere moves it; it never re-selects what's under the cursor.
+      const guid = selectedGuid;
       const item = guid ? layout.items.find((i) => i.guid === guid) : undefined;
       if (guid && item) {
         const parent = parentRectOf(guid) ?? layout.canvas;
-        select(guid);
         drag.current = {
           kind: "move",
           guid,
@@ -423,13 +513,25 @@ export default function VisualizerPanel() {
   const onMouseUp = (e: React.MouseEvent) => {
     const d = drag.current;
     drag.current = null;
-    // A pan that didn't move = a click → interact in Sim/Tooltip, else select.
+    // A pan that didn't move = a click → interact in Sim/Tooltip, create in Create, select in
+    // Select. Move keeps the current selection (you pick via the hierarchy/Select tool) and never
+    // re-selects from the canvas.
     if (d?.kind === "pan" && !d.moved) {
       const w = toWorld(e.clientX, e.clientY);
       const guid = hitTest(w.x, w.y);
       if (simLike) {
         if (guid) simClick(guid);
-      } else select(guid);
+      } else if (mode === "create") {
+        // Place a new component under the clicked component (its parent), or the root if the
+        // click hit empty canvas; the offset is the click point relative to that parent's rect.
+        const pRect = guid ? layout.items.find((i) => i.guid === guid)?.rect ?? layout.canvas : layout.canvas;
+        createAt(guid, w.x - pRect.x, w.y - pRect.y);
+      } else if (mode === "view" || mode === "align") {
+        // Shift+Click (configurable modifier) adds/removes from the multi-selection; a plain
+        // click selects just that component.
+        if (guid && mouseModifierHeld(e, multiSelectBinding(keybinds))) toggleSelect(guid);
+        else select(guid);
+      }
     }
   };
 
@@ -453,29 +555,10 @@ export default function VisualizerPanel() {
         <span className="text-[11px] text-gray-500">
           {layout.items.length} components · {layout.canvas.w}×{layout.canvas.h}
         </span>
+        <span className="text-[11px] text-accent/80 capitalize">
+          {mode === "view" ? "Select" : mode === "sim" ? "Simulate" : mode} tool
+        </span>
         <div className="flex-1" />
-        <div className="flex rounded border border-edge overflow-hidden mr-1">
-          {(["view", "move", "sim", "tooltip"] as Mode[]).map((m) => (
-            <button
-              key={m}
-              className={`px-2 py-0.5 text-[11px] capitalize ${
-                mode === m ? "bg-accent/30 text-accent" : "bg-[#2a2d3a] hover:bg-[#343849]"
-              }`}
-              onClick={() => setMode(m)}
-              title={
-                m === "view"
-                  ? "Pan & zoom only"
-                  : m === "move"
-                  ? "Drag components to edit their offset"
-                  : m === "sim"
-                  ? "Scroll lists & click widgets like in-game"
-                  : "Like Simulation, plus hover to resolve tooltips"
-              }
-            >
-              {m === "sim" ? "Simulation" : m}
-            </button>
-          ))}
-        </div>
         <button
           className="px-2 py-0.5 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[11px]"
           onClick={fit}
@@ -485,6 +568,7 @@ export default function VisualizerPanel() {
         <span className="text-[11px] text-gray-500 w-14 text-right">{Math.round(view.zoom * 100)}%</span>
       </div>
       <div ref={wrapRef} className="flex-1 min-h-0 relative overflow-hidden">
+        <ToolPalette />
         {!doc && (
           <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-[13px]">
             Open a .twui.xml file to preview.
@@ -502,7 +586,9 @@ export default function VisualizerPanel() {
             height: size.h,
             cursor: drag.current
               ? "grabbing"
-              : mode === "move" && hover
+              : mode === "create"
+              ? "crosshair"
+              : mode === "move"
               ? "move"
               : simLike
               ? "pointer"
@@ -534,128 +620,6 @@ export default function VisualizerPanel() {
             );
           })()}
       </div>
-      <BottomControls
-        showBounds={showBounds}
-        setShowBounds={setShowBounds}
-        expanded={showPanel}
-        onToggle={() => setShowPanel((p) => !p)}
-      />
-    </div>
-  );
-}
-
-function BottomControls({
-  showBounds,
-  setShowBounds,
-  expanded,
-  onToggle,
-}: {
-  showBounds: boolean;
-  setShowBounds: (updater: (b: boolean) => boolean) => void;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const context = useStore((s) => s.context);
-  const db = useStore((s) => s.contextDb);
-  const setCampaign = useStore((s) => s.setCampaign);
-  const setFaction = useStore((s) => s.setFaction);
-  const setCulture = useStore((s) => s.setCulture);
-  const setSubculture = useStore((s) => s.setSubculture);
-  const backgrounds = useStore((s) => s.backgrounds);
-  const background = useStore((s) => s.background);
-  const setBackground = useStore((s) => s.setBackground);
-
-  const sel = "w-full bg-[#15161c] border border-edge rounded text-[11px] px-1.5 py-0.5";
-  const lbl = "text-[10px] text-gray-500 uppercase tracking-wide";
-
-  const hasDb = !!db && db.factions.length > 0;
-  const campaignFactionKeys = db?.campaign_factions[context.campaign];
-  const factionOptions =
-    campaignFactionKeys && campaignFactionKeys.length
-      ? campaignFactionKeys
-      : db?.factions.map((f) => f.key) ?? [];
-
-  const cell = (label: string, children: ReactNode) => (
-    <div className="flex flex-col gap-0.5 min-w-0">
-      <span className={lbl}>{label}</span>
-      {children}
-    </div>
-  );
-
-  const textInput = (v: string, on: (s: string) => void) => (
-    <input className={sel} value={v} onChange={(e) => on(e.target.value)} />
-  );
-
-  const selectFor = (value: string, onChange: (v: string) => void, options: string[]) => (
-    <select className={sel} value={value} onChange={(e) => onChange(e.target.value)}>
-      {!options.includes(value) && <option value={value}>{value}</option>}
-      {options.map((o) => (
-        <option key={o} value={o}>
-          {o}
-        </option>
-      ))}
-    </select>
-  );
-
-  return (
-    <div className="border-t border-edge bg-[#1a1b22] shrink-0">
-      <div
-        className="px-3 h-7 flex items-center gap-2 cursor-pointer select-none hover:bg-[#20222c]"
-        onClick={onToggle}
-      >
-        <span className="text-gray-500 text-[10px]">{expanded ? "▾" : "▸"}</span>
-        <span className="text-[11px] font-medium">View &amp; Perspective</span>
-        <div className="flex-1" />
-        <span className="text-[10px] text-gray-600">{expanded ? "hide" : "show"}</span>
-      </div>
-      {expanded && (
-        <div className="grid grid-cols-3 gap-2 px-3 pb-3 pt-1">
-          {cell(
-            "Campaign",
-            hasDb ? selectFor(context.campaign, setCampaign, db!.campaigns) : textInput(context.campaign, setCampaign)
-          )}
-          {cell(
-            "Faction",
-            hasDb ? selectFor(context.faction, setFaction, factionOptions) : textInput(context.faction, setFaction)
-          )}
-          {cell(
-            "Culture",
-            hasDb ? selectFor(context.culture, setCulture, db!.cultures) : textInput(context.culture, setCulture)
-          )}
-          {cell(
-            "Subculture",
-            hasDb
-              ? selectFor(context.subculture, setSubculture, db!.subcultures.map((s) => s.subculture))
-              : textInput(context.subculture, setSubculture)
-          )}
-          {cell(
-            "Background",
-            <select
-              className={sel}
-              value={background ?? ""}
-              onChange={(e) => setBackground(e.target.value || null)}
-            >
-              <option value="">No background</option>
-              {backgrounds.map((b) => (
-                <option key={b} value={b}>
-                  {b.replace(/^background\//, "")}
-                </option>
-              ))}
-            </select>
-          )}
-          {cell(
-            "Bounds",
-            <button
-              className={`w-full px-1.5 py-0.5 rounded border text-[11px] ${
-                showBounds ? "bg-accent/30 border-accent" : "bg-[#15161c] border-edge hover:bg-[#23252f]"
-              }`}
-              onClick={() => setShowBounds((b) => !b)}
-            >
-              {showBounds ? "On" : "Off"}
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -686,20 +650,16 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D, r: Rect, zoom: number) {
   ctx.restore();
 }
 
-function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; textHAlign?: string; textVAlign?: string; textOffset?: { x: number; y: number } }) {
+function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; fontName?: string; textHAlign?: string; textVAlign?: string; textInset?: { left: number; right: number; top: number; bottom: number } }) {
   if (!item.text) return;
   const size = item.fontSize ?? 13;
   ctx.save();
   ctx.fillStyle = item.fontColour && item.fontColour[0] === "#" ? item.fontColour.slice(0, 7) : "#ffffff";
-  ctx.font = `${size}px "Segoe UI", sans-serif`;
+  ctx.font = fontSpec(item.fontName, size);
   ctx.textBaseline = "middle";
-  const ha = item.textHAlign ?? "Left";
-  ctx.textAlign = ha === "Center" ? "center" : ha === "Right" ? "right" : "left";
-  // `textxoffset` shifts the text within the rect (clears a bullet/icon on the left).
-  const ox = item.textOffset?.x ?? 0;
-  const oy = item.textOffset?.y ?? 0;
-  const tx = (ha === "Center" ? item.rect.x + item.rect.w / 2 : ha === "Right" ? item.rect.x + item.rect.w : item.rect.x) + ox;
-  const ty = item.rect.y + item.rect.h / 2 + oy;
+  // textxoffset=(left,right), textyoffset=(top,bottom) define the inset box; align within it.
+  const { tx, ty, align } = textAnchor(item.rect, item.textInset, item.textHAlign, item.textVAlign, size);
+  ctx.textAlign = align;
   ctx.fillText(item.text, tx, ty);
   ctx.restore();
 }

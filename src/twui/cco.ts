@@ -8,6 +8,7 @@ import { CcoShorthand, ShorthandDef } from "../types/twui";
 import { RawElement } from "../types/twui";
 import { childByTag, elementChildren, getAttr } from "./doc";
 import { LuaValue } from "./lua";
+import { RECORD_LOC } from "./recordLoc";
 
 export interface Scope {
   /** The connected script's published table. */
@@ -152,6 +153,24 @@ export function toEntries(table: LuaValue | undefined): { key: string; value: Lu
   return [];
 }
 
+/** Model a parsed script table as CcoScriptObject "nodes": each entry becomes a
+ *  `{ Key, Value }` node, recursively (a record/array Value becomes its own node list).
+ *  This lets the row bindings — `Value.FirstContext(Key == "title_key").Value` — resolve
+ *  through the normal ref-chain engine: `Value` is the node's child list, `FirstContext`
+ *  finds the `{Key,Value}` child, and the trailing `.Value` reads its value. */
+export function scriptNodes(table: LuaValue | undefined): LuaValue[] {
+  return toEntries(table).map((e) => ({ Key: e.key, Value: nodeValue(e.value) }));
+}
+function nodeValue(v: LuaValue): LuaValue {
+  return v !== null && typeof v === "object" ? scriptNodes(v) : v;
+}
+
+/** True if a List/ContextList funcId iterates a CcoScriptObject table's values
+ *  (`TableValue.Value`) rather than a named sub-table (`TableValue.ValueForKey("k")`). */
+export function isScriptValueList(funcId: string | undefined): boolean {
+  return !!funcId && /TableValue\s*\.\s*Value\b/.test(funcId) && !/ValueForKey/.test(funcId);
+}
+
 /** The data-pack table key a List/ContextList callback iterates, or null. */
 export function listSource(comp: RawElement): string | null {
   for (const cb of callbacks(comp)) {
@@ -286,13 +305,15 @@ function evalRefChain(expr: string, scope: Scope, loc?: Record<string, string>):
       const ebk = /^EffectBundleFromKey\(([\s\S]*)\)$/.exec(seg);
       if (ebk) {
         const k = evalExpr(ebk[1], scope, loc);
-        cur =
-          typeof k === "string"
-            ? {
-                Name: loc?.["effect_bundles_localised_title_" + k] ?? null,
-                Description: loc?.["effect_bundles_localised_description_" + k] ?? null,
-              }
-            : undefined;
+        if (typeof k === "string") {
+          // Build the record from the shared loc-prefix registry (single source of truth).
+          const prefixes = RECORD_LOC["CcoEffectBundle"];
+          cur = Object.fromEntries(
+            Object.entries(prefixes).map(([prop, prefix]) => [prop, loc?.[prefix + k] ?? null])
+          );
+        } else {
+          cur = undefined;
+        }
         continue;
       }
       if (seg === "TableValue") cur = scope.dataPack ?? undefined;

@@ -9,7 +9,7 @@
 // constrained here — they stay fully editable via the raw element tree / Raw tab, so
 // nothing is hidden or lost (our round-trip keeps the verbatim attrs regardless).
 
-export type AttrKind = "component" | "state" | "image";
+export type AttrKind = "component" | "state" | "image" | "layoutEngine";
 export type AttrType = "text" | "number" | "vec2" | "enum" | "bool" | "colour" | "path";
 
 export interface AttrSchema {
@@ -74,11 +74,17 @@ export const SHADER_NAMES = [
 
 const BOOL = ["true", "false"];
 
+// LayoutEngine enums (observed across games/3K/ui/**).
+export const LE_TYPE = ["List", "HorizontalList", "RadialList"];
+export const LE_HALIGN = ["Center", "Right"];
+export const LE_VALIGN = ["Center", "Bottom"];
+
 // --- The schema --------------------------------------------------------------------
 
 const C: AttrKind[] = ["component"];
 const S: AttrKind[] = ["state"];
 const I: AttrKind[] = ["image"];
+const LE: AttrKind[] = ["layoutEngine"];
 
 const SCHEMA_LIST: AttrSchema[] = [
   // Layout / component
@@ -156,6 +162,38 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Allow the image width to resize with the component." },
   { name: "canresizeheight", label: "resize height", type: "bool", enumValues: BOOL, appliesTo: I, category: "Image", default: "true",
     description: "Allow the image height to resize with the component." },
+
+  // LayoutEngine (the <LayoutEngine> child that arranges a container's children).
+  { name: "type", label: "type", type: "enum", enumValues: LE_TYPE, appliesTo: LE, category: "Layout Engine", default: "List",
+    description: "List (vertical stack), HorizontalList (horizontal stack), or RadialList (circular). Honoured by the renderer (RadialList partially)." },
+  { name: "spacing", label: "spacing (x,y)", type: "vec2", appliesTo: LE, category: "Layout Engine", default: "0.00,0.00",
+    description: "Gap between children: x between columns, y between rows. Honoured by the renderer." },
+  { name: "margins", label: "margins (x,y)", type: "vec2", appliesTo: LE, category: "Layout Engine", default: "0.00,0.00",
+    description: "Inset of the content from the container's edges. Honoured by the renderer." },
+  { name: "sizetocontent", label: "size to content", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
+    description: "Container shrinks to fit its laid-out children rather than its state size. Honoured by the renderer." },
+  { name: "horizontal_alignment", label: "h-alignment", type: "enum", enumValues: LE_HALIGN, appliesTo: LE, category: "Layout Engine",
+    description: "How a vertical List centres/right-aligns its rows (default left). Honoured by the renderer." },
+  { name: "vertical_alignment", label: "v-alignment", type: "enum", enumValues: LE_VALIGN, appliesTo: LE, category: "Layout Engine",
+    description: "How a HorizontalList centres/bottom-aligns its items (default top). Honoured by the renderer." },
+  { name: "reverse_order", label: "reverse order", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
+    description: "Lay children out in reverse. Honoured by the renderer." },
+  { name: "itemsperrow", label: "items per row", type: "number", appliesTo: LE, category: "Layout Engine",
+    description: "Grid: number of items per row before wrapping (vertical List). Honoured by the renderer." },
+  { name: "secondary_margins", label: "secondary margins (x,y)", type: "vec2", appliesTo: LE, category: "Layout Engine",
+    description: "Per-row cross-axis margins (game only; not used by the editor renderer)." },
+  { name: "max_length", label: "max length", type: "number", appliesTo: LE, category: "Layout Engine",
+    description: "Maximum length of the list before clipping/overlap (game only; not used by the editor renderer)." },
+  { name: "allow_overlap", label: "allow overlap", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
+    description: "Let children overlap when they exceed max_length (game only; not used by the editor renderer)." },
+  { name: "starting_angle", label: "starting angle", type: "number", appliesTo: LE, category: "Layout Engine",
+    description: "RadialList: angle (radians) of the first item (game only)." },
+  { name: "arc", label: "arc", type: "number", appliesTo: LE, category: "Layout Engine",
+    description: "RadialList: total arc (radians); 0 = full circle (game only)." },
+  { name: "radius", label: "radius", type: "number", appliesTo: LE, category: "Layout Engine",
+    description: "RadialList: radius in pixels (game only)." },
+  { name: "clockwise", label: "clockwise", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
+    description: "RadialList: lay items out clockwise (game only)." },
 ];
 
 const BY_NAME = new Map<string, AttrSchema[]>();

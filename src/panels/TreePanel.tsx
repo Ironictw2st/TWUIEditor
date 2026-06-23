@@ -9,6 +9,7 @@ import {
   hierarchyRoot,
 } from "../twui/doc";
 import { inheritingGuids } from "../twui/inherit";
+import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { RawElement } from "../types/twui";
 
 function isHidden(comp: RawElement | undefined): boolean {
@@ -18,29 +19,41 @@ function isHidden(comp: RawElement | undefined): boolean {
   );
 }
 
+type DropHint = "none" | "before" | "after" | "into";
+
 function Row({
   node,
   parentGuid,
+  nextGuid,
   depth,
   expanded,
   toggle,
+  expand,
   compMap,
   ancestorHidden,
   inheriting,
+  draggingGuid,
+  setDraggingGuid,
 }: {
   node: RawElement;
   parentGuid: string | null;
+  nextGuid: string | null;
   depth: number;
   expanded: Set<string>;
   toggle: (g: string) => void;
+  expand: (g: string) => void;
   compMap: Map<string, RawElement>;
   ancestorHidden: boolean;
   inheriting: Set<string>;
+  draggingGuid: string | null;
+  setDraggingGuid: (g: string | null) => void;
 }) {
   const guid = guidOf(node) ?? "";
   const kids = elementChildren(node);
-  const selected = useStore((s) => s.selectedGuid === guid);
+  const selected = useStore((s) => s.selectedGuids.includes(guid));
   const select = useStore((s) => s.select);
+  const toggleSelect = useStore((s) => s.toggleSelect);
+  const keybinds = useStore((s) => s.settings.keybinds);
   const move = useStore((s) => s.move);
   const toggleVisible = useStore((s) => s.toggleVisible);
   const isOpen = expanded.has(guid);
@@ -48,27 +61,41 @@ function Row({
   const ownHidden = isHidden(compMap.get(guid));
   const dimmed = ownHidden || ancestorHidden;
 
-  const [dropHint, setDropHint] = useState<"none" | "into" | "before">("none");
+  const [dropHint, setDropHint] = useState<DropHint>("none");
 
   const onDragStart = (e: React.DragEvent) => {
     e.stopPropagation();
     e.dataTransfer.setData("text/guid", guid);
     e.dataTransfer.effectAllowed = "move";
+    setDraggingGuid(guid);
   };
+  const onDragEnd = () => setDraggingGuid(null);
   const onDragOver = (e: React.DragEvent) => {
+    // Can't drop onto the node being dragged.
+    if (draggingGuid === guid) return;
     e.preventDefault();
     e.stopPropagation();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setDropHint(e.clientY - r.top < 6 ? "before" : "into");
+    const frac = (e.clientY - r.top) / Math.max(1, r.height);
+    // Top/bottom thirds reorder among siblings; the middle reparents. The root has no parent,
+    // so it only accepts "into".
+    const hint: DropHint = !parentGuid ? "into" : frac < 0.3 ? "before" : frac > 0.7 ? "after" : "into";
+    setDropHint(hint);
   };
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     const dragged = e.dataTransfer.getData("text/guid");
+    const hint = dropHint;
     setDropHint("none");
+    setDraggingGuid(null);
     if (!dragged || dragged === guid) return;
-    if (dropHint === "before" && parentGuid) move(dragged, parentGuid, guid);
-    else move(dragged, guid, null);
+    if (hint === "before" && parentGuid) move(dragged, parentGuid, guid);
+    else if (hint === "after" && parentGuid) move(dragged, parentGuid, nextGuid);
+    else {
+      move(dragged, guid, null); // reparent as a child
+      expand(guid);
+    }
   };
 
   return (
@@ -76,21 +103,30 @@ function Row({
       <div
         data-guid={guid}
         className={`relative flex items-center gap-1 pr-1 cursor-pointer rounded select-none ${
-          selected ? "bg-[#3b3a1f] outline outline-1 outline-accent" : "hover:bg-[#23252f]"
+          dropHint === "into"
+            ? "ring-1 ring-accent bg-[#2c3d2c]"
+            : selected
+            ? "bg-[#3b3a1f] outline outline-1 outline-accent"
+            : "hover:bg-[#23252f]"
         }`}
         style={{ paddingLeft: depth * 12 + 4 }}
         draggable
         onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
         onDragOver={onDragOver}
         onDragLeave={() => setDropHint("none")}
         onDrop={onDrop}
         onClick={(e) => {
           e.stopPropagation();
-          select(guid);
+          if (mouseModifierHeld(e, multiSelectBinding(keybinds))) toggleSelect(guid);
+          else select(guid);
         }}
       >
         {dropHint === "before" && (
-          <div className="absolute top-0 left-0 right-0 h-0.5 bg-accent" />
+          <div className="absolute -top-px left-0 right-0 h-0.5 bg-accent z-10" />
+        )}
+        {dropHint === "after" && (
+          <div className="absolute -bottom-px left-0 right-0 h-0.5 bg-accent z-10" />
         )}
         <span
           className="w-4 text-center text-gray-500"
@@ -101,11 +137,7 @@ function Row({
         >
           {kids.length ? (isOpen ? "▾" : "▸") : ""}
         </span>
-        <span
-          className={`text-[12px] truncate mr-auto ${dimmed ? "opacity-50" : ""} ${
-            dropHint === "into" ? "bg-[#2c3d2c] rounded px-1" : ""
-          }`}
-        >
+        <span className={`text-[12px] truncate mr-auto ${dimmed ? "opacity-50" : ""}`}>
           {node.tag}
         </span>
         {inheriting.has(guid) && (
@@ -125,17 +157,21 @@ function Row({
         </span>
       </div>
       {isOpen &&
-        kids.map((k) => (
+        kids.map((k, i) => (
           <Row
             key={guidOf(k)}
             node={k}
             parentGuid={guid}
+            nextGuid={(i + 1 < kids.length ? guidOf(kids[i + 1]) : null) ?? null}
             depth={depth + 1}
             expanded={expanded}
             toggle={toggle}
+            expand={expand}
             compMap={compMap}
             ancestorHidden={dimmed}
             inheriting={inheriting}
+            draggingGuid={draggingGuid}
+            setDraggingGuid={setDraggingGuid}
           />
         ))}
     </div>
@@ -149,6 +185,8 @@ export default function TreePanel() {
   const duplicateSelected = useStore((s) => s.duplicateSelected);
   const deleteSelected = useStore((s) => s.deleteSelected);
 
+  const openSearch = useStore((s) => s.openSearch);
+
   const root = useMemo(() => (doc ? hierarchyRoot(doc) : undefined), [doc]);
   const compMap = useMemo(
     () => (doc ? componentMap(doc) : new Map<string, RawElement>()),
@@ -156,6 +194,7 @@ export default function TreePanel() {
   );
   const inheriting = useMemo(() => (doc ? inheritingGuids(doc) : new Set<string>()), [doc]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [draggingGuid, setDraggingGuid] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Reveal the selected node: expand its ancestors so its branch is open.
@@ -188,6 +227,9 @@ export default function TreePanel() {
       return next;
     });
 
+  const expand = (g: string) =>
+    setExpanded((prev) => (prev.has(g) ? prev : new Set(prev).add(g)));
+
   const expandAll = () => {
     if (!root) return;
     const all = new Set<string>();
@@ -206,6 +248,9 @@ export default function TreePanel() {
     <>
       <div className="px-3 h-9 flex items-center gap-1.5 border-b border-edge shrink-0">
         <span className="font-semibold text-[12px] mr-auto">Hierarchy</span>
+        <button className={btn} onClick={() => openSearch("find")} disabled={!doc} title="Go to component (Ctrl+P)">
+          Find
+        </button>
         <button className={btn} onClick={expandAll}>
           Expand
         </button>
@@ -233,12 +278,16 @@ export default function TreePanel() {
           <Row
             node={root}
             parentGuid={null}
+            nextGuid={null}
             depth={0}
             expanded={expanded}
             toggle={toggle}
+            expand={expand}
             compMap={compMap}
             ancestorHidden={false}
             inheriting={inheriting}
+            draggingGuid={draggingGuid}
+            setDraggingGuid={setDraggingGuid}
           />
         ) : (
           <div className="text-gray-500 text-[12px] p-3">Open a .twui.xml file to begin.</div>

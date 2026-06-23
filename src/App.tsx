@@ -1,13 +1,32 @@
 import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./state/store";
+import type { PanelId } from "./state/store";
+import { PANEL_IDS } from "./state/store";
 import { runMatchingAction } from "./keybinds";
+import logoUrl from "./assets/logo.svg";
+import { panelParam } from "./sync";
+import { closePanelWindow } from "./windows";
 import TreePanel from "./panels/TreePanel";
 import InspectorPanel from "./panels/InspectorPanel";
 import VisualizerPanel from "./panels/VisualizerPanel";
-import CharactersPanel from "./panels/CharactersPanel";
-import ScriptPanel from "./panels/ScriptPanel";
+import PerspectivePanel from "./panels/PerspectivePanel";
+import DockLayout, { dockShowPanel, dockHidePanel } from "./panels/DockLayout";
+import ToolsPanel from "./panels/ToolsPanel";
 import SettingsPanel from "./panels/SettingsPanel";
+import SearchPalette from "./panels/SearchPalette";
+
+const PANEL_TITLES: Record<PanelId, string> = {
+  hierarchy: "Hierarchy",
+  inspector: "Inspector",
+  visualizer: "Visualizer",
+  perspective: "Perspective",
+};
+
+/** App mark (rider on horseback raising a scroll) shown top-left in place of a text title. */
+function Logo() {
+  return <img src={logoUrl} width={26} height={26} className="mr-1 shrink-0 rounded" alt="TWUI Editor" />;
+}
 
 function Toolbar() {
   const {
@@ -22,10 +41,6 @@ function Toolbar() {
     fileName,
     dirty,
     status,
-    undo,
-    redo,
-    undoStack,
-    redoStack,
   } = useStore();
 
   useEffect(() => {
@@ -49,17 +64,15 @@ function Toolbar() {
     if (path) saveAs(path);
   };
 
-  const [showCharacters, setShowCharacters] = useState(false);
-  const [showScript, setShowScript] = useState(false);
+  const [showTools, setShowTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const scriptConnected = useStore((s) => s.scriptConn.status === "connected");
 
   const btn =
     "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px] disabled:opacity-40";
 
   return (
     <div className="flex items-center gap-2 px-3 h-11 border-b border-edge bg-panel shrink-0">
-      <span className="font-semibold text-accent mr-2">TWUI Editor</span>
+      <Logo />
       <button className={btn} onClick={onOpen}>
         Open…
       </button>
@@ -68,13 +81,6 @@ function Toolbar() {
       </button>
       <button className={btn} onClick={onSaveAs} disabled={!fileName}>
         Save As…
-      </button>
-      <div className="w-px h-5 bg-edge mx-1" />
-      <button className={btn} onClick={undo} disabled={undoStack.length === 0}>
-        Undo
-      </button>
-      <button className={btn} onClick={redo} disabled={redoStack.length === 0}>
-        Redo
       </button>
       <div className="w-px h-5 bg-edge mx-1" />
       {games.length > 0 && (
@@ -94,24 +100,16 @@ function Toolbar() {
       )}
       <button
         className={btn}
-        onClick={() => setShowCharacters(true)}
-        title="Assign characters to this screen's roles"
+        onClick={() => setShowTools(true)}
+        title="Assign characters & tweak the connected script"
       >
-        Characters
-      </button>
-      <button
-        className={btn}
-        onClick={() => setShowScript(true)}
-        disabled={!scriptConnected}
-        title="Tweak the connected script's data to visualize changes"
-      >
-        Script
+        Characters / Script
       </button>
       <button className={btn} onClick={() => setShowSettings(true)} title="Game, keybinds & preferences">
         Settings
       </button>
-      {showCharacters && <CharactersPanel onClose={() => setShowCharacters(false)} />}
-      {showScript && <ScriptPanel onClose={() => setShowScript(false)} />}
+      <PanelsMenu />
+      {showTools && <ToolsPanel onClose={() => setShowTools(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       <div className="flex-1" />
       <span className="text-[12px] text-gray-500 max-w-[420px] truncate">
@@ -122,7 +120,68 @@ function Toolbar() {
   );
 }
 
+/** Toolbar dropdown to show/hide (or redock) each panel in the dock. */
+function PanelsMenu() {
+  const [open, setOpen] = useState(false);
+  const docked = useStore((s) => s.dockedPanels);
+  const popped = useStore((s) => s.poppedPanels);
+  const btn = "px-2.5 py-1 rounded bg-[#2a2d3a] hover:bg-[#343849] border border-edge text-[12px]";
+
+  const toggle = (id: PanelId) => {
+    if (popped[id]) {
+      // bring the popped-out window back into the dock
+      useStore.getState().setPanelPopped(id, false);
+      closePanelWindow(id);
+      dockShowPanel(id);
+    } else if (docked.includes(id)) {
+      dockHidePanel(id);
+    } else {
+      dockShowPanel(id);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button className={btn} onClick={() => setOpen((o) => !o)} title="Show / hide panels">
+        Panels ▾
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute z-40 mt-1 left-0 w-44 rounded-md bg-[#0c0d12] border border-edge shadow-xl p-1">
+            {PANEL_IDS.map((id) => {
+              const state = popped[id] ? "window" : docked.includes(id) ? "shown" : "hidden";
+              return (
+                <button
+                  key={id}
+                  className="w-full flex items-center gap-2 text-left px-2 py-1 rounded text-[11px] text-gray-200 hover:bg-[#23252f]"
+                  onClick={() => toggle(id)}
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${state === "shown" ? "bg-accent" : "border border-gray-600"}`} />
+                  <span className="mr-auto">{PANEL_TITLES[id]}</span>
+                  {state === "window" && <span className="text-[10px] text-gray-500">window</span>}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A single panel rendered to fill a popped-out OS window (no toolbar / other panels). */
+function PanelWindow({ panel }: { panel: PanelId }) {
+  if (panel === "hierarchy") return <div className="h-full flex flex-col bg-panel">{<TreePanel />}</div>;
+  if (panel === "inspector") return <div className="h-full flex flex-col bg-panel">{<InspectorPanel />}</div>;
+  if (panel === "perspective") return <div className="h-full overflow-auto bg-panel">{<PerspectivePanel />}</div>;
+  return <div className="h-full bg-[#101118]">{<VisualizerPanel />}</div>;
+}
+
 export default function App() {
+  const searchOpen = useStore((s) => s.searchOpen);
+  const closeSearch = useStore((s) => s.closeSearch);
+
   // Global shortcuts run through the central keybinding registry (src/keybinds.ts),
   // resolving each action's binding from the user's persisted overrides. Reading the
   // store via getState() inside the handler keeps it current without re-registering.
@@ -137,20 +196,19 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // A popped-out panel window renders only that panel; its store is mirrored from the main window.
+  const panel = panelParam();
+  if (panel && (PANEL_IDS as string[]).includes(panel)) {
+    return <PanelWindow panel={panel as PanelId} />;
+  }
+
   return (
     <div className="h-full flex flex-col">
       <Toolbar />
       <div className="flex-1 flex min-h-0">
-        <div className="w-[330px] shrink-0 border-r border-edge bg-panel overflow-hidden flex flex-col">
-          <TreePanel />
-        </div>
-        <div className="flex-1 min-w-0 bg-[#101118]">
-          <VisualizerPanel />
-        </div>
-        <div className="w-[370px] shrink-0 border-l border-edge bg-panel overflow-hidden flex flex-col">
-          <InspectorPanel />
-        </div>
+        <DockLayout />
       </div>
+      {searchOpen && <SearchPalette onClose={closeSearch} />}
     </div>
   );
 }

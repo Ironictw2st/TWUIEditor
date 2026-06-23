@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="TWUI Editor">
+  <rect width="64" height="64" rx="12" fill="#15161c"/>
+  <!-- mirror the emblem so the horse faces right -->
+  <g transform="translate(64,0) scale(-1,1)">
+    <!-- horse + rider silhouette -->
+    <g fill="#c9a227">
+      <!-- horse body / rump / chest -->
+      <ellipse cx="34" cy="37" rx="17" ry="8.5"/>
+      <ellipse cx="47" cy="36" rx="8" ry="9"/>
+      <ellipse cx="21" cy="38" rx="7.5" ry="8"/>
+      <!-- neck -->
+      <path d="M17 33 L13 27 L9 19 L15 18 L24 34 Z"/>
+      <!-- head -->
+      <path d="M15 18 C11 17 6 18 5 23 C4 26 7 28 11 27 C13 31 18 30 19 25 Z"/>
+      <!-- ear -->
+      <path d="M14 13 L12 19 L18 18 Z"/>
+      <!-- tail -->
+      <path d="M52 31 C58 31 60 39 56 47 C55 50 52 51 52 48 C54 41 52 35 48 34 Z"/>
+      <!-- legs -->
+      <path d="M19 43 L23 43 L22 55 L18 55 Z"/>
+      <path d="M26 44 L30 44 L30 55 L26 55 Z"/>
+      <path d="M40 44 L44 44 L43 55 L39 55 Z"/>
+      <path d="M47 43 L51 43 L51 55 L47 55 Z"/>
+      <!-- rider torso -->
+      <path d="M29 31 C27 24 29 19 33 18 C38 19 38 25 35 31 Z"/>
+      <!-- rider head -->
+      <circle cx="33" cy="14" r="4.4"/>
+      <!-- helmet crest -->
+      <path d="M33 8 L30 12 L36 12 Z"/>
+      <!-- rein arm (down to the reins) -->
+      <path d="M30 24 L20 31 L22 33 L32 27 Z"/>
+      <!-- raised arm holding the scroll aloft -->
+      <path d="M32 21 L36 9 L39 11 L35 22 Z"/>
+    </g>
+    <!-- scroll raised in hand -->
+    <g>
+      <rect x="34" y="4" width="9" height="12" rx="1.4" fill="#f0e2b0"/>
+      <ellipse cx="38.5" cy="4.4" rx="4.6" ry="2" fill="#c9a227"/>
+      <ellipse cx="38.5" cy="15.6" rx="4.6" ry="2" fill="#c9a227"/>
+      <line x1="36.2" y1="8" x2="40.8" y2="8" stroke="#15161c" stroke-width="0.7"/>
+      <line x1="36.2" y1="10.5" x2="40.8" y2="10.5" stroke="#15161c" stroke-width="0.7"/>
+    </g>
+  </g>
+</svg>

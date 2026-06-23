@@ -53,7 +53,7 @@ function TemplatePicker({
   );
 }
 
-export default function CharactersPanel({ onClose }: { onClose: () => void }) {
+export default function CharactersPanel({ onClose, embedded }: { onClose: () => void; embedded?: boolean }) {
   const doc = useStore((s) => s.doc);
   const context = useStore((s) => s.context);
   const contextDb = useStore((s) => s.contextDb);
@@ -78,25 +78,15 @@ export default function CharactersPanel({ onClose }: { onClose: () => void }) {
     return t?.portrait ? imageUrl(portraitImagePath(t.portrait, "large_panel")) : null;
   };
 
-  return (
+  const body = (
     <>
-      <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
-      <div className="fixed z-40 left-1/2 top-16 -translate-x-1/2 w-[520px] max-h-[75vh] overflow-auto bg-panel border border-edge rounded shadow-xl text-[12px]">
-        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f] sticky top-0">
-          <span className="font-semibold">Characters</span>
-          <div className="flex-1" />
-          <button className="text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose} title="Close">
-            ✕
-          </button>
-        </div>
+      <div className="px-3 py-2 border-b border-edge">
+        <span className="text-gray-400">Faction (from Perspective): </span>
+        <span className="text-gray-100">{factionName}</span>
+      </div>
 
-        <div className="px-3 py-2 border-b border-edge">
-          <span className="text-gray-400">Faction (from Perspective): </span>
-          <span className="text-gray-100">{factionName}</span>
-        </div>
-
-        <div className="px-3 py-3">
-          {!doc ? (
+      <div className="px-3 py-3">
+        {!doc ? (
             <div className="text-gray-500">Open a layout to assign its characters.</div>
           ) : !characterDb ? (
             <div className="text-gray-500">Character templates not loaded (this game has no DB data).</div>
@@ -147,6 +137,23 @@ export default function CharactersPanel({ onClose }: { onClose: () => void }) {
             </div>
           )}
         </div>
+    </>
+  );
+
+  if (embedded) return <div className="flex-1 min-h-0 overflow-auto">{body}</div>;
+
+  return (
+    <>
+      <div className="fixed inset-0 z-30 bg-black/40" onClick={onClose} />
+      <div className="fixed z-40 left-1/2 top-16 -translate-x-1/2 w-[520px] max-h-[75vh] overflow-auto bg-panel border border-edge rounded shadow-xl text-[12px]">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-edge bg-[#23252f] sticky top-0">
+          <span className="font-semibold">Characters</span>
+          <div className="flex-1" />
+          <button className="text-gray-400 hover:text-gray-200 text-[14px]" onClick={onClose} title="Close">
+            ✕
+          </button>
+        </div>
+        {body}
       </div>
     </>
   );

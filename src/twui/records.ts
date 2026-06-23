@@ -8,27 +8,9 @@ import { RawElement, TwuiDocument } from "../types/twui";
 import { ancestorGuids } from "./doc";
 import { callbacks, Scope } from "./cco";
 
-/**
- * object_id -> (property used in the funcId -> loc key prefix).
- * The full loc key is `<prefix><record_key>`.
- */
-export const RECORD_LOC: Record<string, Record<string, string>> = {
-  CcoEffectBundle: {
-    Name: "effect_bundles_localised_title_",
-    Description: "effect_bundles_localised_description_",
-  },
-  CcoCampaignPooledResource: {
-    Name: "pooled_resources_display_name_",
-  },
-  CcoEquippedSetCeo: {
-    Title: "ceo_equipped_set_bonuses_title_",
-    Description: "ceo_equipped_set_bonuses_description_",
-  },
-  CcoEffect: {
-    LocalisedDescriptionWithoutScope: "effects_description_",
-    Description: "effects_description_",
-  },
-};
+// The loc-prefix registry lives in a leaf module (import-free) so cco.ts can share it without
+// an import cycle. Re-exported here for existing consumers (e.g. layout/compute.ts).
+export { RECORD_LOC } from "./recordLoc";
 
 /**
  * Records whose identity comes from a LITERAL in a `…Context("KEY")` callback on

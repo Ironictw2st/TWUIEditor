@@ -16,12 +16,14 @@ export interface ContextTokens {
 
 function stripFaction(key: string): string {
   return key
-    .replace(/^3k(_dlc\d+|_main)?_faction_/, "")
+    .replace(/^[a-z0-9]+(_dlc\d+|_main)?_faction_/, "")
     .replace(/_separatists$/, "");
 }
 
 function stripSubculture(key: string): string {
-  return key.replace(/^3k(_dlc\d+|_main)?_subculture_/, "").replace(/^3k_main_/, "");
+  return key
+    .replace(/^[a-z0-9]+(_dlc\d+|_main)?_subculture_/, "")
+    .replace(/^[a-z0-9]+_main_/, "");
 }
 
 /** Register a token (and trimmed suffixes) -> owner, keeping the first owner seen. */
@@ -43,6 +45,26 @@ export function deriveTokens(db: ContextDb | null): ContextTokens {
   }
   const ordered = [...byToken.keys()].sort((a, b) => b.length - a.length);
   return { byToken, ordered };
+}
+
+/**
+ * A sensible default perspective for a freshly-loaded DB: the first campaign, its first
+ * faction, and the subculture/culture derived from that faction record. Game-agnostic —
+ * reads whatever the DB provides rather than naming a specific title's keys. Returns empty
+ * strings when the DB lacks the corresponding records (neutral, non-throwing).
+ */
+export function defaultContext(db: ContextDb | null): FactionContext {
+  const ctx: FactionContext = { campaign: "", faction: "", culture: "", subculture: "" };
+  if (!db) return ctx;
+  ctx.campaign = db.campaigns[0] ?? "";
+  ctx.faction = db.campaign_factions[ctx.campaign]?.[0] ?? db.factions[0]?.key ?? "";
+  const f = db.factions.find((x) => x.key === ctx.faction);
+  if (f?.subculture) {
+    ctx.subculture = f.subculture;
+    const sc = db.subcultures.find((x) => x.subculture === f.subculture);
+    if (sc?.culture) ctx.culture = sc.culture;
+  }
+  return ctx;
 }
 
 /** The owner keys considered "selected" for the current context. */

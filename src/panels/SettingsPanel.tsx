@@ -153,7 +153,19 @@ function KeybindsSection() {
             return (
               <div key={a.id} className="flex items-center gap-3 mb-1.5">
                 <span className="w-44 shrink-0 text-[12px] text-gray-200">{a.label}</span>
-                <KeyCaptureField binding={binding} onCapture={(b) => setKeybind(a.id, b)} />
+                {a.kind === "mouse" ? (
+                  <select
+                    className={sel}
+                    value={canonBinding(binding)}
+                    onChange={(e) => setKeybind(a.id, e.target.value)}
+                  >
+                    <option value="Shift">Shift+Click</option>
+                    <option value="Alt">Alt+Click</option>
+                    <option value="Mod">{formatBinding("Mod")}+Click</option>
+                  </select>
+                ) : (
+                  <KeyCaptureField binding={binding} onCapture={(b) => setKeybind(a.id, b)} />
+                )}
                 {a.aliases?.length ? (
                   <span className="text-[10px] text-gray-500">or {a.aliases.map(formatBinding).join(", ")}</span>
                 ) : null}
@@ -285,6 +297,8 @@ function VisualizerSection() {
       <Row label="Background">
         <select className={sel} value={background ?? ""} onChange={(e) => setBackground(e.target.value || null)}>
           <option value="">None</option>
+          <option value="@white">White</option>
+          <option value="@black">Black</option>
           {backgrounds.map((b) => (
             <option key={b} value={b}>
               {b.replace(/^background\//, "")}

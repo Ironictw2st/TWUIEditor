@@ -57,12 +57,23 @@ export interface Subculture {
   culture: string;
 }
 
+/** One cultural variant of a court office, with its resolved on-screen title. */
+export interface MinisterialPosition {
+  position_key: string;
+  culture: string;
+  faction: string;
+  subculture: string;
+  campaign: string;
+  title: string;
+}
+
 export interface ContextDb {
   factions: Faction[];
   subcultures: Subculture[];
   cultures: string[];
   campaigns: string[];
   campaign_factions: Record<string, string[]>;
+  ministerial_positions: MinisterialPosition[];
 }
 
 export interface FactionContext {

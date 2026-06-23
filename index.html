@@ -4,9 +4,63 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TWUI Editor</title>
+    <style>
+      /* Applied immediately (before the JS/CSS bundle), so the first paint is the dark boot
+         screen rather than a white flash. React replaces #root's contents once it mounts. */
+      html, body { height: 100%; margin: 0; background: #15161c; }
+      #root { height: 100%; }
+      .boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 16px; background: #15161c;
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif; color: #e6e6ec;
+      }
+      .boot-spin {
+        width: 28px; height: 28px; border: 3px solid #2a2d3a; border-top-color: #c9a227;
+        border-radius: 50%; animation: boot-rot 0.8s linear infinite;
+      }
+      .boot-name { font-size: 13px; letter-spacing: 0.04em; color: #c9a227; font-weight: 600; }
+      .boot-sub { font-size: 11px; color: #6b7081; }
+      @keyframes boot-rot { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot">
+        <svg width="72" height="72" viewBox="0 0 64 64" aria-hidden="true">
+          <rect width="64" height="64" rx="12" fill="#15161c"/>
+          <g transform="translate(64,0) scale(-1,1)">
+            <g fill="#c9a227">
+              <ellipse cx="34" cy="37" rx="17" ry="8.5"/>
+              <ellipse cx="47" cy="36" rx="8" ry="9"/>
+              <ellipse cx="21" cy="38" rx="7.5" ry="8"/>
+              <path d="M17 33 L13 27 L9 19 L15 18 L24 34 Z"/>
+              <path d="M15 18 C11 17 6 18 5 23 C4 26 7 28 11 27 C13 31 18 30 19 25 Z"/>
+              <path d="M14 13 L12 19 L18 18 Z"/>
+              <path d="M52 31 C58 31 60 39 56 47 C55 50 52 51 52 48 C54 41 52 35 48 34 Z"/>
+              <path d="M19 43 L23 43 L22 55 L18 55 Z"/>
+              <path d="M26 44 L30 44 L30 55 L26 55 Z"/>
+              <path d="M40 44 L44 44 L43 55 L39 55 Z"/>
+              <path d="M47 43 L51 43 L51 55 L47 55 Z"/>
+              <path d="M29 31 C27 24 29 19 33 18 C38 19 38 25 35 31 Z"/>
+              <circle cx="33" cy="14" r="4.4"/>
+              <path d="M33 8 L30 12 L36 12 Z"/>
+              <path d="M30 24 L20 31 L22 33 L32 27 Z"/>
+              <path d="M32 21 L36 9 L39 11 L35 22 Z"/>
+            </g>
+            <g>
+              <rect x="34" y="4" width="9" height="12" rx="1.4" fill="#f0e2b0"/>
+              <ellipse cx="38.5" cy="4.4" rx="4.6" ry="2" fill="#c9a227"/>
+              <ellipse cx="38.5" cy="15.6" rx="4.6" ry="2" fill="#c9a227"/>
+              <line x1="36.2" y1="8" x2="40.8" y2="8" stroke="#15161c" stroke-width="0.7"/>
+              <line x1="36.2" y1="10.5" x2="40.8" y2="10.5" stroke="#15161c" stroke-width="0.7"/>
+            </g>
+          </g>
+        </svg>
+        <div class="boot-spin"></div>
+        <div class="boot-name">TWUI Editor</div>
+        <div class="boot-sub">Loading…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

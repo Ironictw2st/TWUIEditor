@@ -3,7 +3,15 @@
 // property `name="script_id"`.
 
 import { RawElement, TwuiDocument } from "../types/twui";
-import { childByTag, componentMap, elementChildren, getAttr, hierarchyRoot } from "./doc";
+import {
+  childByTag,
+  componentMap,
+  componentsSection,
+  elementChildren,
+  getAttr,
+  guidOf,
+  hierarchyRoot,
+} from "./doc";
 
 /** The `script_id` declared by a component's ContextInitScriptObject callback. */
 export function componentScriptId(comp: RawElement): string | undefined {
@@ -44,4 +52,19 @@ export function pageScriptId(doc: TwuiDocument): string | undefined {
     return undefined;
   };
   return find(root);
+}
+
+/** Every component that declares its own `script_id` (a ContextInitScriptObject) —
+ *  e.g. the schemes panel's `list_box`. Used to load per-component data packs so a
+ *  sub-scripted list resolves against its own published table, not the page script. */
+export function collectScriptComponents(doc: TwuiDocument): { guid: string; scriptId: string }[] {
+  const comps = componentsSection(doc);
+  if (!comps) return [];
+  const out: { guid: string; scriptId: string }[] = [];
+  for (const comp of elementChildren(comps)) {
+    const scriptId = componentScriptId(comp);
+    const guid = guidOf(comp);
+    if (scriptId && guid) out.push({ guid, scriptId });
+  }
+  return out;
 }

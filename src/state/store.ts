@@ -5,28 +5,40 @@ import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, TwuiDocu
 import * as ipc from "../ipc/commands";
 import {
   childByTag,
+  componentMap,
   componentsSection,
   elementChildren,
   findComponentElement,
   fmtVec2,
   getAttr,
+  getLayoutEngine,
   guidOf,
+  hierarchyRoot,
+  parseVec2,
   removeAttr,
   setAttr,
 } from "../twui/doc";
 import { encodeEntities } from "../twui/cco";
-import { LuaValue } from "../twui/lua";
+import { extractDataPack, LuaValue } from "../twui/lua";
 import { collectTemplateIds } from "../twui/template";
+import { defaultContext } from "../twui/context";
 import { collectCreatorPaths } from "../twui/creator";
-import { pageScriptId } from "../twui/script";
+import { collectScriptComponents, pageScriptId } from "../twui/script";
 import {
   addNode,
+  componentGuidSet,
   deleteNode,
   duplicateNode,
+  extractSubtree,
   moveNode,
+  pasteSubtree,
+  regenAllGuids,
+  regenGuidSet,
   renameNode,
   replaceComponent,
   replaceHierarchyNode,
+  subtreeGuidSet,
+  SubtreeClip,
 } from "../twui/mutate";
 import { RawElement } from "../types/twui";
 
@@ -36,8 +48,13 @@ interface View {
   panY: number;
 }
 
-/** Visualizer interaction mode (shared with VisualizerPanel + the keybind registry). */
-export type Mode = "view" | "move" | "sim" | "tooltip";
+/** Visualizer interaction tool (shared with VisualizerPanel + the keybind registry). "view" is the
+ *  Select tool (click-select + pan); labelled "Select" in the tool palette. */
+export type Mode = "view" | "move" | "create" | "align" | "sim" | "tooltip";
+
+/** Dockable panels that can be collapsed or popped out into their own OS window. */
+export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer";
+export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer"];
 
 /** Persisted user preferences (localStorage `twui-settings`). Document/runtime
  *  state is never persisted — only this subset (+ `background`/`view`). */
@@ -50,6 +67,8 @@ export interface Settings {
   editor: { undoLimit: number; rememberLastFile: boolean };
   /** Stub for future theming; wired but no visual effect yet. */
   theme: { accent: string; density: "comfortable" | "compact" };
+  /** Serialized dockview layout (`api.toJSON()`), restored on load. Pop-out state is session-only. */
+  dockLayout: unknown | null;
   lastGame: string | null;
   lastFile: string | null;
 }
@@ -62,6 +81,7 @@ const DEFAULT_SETTINGS: Settings = {
   visualizer: { defaultMode: "view", showBounds: false, restoreView: false },
   editor: { undoLimit: 100, rememberLastFile: false },
   theme: { accent: "#c9a227", density: "comfortable" },
+  dockLayout: null,
   lastGame: null,
   lastFile: null,
 };
@@ -77,12 +97,14 @@ function mergePersisted(current: AppStore, persisted: unknown): AppStore {
     visualizer: { ...current.settings.visualizer, ...(ps.visualizer ?? {}) },
     editor: { ...current.settings.editor, ...(ps.editor ?? {}) },
     theme: { ...current.settings.theme, ...(ps.theme ?? {}) },
+    dockLayout: ps.dockLayout ?? current.settings.dockLayout,
     keybinds: { ...(ps.keybinds ?? {}) },
     perspective: ps.perspective ?? null,
   };
   return {
     ...current,
     settings,
+    showBounds: settings.visualizer.showBounds,
     background: "background" in p ? p.background ?? null : current.background,
     view: p.view ? { ...current.view, ...p.view } : current.view,
   };
@@ -105,6 +127,9 @@ export interface AppStore {
   fileName: string | null;
   dirty: boolean;
   selectedGuid: string | null;
+  /** Multi-selection set (Align tool). The first entry is the alignment anchor; `selectedGuid`
+   *  is the active one (for the Inspector). Single-select keeps this in sync as `[guid]`. */
+  selectedGuids: string[];
   dataRoot: string | null;
   status: string;
   view: View;
@@ -132,12 +157,28 @@ export interface AppStore {
   /** Non-destructive data-pack override (Script tweak menu) — wins over the parsed pack.
    *  Typed `unknown` (semantically `LuaValue | null`) so immer doesn't draft the recursive type. */
   dataPackOverride: unknown;
+  /** Per-component script data packs (component guid -> its published table), for
+   *  sub-scripted lists like the schemes list_box. Typed `unknown` for the same reason. */
+  componentDataPacks: Record<string, unknown>;
   /** Raw-Lua working copy for the Script menu's Raw tab (null = use scriptConn.text). */
   scriptDraft: string | null;
   /** Non-persistent per-component state preview (Inspector → Visualizer). */
   previewState: Record<string, string>;
+  /** Quick-find palette: open state + mode ("find" by query, "refs" to selected guid). */
+  searchOpen: boolean;
+  searchMode: "find" | "refs";
   backgrounds: string[];
   background: string | null;
+  /** Active visualizer tool (left tool palette). */
+  mode: Mode;
+  /** Whether the visualizer draws component bounds outlines (Perspective panel toggle). */
+  showBounds: boolean;
+  /** Panels currently popped out into their own OS window (session-only). */
+  poppedPanels: Partial<Record<PanelId, boolean>>;
+  /** Panel ids currently present in the dock (mirrored from dockview; drives the Panels menu). */
+  dockedPanels: PanelId[];
+  /** Copied component subtree (Copy/Paste), fresh-GUID-cloned on each paste. */
+  clipboard: SubtreeClip | null;
   /** Persisted user preferences (Settings screen). */
   settings: Settings;
 
@@ -152,6 +193,8 @@ export interface AppStore {
   setDataPackOverride: (pack: LuaValue | null) => void;
   setScriptDraft: (text: string | null) => void;
   setPreviewState: (guid: string, name: string | null) => void;
+  openSearch: (mode?: "find" | "refs") => void;
+  closeSearch: () => void;
   setBackground: (path: string | null) => void;
   setCampaign: (key: string) => void;
   setFaction: (key: string) => void;
@@ -162,17 +205,35 @@ export interface AppStore {
   saveAs: (path: string) => Promise<void>;
   setDataRoot: (path: string) => Promise<void>;
   select: (guid: string | null) => void;
+  toggleSelect: (guid: string | null) => void;
+  alignSelected: (axis: "x" | "y", refGuid: string) => void;
+  centerBetween: (midGuid: string) => void;
+  distributeSelected: (axis: "x" | "y") => void;
+  nudgeSelected: (dx: number, dy: number) => void;
   setStatus: (s: string) => void;
   setView: (v: Partial<View>) => void;
 
   mutate: (fn: (doc: TwuiDocument) => void) => void;
   editAttr: (guid: string, key: string, value: string) => void;
+  editLayoutEngineAttr: (guid: string, key: string, value: string) => void;
+  addLayoutEngine: (guid: string) => void;
   setCallbackFunc: (guid: string, index: number, value: string) => void;
   toggleVisible: (guid: string) => void;
   beginDrag: () => void;
   liveSetOffset: (guid: string, x: number, y: number) => void;
   deleteSelected: () => void;
   duplicateSelected: () => void;
+  regenGuids: () => void;
+  regenComponentGuids: (guid: string) => void;
+  regenSubtreeGuids: (guid: string) => void;
+  setDockLayout: (json: unknown) => void;
+  setDockedPanels: (ids: PanelId[]) => void;
+  setPanelPopped: (id: PanelId, popped: boolean) => void;
+  setShowBounds: (v: boolean) => void;
+  setMode: (m: Mode) => void;
+  copy: () => void;
+  paste: () => void;
+  createAt: (parentGuid: string | null, x: number, y: number) => void;
   addChild: (parentGuid: string, tag: string) => void;
   rename: (guid: string, newId: string) => void;
   move: (guid: string, newParentGuid: string, beforeGuid: string | null) => void;
@@ -194,6 +255,9 @@ export const useStore = create<AppStore>()(
     fileName: null,
     dirty: false,
     selectedGuid: null,
+    selectedGuids: [],
+    poppedPanels: {},
+    dockedPanels: [],
     dataRoot: null,
     status: "Ready",
     view: { ...DEFAULT_VIEW },
@@ -203,12 +267,7 @@ export const useStore = create<AppStore>()(
     games: [],
     game: null,
     contextDb: null,
-    context: {
-      campaign: "3k_main_campaign_map",
-      faction: "3k_main_faction_cao_cao",
-      culture: "3k_main_chinese",
-      subculture: "3k_main_chinese",
-    },
+    context: { campaign: "", faction: "", culture: "", subculture: "" },
     characterDb: null,
     ccoDocs: null,
     ccoShorthand: null,
@@ -218,10 +277,16 @@ export const useStore = create<AppStore>()(
     loc: {},
     scriptConn: { id: null, path: null, text: null, status: "none" },
     dataPackOverride: null,
+    componentDataPacks: {},
     scriptDraft: null,
     previewState: {},
+    searchOpen: false,
+    searchMode: "find",
     backgrounds: [],
     background: null,
+    mode: DEFAULT_SETTINGS.visualizer.defaultMode,
+    showBounds: DEFAULT_SETTINGS.visualizer.showBounds,
+    clipboard: null,
     settings: DEFAULT_SETTINGS,
 
     setBackground: (path) =>
@@ -306,6 +371,17 @@ export const useStore = create<AppStore>()(
         else s.previewState[guid] = name;
       }),
 
+    openSearch: (mode = "find") =>
+      set((s) => {
+        s.searchMode = mode;
+        s.searchOpen = true;
+      }),
+
+    closeSearch: () =>
+      set((s) => {
+        s.searchOpen = false;
+      }),
+
     init: async (applyPrefs = true) => {
       // The backend reads are independent — load them concurrently so startup is
       // bounded by the slowest, not their sum. Each settles into the store on its own.
@@ -330,8 +406,7 @@ export const useStore = create<AppStore>()(
           s.backgrounds = backgrounds;
           // Keep a persisted/user-chosen background if it still exists; else default.
           if (!s.background || !backgrounds.includes(s.background)) {
-            const def = "background/campaign.png";
-            s.background = backgrounds.includes(def) ? def : backgrounds[0] ?? null;
+            s.background = backgrounds[0] ?? null;
           }
         }),
       ]);
@@ -341,9 +416,21 @@ export const useStore = create<AppStore>()(
       if (st.settings.perspective) {
         set((s) => { s.context = { ...st.settings.perspective! }; });
       }
+      // No persisted perspective (or it points at a campaign this DB lacks) -> derive a
+      // sensible default from the loaded DB rather than assuming a specific game's keys.
+      {
+        const cur = get();
+        const valid = cur.contextDb?.campaigns.includes(cur.context.campaign);
+        if (!st.settings.perspective || !valid) {
+          const ctx = defaultContext(cur.contextDb);
+          set((s) => { s.context = ctx; });
+        }
+      }
       if (!st.settings.visualizer.restoreView) {
         set((s) => { s.view = { ...DEFAULT_VIEW }; });
       }
+      // Seed the active tool from the persisted default (parity with the old panel useState).
+      set((s) => { s.mode = st.settings.visualizer.defaultMode; });
       if (
         applyPrefs &&
         st.settings.lastGame &&
@@ -365,10 +452,8 @@ export const useStore = create<AppStore>()(
         s.context.campaign = key;
         const factions = s.contextDb?.campaign_factions[key];
         if (factions && !factions.includes(s.context.faction)) {
-          // Current faction isn't valid here; prefer Cao Cao, else the first one.
-          const next = factions.includes("3k_main_faction_cao_cao")
-            ? "3k_main_faction_cao_cao"
-            : factions[0];
+          // Current faction isn't valid here; fall back to the first available (sorted).
+          const next = factions[0];
           if (next) {
             s.context.faction = next;
             const f = s.contextDb?.factions.find((x) => x.key === next);
@@ -422,6 +507,7 @@ export const useStore = create<AppStore>()(
           s.createdLayouts = {};
           s.scriptConn = { id: null, path: null, text: null, status: "none" };
           s.dataPackOverride = null;
+          s.componentDataPacks = {};
           s.scriptDraft = null;
           s.previewState = {};
           s.status = `Loaded ${baseName(path)}`;
@@ -442,6 +528,25 @@ export const useStore = create<AppStore>()(
               s.scriptConn = { id: scriptId, path: null, text: null, status: "missing" };
             });
           }
+        }
+        // Per-component scripts (a sub-component with its own ContextInitScriptObject,
+        // e.g. the schemes list_box): find + parse each published table so the list
+        // resolves against its own pack. Best-effort; keyed by component guid.
+        const scriptComps = collectScriptComponents(doc);
+        if (scriptComps.length) {
+          const packs: Record<string, unknown> = {};
+          await Promise.all(
+            scriptComps.map(async ({ guid, scriptId: sid }) => {
+              try {
+                const hit = await ipc.findScript(sid);
+                const pack = hit?.text ? extractDataPack(hit.text, sid) : null;
+                if (pack != null) packs[guid] = pack;
+              } catch {
+                /* per-component scripts are optional */
+              }
+            })
+          );
+          if (Object.keys(packs).length) set((s) => { s.componentDataPacks = packs; });
         }
         // Resolve referenced templates for the visualizer (best-effort).
         const ids = collectTemplateIds(doc);
@@ -542,7 +647,99 @@ export const useStore = create<AppStore>()(
     select: (guid) =>
       set((s) => {
         s.selectedGuid = guid;
+        s.selectedGuids = guid ? [guid] : [];
       }),
+
+    // Additive toggle for the Align tool's multi-selection.
+    toggleSelect: (guid) =>
+      set((s) => {
+        if (!guid) return;
+        const i = s.selectedGuids.indexOf(guid);
+        if (i >= 0) {
+          s.selectedGuids.splice(i, 1);
+          s.selectedGuid = s.selectedGuids[s.selectedGuids.length - 1] ?? null;
+        } else {
+          s.selectedGuids.push(guid);
+          s.selectedGuid = guid;
+        }
+      }),
+
+    // Align every selected component's offset to the chosen reference component on one axis,
+    // keeping the other axis. One undo step.
+    alignSelected: (axis, refGuid) => {
+      const guids = get().selectedGuids;
+      if (guids.length < 2 || !guids.includes(refGuid)) return;
+      get().mutate((doc) => {
+        const rEl = findComponentElement(doc, refGuid);
+        if (!rEl) return;
+        const [rx, ry] = parseVec2(getAttr(rEl, "offset"), [0, 0]);
+        for (const g of guids) {
+          if (g === refGuid) continue;
+          const el = findComponentElement(doc, g);
+          if (!el) continue;
+          const [x, y] = parseVec2(getAttr(el, "offset"), [0, 0]);
+          setAttr(el, "offset", axis === "x" ? fmtVec2(rx, y) : fmtVec2(x, ry));
+        }
+      });
+    },
+
+    // With exactly three selected, move the chosen middle component to the 2D midpoint of the
+    // other two (averages both x and y). One undo step.
+    centerBetween: (midGuid) => {
+      const guids = get().selectedGuids;
+      if (guids.length !== 3 || !guids.includes(midGuid)) return;
+      const ends = guids.filter((g) => g !== midGuid);
+      get().mutate((doc) => {
+        const midEl = findComponentElement(doc, midGuid);
+        const aEl = findComponentElement(doc, ends[0]);
+        const bEl = findComponentElement(doc, ends[1]);
+        if (!midEl || !aEl || !bEl) return;
+        const [ax, ay] = parseVec2(getAttr(aEl, "offset"), [0, 0]);
+        const [bx, by] = parseVec2(getAttr(bEl, "offset"), [0, 0]);
+        setAttr(midEl, "offset", fmtVec2((ax + bx) / 2, (ay + by) / 2));
+      });
+    },
+
+    // Spread 3+ selected components evenly along one axis: the two extremes (min/max offset on
+    // that axis) stay put and the in-between ones are evenly spaced between them. The other axis
+    // is kept. One undo step.
+    distributeSelected: (axis) => {
+      const guids = get().selectedGuids;
+      if (guids.length < 3) return;
+      get().mutate((doc) => {
+        const items: { el: RawElement; x: number; y: number }[] = [];
+        for (const g of guids) {
+          const el = findComponentElement(doc, g);
+          if (!el) continue;
+          const [x, y] = parseVec2(getAttr(el, "offset"), [0, 0]);
+          items.push({ el, x, y });
+        }
+        if (items.length < 3) return;
+        items.sort((a, b) => (axis === "x" ? a.x - b.x : a.y - b.y));
+        const n = items.length;
+        const lo = axis === "x" ? items[0].x : items[0].y;
+        const hi = axis === "x" ? items[n - 1].x : items[n - 1].y;
+        for (let i = 1; i < n - 1; i++) {
+          const v = lo + ((hi - lo) * i) / (n - 1);
+          const it = items[i];
+          setAttr(it.el, "offset", axis === "x" ? fmtVec2(v, it.y) : fmtVec2(it.x, v));
+        }
+      });
+    },
+
+    // Shift the offset of every selected component by (dx, dy). One undo step (arrow-key nudge).
+    nudgeSelected: (dx, dy) => {
+      const guids = get().selectedGuids;
+      if (!guids.length) return;
+      get().mutate((doc) => {
+        for (const g of guids) {
+          const el = findComponentElement(doc, g);
+          if (!el) continue;
+          const [x, y] = parseVec2(getAttr(el, "offset"), [0, 0]);
+          setAttr(el, "offset", fmtVec2(x + dx, y + dy));
+        }
+      });
+    },
 
     setStatus: (msg) =>
       set((s) => {
@@ -575,6 +772,25 @@ export const useStore = create<AppStore>()(
         // hierarchy node that shares a component's GUID.
         const el = findComponentElement(doc, guid);
         if (el) setAttr(el, key, value);
+      });
+    },
+
+    // The <LayoutEngine> child has no guid of its own, so it's reached via the
+    // component's guid (the Inspector's Layout Engine section edits it).
+    editLayoutEngineAttr: (guid, key, value) => {
+      get().mutate((doc) => {
+        const el = findComponentElement(doc, guid);
+        const le = el && getLayoutEngine(el);
+        if (le) setAttr(le, key, value);
+      });
+    },
+
+    addLayoutEngine: (guid) => {
+      get().mutate((doc) => {
+        const el = findComponentElement(doc, guid);
+        if (!el || getLayoutEngine(el)) return;
+        el.children.push({ kind: "element", tag: "LayoutEngine", attrs: [["type", "List"]], children: [], self_closing: true });
+        el.self_closing = false;
       });
     },
 
@@ -660,6 +876,93 @@ export const useStore = create<AppStore>()(
       if (newGuid) set((s) => {
         s.selectedGuid = newGuid!;
       });
+    },
+
+    regenGuids: () => {
+      if (!get().doc) return;
+      get().mutate((doc) => {
+        regenAllGuids(doc);
+      });
+    },
+
+    // Regen just the selected component's own GUID(s) (its this/uniqueguid + its states/images);
+    // child components keep theirs. References across the doc stay linked.
+    regenComponentGuids: (guid) => {
+      if (!get().doc) return;
+      get().mutate((doc) => {
+        const comp = componentMap(doc).get(guid);
+        if (comp) regenGuidSet(doc, componentGuidSet(comp));
+      });
+    },
+
+    // Regen the component AND every descendant component in its hierarchy subtree.
+    regenSubtreeGuids: (guid) => {
+      if (!get().doc) return;
+      get().mutate((doc) => {
+        regenGuidSet(doc, subtreeGuidSet(doc, guid));
+      });
+    },
+
+    setDockLayout: (json) =>
+      set((s) => {
+        s.settings.dockLayout = json;
+      }),
+    setDockedPanels: (ids) =>
+      set((s) => {
+        s.dockedPanels = ids;
+      }),
+    setPanelPopped: (id, popped) =>
+      set((s) => {
+        if (popped) s.poppedPanels[id] = true;
+        else delete s.poppedPanels[id];
+      }),
+    setShowBounds: (v) => set((s) => { s.showBounds = v; }),
+
+    setMode: (m) => set((s) => { s.mode = m; }),
+
+    copy: () => {
+      const g = get().selectedGuid;
+      const doc = get().doc;
+      if (!g || !doc) return;
+      const clip = extractSubtree(doc, g);
+      if (clip) set((s) => { s.clipboard = clip; });
+    },
+
+    paste: () => {
+      const clip = get().clipboard;
+      const doc = get().doc;
+      if (!clip || !doc) return;
+      // Paste under the selected node, else under the design root.
+      const root = hierarchyRoot(doc);
+      const parent = get().selectedGuid ?? (root ? guidOf(root) ?? null : null);
+      if (!parent) return;
+      let newGuid: string | undefined;
+      get().mutate((d) => {
+        newGuid = pasteSubtree(d, parent, clip);
+        // Nudge so the paste doesn't sit exactly on the original / parent origin.
+        if (newGuid) {
+          const comps = componentsSection(d);
+          const el = comps && elementChildren(comps).find((c) => guidOf(c) === newGuid);
+          if (el) {
+            const [ox, oy] = parseVec2(getAttr(el, "offset"), [0, 0]);
+            setAttr(el, "offset", fmtVec2(ox + 16, oy + 16));
+          }
+        }
+      });
+      if (newGuid) set((s) => { s.selectedGuid = newGuid!; });
+    },
+
+    createAt: (parentGuid, x, y) => {
+      const doc = get().doc;
+      if (!doc) return;
+      const root = hierarchyRoot(doc);
+      const parent = parentGuid ?? (root ? guidOf(root) ?? null : null);
+      if (!parent) return;
+      let newGuid: string | undefined;
+      get().mutate((d) => {
+        newGuid = addNode(d, parent, "new_component", fmtVec2(x, y));
+      });
+      if (newGuid) set((s) => { s.selectedGuid = newGuid!; });
     },
 
     addChild: (parentGuid, tag) => {
