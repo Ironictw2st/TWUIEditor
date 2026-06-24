@@ -27,10 +27,9 @@ jobs:
 
       - run: npm ci
 
-      # Build the frontend (-> dist/), which cargo build embeds via tauri-build (frontendDist).
-      - run: npm run build
-
-      - run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      # `tauri build` runs the frontend build and embeds it into the exe (prod mode).
+      # --no-bundle skips the NSIS/MSI installers; we only ship the portable exe.
+      - run: npx tauri build --no-bundle
 
       # Publish the portable exe under the stable name the in-app updater looks for.
       - run: cp src-tauri/target/release/twui-editor.exe TWUI-Editor-x64.exe
