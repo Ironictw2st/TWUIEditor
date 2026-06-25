@@ -55,6 +55,8 @@ function Row({
   const guid = guidOf(node) ?? "";
   const kids = elementChildren(node);
   const selected = useStore((s) => s.selectedGuids.includes(guid));
+  const hovered = useStore((s) => s.hoveredGuid === guid);
+  const setHovered = useStore((s) => s.setHovered);
   const select = useStore((s) => s.select);
   const toggleSelect = useStore((s) => s.toggleSelect);
   const keybinds = useStore((s) => s.settings.keybinds);
@@ -117,10 +119,14 @@ function Row({
             ? "ring-1 ring-accent bg-drop"
             : selected
             ? "bg-selected outline outline-1 outline-accent"
+            : hovered
+            ? "bg-panelHeader ring-1 ring-accent/40"
             : "hover:bg-panelHeader"
         }`}
         style={{ paddingLeft: depth * 12 + 4 }}
         draggable
+        onMouseEnter={() => setHovered(guid)}
+        onMouseLeave={() => setHovered(null)}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onDragOver={onDragOver}

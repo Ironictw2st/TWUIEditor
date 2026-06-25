@@ -14,12 +14,14 @@ import TreePanel from "./TreePanel";
 import InspectorPanel from "./InspectorPanel";
 import VisualizerPanel from "./VisualizerPanel";
 import PerspectivePanel from "./PerspectivePanel";
+import PackFilesPanel from "./PackFilesPanel";
 
 const TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
   inspector: "Inspector",
   visualizer: "Visualizer",
   perspective: "Perspective",
+  packfiles: "Pack Files",
 };
 
 // --- panel content (the dockview panel body) -----------------------------------------------------
@@ -27,12 +29,14 @@ const HierarchyView = (_p: IDockviewPanelProps) => <div className="h-full flex f
 const InspectorView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><InspectorPanel /></div>;
 const VisualizerView = (_p: IDockviewPanelProps) => <div className="h-full bg-canvas"><VisualizerPanel /></div>;
 const PerspectiveView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><PerspectivePanel /></div>;
+const PackFilesView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><PackFilesPanel /></div>;
 
 const components = {
   hierarchy: HierarchyView,
   inspector: InspectorView,
   visualizer: VisualizerView,
   perspective: PerspectiveView,
+  packfiles: PackFilesView,
 };
 
 // --- pop-out tab ---------------------------------------------------------------------------------

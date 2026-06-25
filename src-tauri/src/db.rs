@@ -5,7 +5,6 @@
 //! line beginning with `#` (table metadata) to skip, then tab-separated rows.
 
 use crate::state::AppState;
-use std::path::Path;
 
 #[derive(serde::Serialize, Default)]
 pub struct ContextDb {
@@ -48,11 +47,13 @@ pub struct Subculture {
     pub culture: String,
 }
 
-/// Parse a `data__.tsv`: returns (header columns, data rows as Vec<Vec<String>>).
-fn read_tsv(path: &Path) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let text = std::fs::read_to_string(path).ok()?;
+/// Parse a `data__.tsv` body into (header columns, data rows).
+fn parse_tsv(text: &str) -> (Vec<String>, Vec<Vec<String>>) {
     let mut lines = text.lines();
-    let header: Vec<String> = lines.next()?.split('\t').map(|s| s.to_string()).collect();
+    let Some(first) = lines.next() else {
+        return (Vec::new(), Vec::new());
+    };
+    let header: Vec<String> = first.split('\t').map(|s| s.to_string()).collect();
     let mut rows = Vec::new();
     for line in lines {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -60,7 +61,41 @@ fn read_tsv(path: &Path) -> Option<(Vec<String>, Vec<Vec<String>>)> {
         }
         rows.push(line.split('\t').map(|s| s.to_string()).collect::<Vec<_>>());
     }
-    Some((header, rows))
+    (header, rows)
+}
+
+/// Read a db table as (header, rows) from the active source: binary `db/<table>/`
+/// decoded with the RPFM schema (pack mode), else the `DB/<table>/data__.tsv`
+/// export (folder mode). Shared by `db.rs` and `character.rs`.
+pub(crate) fn read_db_table(
+    state: &AppState,
+    table: &str,
+) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    // 1) Exact binary path (inside packs) — a cheap miss in folder mode.
+    if let Some(bytes) = state.read(&format!("db/{table}/data__")) {
+        if let Some(schema) = state.schema() {
+            if let Some(t) = crate::bin::decode_db(&bytes, &schema, table) {
+                return Some(t);
+            }
+        }
+    }
+    // 2) Exact RPFM TSV export (loose folder) — the common folder-mode path.
+    if let Some(text) = state.read_text(&format!("DB/{table}/data__.tsv")) {
+        return Some(parse_tsv(&text));
+    }
+    // 3) Pack only: the data file may be named differently -> one scoped listing.
+    //    (Skipped in folder mode, where it would be a full directory walk for nothing.)
+    if state.pack_mode() {
+        let pre = format!("db/{table}/");
+        if let Some(p) = state.list(&|x| x.starts_with(&pre)).into_iter().next() {
+            if let (Some(bytes), Some(schema)) = (state.read(&p), state.schema()) {
+                if let Some(t) = crate::bin::decode_db(&bytes, &schema, table) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn col_index(header: &[String], name: &str) -> Option<usize> {
@@ -72,15 +107,10 @@ fn get<'a>(row: &'a [String], idx: Option<usize>) -> &'a str {
 }
 
 pub fn load(state: &AppState) -> ContextDb {
-    let Some(root) = state.data_root() else {
-        return ContextDb::default();
-    };
-    let db = root.join("DB");
-
     let mut out = ContextDb::default();
 
     // factions
-    if let Some((h, rows)) = read_tsv(&db.join("factions_tables").join("data__.tsv")) {
+    if let Some((h, rows)) = read_db_table(state, "factions_tables") {
         let (k, sc, sn, fp) = (
             col_index(&h, "key"),
             col_index(&h, "subculture"),
@@ -106,7 +136,7 @@ pub fn load(state: &AppState) -> ContextDb {
     }
 
     // subcultures -> culture
-    if let Some((h, rows)) = read_tsv(&db.join("cultures_subcultures_tables").join("data__.tsv")) {
+    if let Some((h, rows)) = read_db_table(state, "cultures_subcultures_tables") {
         let (sc, cu) = (col_index(&h, "subculture"), col_index(&h, "culture"));
         for r in &rows {
             let subculture = get(r, sc).to_string();
@@ -122,7 +152,7 @@ pub fn load(state: &AppState) -> ContextDb {
     }
 
     // cultures
-    if let Some((h, rows)) = read_tsv(&db.join("cultures_tables").join("data__.tsv")) {
+    if let Some((h, rows)) = read_db_table(state, "cultures_tables") {
         let k = col_index(&h, "key");
         for r in &rows {
             let key = get(r, k).to_string();
@@ -134,10 +164,9 @@ pub fn load(state: &AppState) -> ContextDb {
     }
 
     // campaigns + which factions are playable per campaign (frontend leaders table).
-    if let Some((h, rows)) = read_tsv(
-        &db.join("frontend_faction_to_frontend_faction_leaders_tables")
-            .join("data__.tsv"),
-    ) {
+    if let Some((h, rows)) =
+        read_db_table(state, "frontend_faction_to_frontend_faction_leaders_tables")
+    {
         let (ck, ff) = (col_index(&h, "campaign_key"), col_index(&h, "frontend_faction"));
         for r in &rows {
             let campaign = get(r, ck).to_string();
@@ -170,10 +199,10 @@ pub fn load(state: &AppState) -> ContextDb {
     // on-screen title is `ministerial_positions_strings_on_screen_<localised_string_key>` in
     // the loc table. We resolve the title per row here so the frontend just picks a variant.
     {
-        let titles = read_on_screen_titles(&root);
-        if let Some((h, rows)) = read_tsv(
-            &db.join("ministerial_positions_culture_details_tables").join("data__.tsv"),
-        ) {
+        let titles = read_on_screen_titles(state);
+        if let Some((h, rows)) =
+            read_db_table(state, "ministerial_positions_culture_details_tables")
+        {
             let (pk, cu, fa, sub, cam, ls) = (
                 col_index(&h, "ministerial_position_key"),
                 col_index(&h, "culture_key"),
@@ -209,30 +238,15 @@ pub fn load(state: &AppState) -> ContextDb {
     out
 }
 
-/// The court-office on-screen title strings, keyed by their full loc key.
-fn read_on_screen_titles(root: &Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let path = root
-        .join("text")
-        .join("db")
-        .join("ministerial_positions_strings__.loc.tsv");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return map;
-    };
-    let mut lines = text.lines();
-    lines.next(); // header
-    for line in lines {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let mut cols = line.split('\t');
-        if let (Some(key), Some(value)) = (cols.next(), cols.next()) {
-            if key.starts_with("ministerial_positions_strings_on_screen_") {
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    map
+/// The court-office on-screen title strings, keyed by their full loc key. Pulled
+/// from the merged loc map (binary `.loc` in packs, or `.loc.tsv` in a folder).
+fn read_on_screen_titles(state: &AppState) -> std::collections::HashMap<String, String> {
+    state
+        .loc_all()
+        .iter()
+        .filter(|(k, _)| k.starts_with("ministerial_positions_strings_on_screen_"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -271,6 +285,42 @@ mod tests {
         assert!(main.iter().any(|f| f == "3k_main_faction_cao_cao"));
         let eight = db.campaign_factions.get("8p_start_pos").expect("8p campaign");
         assert!(!eight.iter().any(|f| f == "3k_main_faction_cao_cao"));
+    }
+
+    /// Pack-mode end-to-end: decode binary db + loc from the live install using
+    /// the auto-detected RPFM schema. Skipped if either is absent.
+    #[test]
+    fn pack_mode_decodes_db_loc_character() {
+        let dir = std::path::PathBuf::from(
+            "C:/Program Files (x86)/Steam/steamapps/common/Total War THREE KINGDOMS/data",
+        );
+        let state = AppState::new();
+        if !dir.exists() || state.schema_path().is_none() {
+            eprintln!("install or RPFM schema missing; skipping");
+            return;
+        }
+        if state.set_pack_source(dir, false).is_err() {
+            return;
+        }
+        // db: factions decoded from binary, joined to subcultures + campaigns.
+        let db = load(&state);
+        assert!(db.factions.len() > 100, "expected factions, got {}", db.factions.len());
+        let cao = db
+            .factions
+            .iter()
+            .find(|f| f.key == "3k_main_faction_cao_cao")
+            .expect("cao_cao faction present (binary db decode)");
+        assert_eq!(cao.subculture, "3k_main_chinese");
+        assert!(db.campaigns.iter().any(|c| c == "3k_main_campaign_map"));
+        assert!(!db.ministerial_positions.is_empty(), "court titles (db + binary loc)");
+
+        // loc: binary .loc decode.
+        let loc = crate::loc::load(&state);
+        assert!(!loc.is_empty(), "expected localised strings from binary .loc");
+
+        // character: art-set join across two binary tables.
+        let ch = crate::character::load(&state);
+        assert!(ch.templates.len() > 100, "expected templates, got {}", ch.templates.len());
     }
 
     #[test]

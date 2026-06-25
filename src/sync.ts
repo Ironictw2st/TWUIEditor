@@ -14,9 +14,17 @@ const CHANNEL = "twui-sync";
 // Window-local store fields that must NOT be mirrored: each window pans/zooms independently (view),
 // undo history is huge and leader-only, settings persist per-origin already, and pop-out bookkeeping
 // is per-window.
-const DENY_KEYS = new Set(["view", "undoStack", "redoStack", "settings", "poppedPanels"]);
-// Actions a follower runs LOCALLY instead of forwarding (pan/zoom is per-window).
-const LOCAL_ACTIONS = new Set(["setView"]);
+const DENY_KEYS = new Set([
+  "view",
+  "undoStack",
+  "redoStack",
+  "settings",
+  "poppedPanels",
+  // Hover is ephemeral + per-window; mirroring it would churn on every mousemove.
+  "hoveredGuid",
+]);
+// Actions a follower runs LOCALLY instead of forwarding (pan/zoom + hover are per-window).
+const LOCAL_ACTIONS = new Set(["setView", "setHovered"]);
 
 type Msg =
   | { type: "state"; payload: Record<string, unknown> }

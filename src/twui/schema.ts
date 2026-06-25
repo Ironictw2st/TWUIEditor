@@ -9,7 +9,7 @@
 // constrained here — they stay fully editable via the raw element tree / Raw tab, so
 // nothing is hidden or lost (our round-trip keeps the verbatim attrs regardless).
 
-export type AttrKind = "component" | "state" | "image" | "component_image" | "layoutEngine";
+export type AttrKind = "component" | "state" | "image" | "component_image" | "layoutEngine" | "model";
 export type AttrType = "text" | "number" | "vec2" | "enum" | "bool" | "colour" | "path";
 
 export interface AttrSchema {
@@ -23,6 +23,18 @@ export interface AttrSchema {
   default?: string;
   /** Editor-only / rarely-edited cruft — sinks to the bottom of its section when present. */
   priorityHint?: "low";
+  /** Inclusive layout-format version range the attribute is valid in. Absent = all versions.
+   *  Derived from the bundled 3K (135/136) and WH3 (142) files, so it is an approximation —
+   *  gating built on it stays advisory (never hides a present attr, never blocks a commit). */
+  versions?: { min?: number; max?: number };
+}
+
+/** Whether an attribute is valid in a given layout version. `version` 0 (unknown) allows all,
+ *  and an attr with no `versions` range is valid everywhere. */
+export function attrInVersion(s: AttrSchema, version: number): boolean {
+  if (!version || !s.versions) return true;
+  const { min, max } = s.versions;
+  return (min === undefined || version >= min) && (max === undefined || version <= max);
 }
 
 // --- Shared enum value sets (observed across games/3K/ui/**) ------------------------
@@ -81,6 +93,10 @@ export const LE_TYPE = ["List", "HorizontalList", "RadialList"];
 export const LE_HALIGN = ["Center", "Right"];
 export const LE_VALIGN = ["Center", "Bottom"];
 
+// WH3 (v142) enums.
+export const ASPECT_RATIO_BEHAVIOUR = ["Width First", "Biggest", "Smallest", "Only Width"];
+export const TEXT_CLIP_BEHAVIOUR = ["none", "ellipsis", "marquee_on_inspect", "shrink_then_ellipsis_no_tooltip"];
+
 // --- The schema --------------------------------------------------------------------
 
 const C: AttrKind[] = ["component"];
@@ -88,6 +104,7 @@ const S: AttrKind[] = ["state"];
 const I: AttrKind[] = ["image"];
 const CI: AttrKind[] = ["component_image"];
 const LE: AttrKind[] = ["layoutEngine"];
+const M: AttrKind[] = ["model"];
 
 // Shared by several kinds: GUID identity attrs (engine writes both `this` and `uniqueguid`
 // on most elements; templated instances also carry `uniqueguid_in_template`).
@@ -95,8 +112,8 @@ const GUID_T: AttrType = "text";
 
 const SCHEMA_LIST: AttrSchema[] = [
   // Layout / component
-  { name: "id", label: "id", type: "text", appliesTo: C, category: "Identity",
-    description: "The component's identifier (referenced by callbacks via self.Id and by ComponentCreator)." },
+  { name: "id", label: "id", type: "text", appliesTo: ["component", "model"], category: "Identity",
+    description: "The component's identifier (referenced by callbacks via self.Id and by ComponentCreator). On a ComponentModel it names the model (e.g. battle_model_primary)." },
   { name: "offset", label: "offset (x,y)", type: "vec2", appliesTo: ["component", "image"], category: "Layout", default: "0.00,0.00",
     description: "Top-left position relative to the parent (already bakes in docking for regular components)." },
   { name: "docking", label: "docking", type: "enum", enumValues: DOCKING_VALUES, appliesTo: C, category: "Layout", default: "None",
@@ -193,8 +210,8 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Let children overlap when they exceed max_length (game only; not used by the editor renderer)." },
   { name: "starting_angle", label: "starting angle", type: "number", appliesTo: LE, category: "Layout Engine",
     description: "RadialList: angle (radians) of the first item (0 = east/right). Honoured by the renderer." },
-  { name: "arc", label: "arc", type: "number", appliesTo: LE, category: "Layout Engine",
-    description: "RadialList: total arc (radians); 0 = full circle (not yet applied by the renderer; spacing drives placement)." },
+  { name: "arc", label: "arc", type: "number", appliesTo: LE, category: "Layout Engine", versions: { min: 136 },
+    description: "RadialList: total arc (radians); 0 = full circle (added in 136; not yet applied by the renderer; spacing drives placement)." },
   { name: "radius", label: "radius", type: "number", appliesTo: LE, category: "Layout Engine",
     description: "RadialList: radius in pixels from the container centre. Honoured by the renderer." },
   { name: "clockwise", label: "clockwise", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
@@ -203,31 +220,31 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Enable list-view lookup acceleration for the laid-out children (game only)." },
   { name: "min_dimensions", label: "min dimensions (w,h)", type: "vec2", appliesTo: LE, category: "Layout Engine",
     description: "Minimum size the container is allowed to shrink to under size-to-content (game only)." },
-  { name: "matchfontsizes", label: "match font sizes", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Normalise the font sizes of laid-out text children to match (game only)." },
-  { name: "allow_scale_items_down", label: "scale items down", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Allow children to be scaled down to fit when they overflow (game only)." },
-  { name: "autocalc_rows", label: "auto-calc rows", type: "text", appliesTo: LE, category: "Layout Engine",
-    description: "Automatically compute the number of rows from the item count (game only)." },
-  // LayoutEngine — WH3-shared engine attrs.
-  { name: "resize_children", label: "resize children", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Resize children to the container's cross-axis extent (game only)." },
-  { name: "even_distribution", label: "even distribution", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Distribute children evenly across the available length (game only)." },
-  { name: "central_alignment", label: "central alignment", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Centre the laid-out block within the container (game only)." },
-  { name: "is_using_variable_line_length", label: "variable line length", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Allow rows of differing length when wrapping (game only)." },
-  { name: "equal_spacing_size", label: "equal spacing size", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
-    description: "Force equal spacing slots regardless of child size (game only)." },
+  { name: "matchfontsizes", label: "match font sizes", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { max: 136 },
+    description: "Normalise the font sizes of laid-out text children to match (game only; 3K — removed in WH3/142)." },
+  { name: "allow_scale_items_down", label: "scale items down", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 136 },
+    description: "Allow children to be scaled down to fit when they overflow (game only; added in 136)." },
+  { name: "autocalc_rows", label: "auto-calc rows", type: "text", appliesTo: LE, category: "Layout Engine", versions: { min: 136 },
+    description: "Automatically compute the number of rows from the item count (game only; added in 136)." },
+  // LayoutEngine — WH3 (v142) engine attrs.
+  { name: "resize_children", label: "resize children", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 142 },
+    description: "Resize children to the container's cross-axis extent (game only; WH3/142)." },
+  { name: "even_distribution", label: "even distribution", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 142 },
+    description: "Distribute children evenly across the available length (game only; WH3/142)." },
+  { name: "central_alignment", label: "central alignment", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 142 },
+    description: "Centre the laid-out block within the container (game only; WH3/142)." },
+  { name: "is_using_variable_line_length", label: "variable line length", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 142 },
+    description: "Allow rows of differing length when wrapping (game only; WH3/142)." },
+  { name: "equal_spacing_size", label: "equal spacing size", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", versions: { min: 142 },
+    description: "Force equal spacing slots regardless of child size (game only; WH3/142)." },
 
   // --- Identity / GUID (shared across element kinds) ---------------------------------
   { name: "this", label: "guid (this)", type: GUID_T, appliesTo: ["component", "state", "image", "component_image"], category: "Identity",
     description: "This element's GUID. Editing it breaks any currentstate/defaultstate/componentimage references that point here — use the GUIDs section to regenerate safely." },
   { name: "uniqueguid", label: "unique guid", type: GUID_T, appliesTo: ["component", "state", "image", "component_image"], category: "Identity",
     description: "The element's unique GUID (mirrors `this`). Same editing caveat as `this`." },
-  { name: "uniqueguid_in_template", label: "template guid", type: GUID_T, appliesTo: C, category: "Identity",
-    description: "GUID this templated instance maps to inside its template file (WH3)." },
+  { name: "uniqueguid_in_template", label: "template guid", type: GUID_T, appliesTo: C, category: "Identity", versions: { min: 142 },
+    description: "GUID this templated instance maps to inside its template file (WH3/142)." },
   { name: "name", label: "name", type: "text", appliesTo: S, category: "Identity",
     description: "The state's name (active, hover, selected, NewState, ...). Referenced by the preview-state selector." },
 
@@ -244,22 +261,22 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Allow this component's width to be resized by the layout/engine." },
   { name: "allowverticalresize", label: "allow v-resize", type: "bool", enumValues: BOOL, appliesTo: C, category: "Layout",
     description: "Allow this component's height to be resized by the layout/engine." },
-  { name: "isaspectratiolocked", label: "aspect locked", type: "bool", enumValues: BOOL, appliesTo: ["component", "image"], category: "Layout",
-    description: "Lock the aspect ratio when the element is resized." },
+  { name: "isaspectratiolocked", label: "aspect locked", type: "bool", enumValues: BOOL, appliesTo: ["component", "image"], category: "Layout", versions: { max: 136 },
+    description: "Lock the aspect ratio when the element is resized (3K). Replaced in WH3/142 by the enum aspect_ratio_locked_behaviour." },
   { name: "isrelativeresize", label: "relative resize", type: "bool", enumValues: BOOL, appliesTo: ["component", "image"], category: "Layout",
     description: "Resize relative to the parent rather than to an absolute size." },
-  { name: "aspect_ratio_locked_behaviour", label: "aspect behaviour", type: "text", appliesTo: ["component", "image"], category: "Layout",
-    description: "How aspect-ratio locking is applied when resizing (WH3)." },
-  { name: "is_visible", label: "is visible", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "true",
-    description: "Static visibility (newer flag; engine also honours the older `visible`)." },
+  { name: "aspect_ratio_locked_behaviour", label: "aspect behaviour", type: "enum", enumValues: ASPECT_RATIO_BEHAVIOUR, appliesTo: ["component", "image"], category: "Layout", versions: { min: 142 },
+    description: "How aspect-ratio locking is applied when resizing (WH3/142). Replaces the older isaspectratiolocked bool." },
+  { name: "is_visible", label: "is visible", type: "bool", enumValues: BOOL, appliesTo: ["component", "model"], category: "Behaviour", default: "true",
+    description: "Static visibility (newer flag; engine also honours the older `visible`). On a ComponentModel toggles that model's rendering." },
   { name: "soundcategory", label: "sound category", type: "text", appliesTo: ["component", "state"], category: "Behaviour",
     description: "Interaction sound bank key (engine variant of `sound_category`, no underscore)." },
   { name: "updatewhennotvisible", label: "update when hidden", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
     description: "Keep updating this component's bindings even while it is not visible." },
   { name: "clipimagestocomponent", label: "clip images", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
     description: "Clip the component's images to its own rect." },
-  { name: "renderwhendragged", label: "render when dragged", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
-    description: "Keep rendering the component while it is being dragged." },
+  { name: "renderwhendragged", label: "render when dragged", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false", versions: { max: 136 },
+    description: "Keep rendering the component while it is being dragged (3K — removed in WH3/142)." },
   { name: "useglobalclicks", label: "use global clicks", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
     description: "Receive global click events even when not directly hit-tested." },
   { name: "renderifroot", label: "render if root", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour",
@@ -272,24 +289,24 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Named layout transition to play (engine spelling without underscore)." },
   { name: "layout_transition", label: "layout transition", type: "text", appliesTo: C, category: "Behaviour",
     description: "Named layout transition to play (underscore spelling)." },
-  { name: "create_ingame", label: "create in-game", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour",
-    description: "Whether the component is created at runtime in-game (WH3)." },
+  { name: "create_ingame", label: "create in-game", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", versions: { min: 142 },
+    description: "Whether the component is created at runtime in-game (WH3/142)." },
   { name: "text_label", label: "text label", type: "text", appliesTo: C, category: "Text",
     description: "Component-level localisation key for text (WH3)." },
-  { name: "component_level_text", label: "component text", type: "text", appliesTo: C, category: "Text",
-    description: "Component-level static/override text (WH3)." },
-  { name: "text_clip_behaviour", label: "text clip", type: "text", appliesTo: ["component", "state"], category: "Text",
-    description: "How over-long text is clipped (WH3)." },
+  { name: "component_level_text", label: "component text", type: "text", appliesTo: C, category: "Text", versions: { min: 142 },
+    description: "Component-level static/override text (WH3/142)." },
+  { name: "text_clip_behaviour", label: "text clip", type: "enum", enumValues: TEXT_CLIP_BEHAVIOUR, appliesTo: ["component", "state"], category: "Text", versions: { min: 142 },
+    description: "How over-long text is clipped (WH3/142): none, ellipsis, marquee_on_inspect, or shrink_then_ellipsis_no_tooltip." },
   { name: "comment", label: "comment", type: "text", appliesTo: C, category: "Editor", priorityHint: "low",
     description: "Author comment kept in the file; no runtime effect." },
   { name: "locked", label: "locked", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
     description: "Editor-only: locked against selection/editing in the original tool." },
   { name: "marked_for_deletion", label: "marked for deletion", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
     description: "Editor-only flag from the original tool; no runtime effect." },
-  { name: "renderlastonfocused", label: "render last on focus", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
-    description: "Render this component last (on top) when focused." },
-  { name: "is_dev_only", label: "dev only", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
-    description: "Component exists only in dev builds." },
+  { name: "renderlastonfocused", label: "render last on focus", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low", versions: { max: 136 },
+    description: "Render this component last (on top) when focused (3K — removed in WH3/142)." },
+  { name: "is_dev_only", label: "dev only", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low", versions: { min: 136 },
+    description: "Component exists only in dev builds (added in 136)." },
 
   // --- State additions --------------------------------------------------------------
   { name: "textlabel", label: "text label", type: "text", appliesTo: S, category: "Text",
@@ -302,10 +319,10 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Vertical pixel offset applied to the text within the rect." },
   { name: "font_m_leading", label: "font leading", type: "number", appliesTo: S, category: "Text",
     description: "Line leading (line-height) for multi-line text." },
-  { name: "font_m_tracking", label: "font tracking", type: "number", appliesTo: S, category: "Text",
-    description: "Letter tracking (spacing between glyphs)." },
-  { name: "font_colour_override_preset_key", label: "font colour preset", type: "text", appliesTo: S, category: "Text",
-    description: "Named colour preset overriding the font colour (e.g. green, red)." },
+  { name: "font_m_tracking", label: "font tracking", type: "number", appliesTo: S, category: "Text", versions: { max: 136 },
+    description: "Letter tracking (spacing between glyphs) (3K — removed in WH3/142)." },
+  { name: "font_colour_override_preset_key", label: "font colour preset", type: "text", appliesTo: S, category: "Text", versions: { min: 136 },
+    description: "Named colour preset overriding the font colour (e.g. green, red) (added in 136)." },
   { name: "shadervars", label: "shader vars", type: "text", appliesTo: S, category: "Style",
     description: "Comma-separated parameters for the state's shader (e.g. 1.00,0.50,0.00,0.00)." },
   { name: "textshadervars", label: "text shader vars", type: "text", appliesTo: S, category: "Style",
@@ -350,8 +367,60 @@ const SCHEMA_LIST: AttrSchema[] = [
   // --- Component image (<componentimages><component_image>) --------------------------
   { name: "imagepath", label: "image path", type: "path", appliesTo: CI, category: "Image",
     description: "Texture path (relative to the data root), e.g. ui/skins/default/foo.png." },
-  { name: "canuse1bitalpha", label: "1-bit alpha", type: "bool", enumValues: BOOL, appliesTo: CI, category: "Image", default: "false",
-    description: "Allow the texture to use 1-bit alpha (cheaper, no blending)." },
+  { name: "canuse1bitalpha", label: "1-bit alpha", type: "bool", enumValues: BOOL, appliesTo: CI, category: "Image", default: "false", versions: { max: 136 },
+    description: "Allow the texture to use 1-bit alpha (cheaper, no blending) (3K — removed in WH3/142)." },
+
+  // --- 3D model view (WH3/142: <component_model_view> and its <model_list><ComponentModel>) ---
+  // Schema labels only — the nested <animation_paths>/<path> list stays Raw-editable.
+  { name: "environment_filepath", label: "environment", type: "path", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Lighting/environment file for the model view (e.g. Porthole/advisor/default_porthole.lighting)." },
+  { name: "ambient_light_m_ambient_cube_front", label: "ambient front", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing front (r,g,b)." },
+  { name: "ambient_light_m_ambient_cube_back", label: "ambient back", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing back (r,g,b)." },
+  { name: "ambient_light_m_ambient_cube_top", label: "ambient top", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing up (r,g,b)." },
+  { name: "ambient_light_m_ambient_cube_bottom", label: "ambient bottom", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing down (r,g,b)." },
+  { name: "ambient_light_m_ambient_cube_left", label: "ambient left", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing left (r,g,b)." },
+  { name: "ambient_light_m_ambient_cube_right", label: "ambient right", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Ambient cube light colour facing right (r,g,b)." },
+  { name: "directional_light_m_light_colour", label: "light colour", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Directional light colour (r,g,b)." },
+  { name: "directional_light_m_light_direction", label: "light direction", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Directional light direction vector (x,y,z radians/components)." },
+  { name: "camera_target", label: "camera target", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Point the camera looks at (x,y,z)." },
+  { name: "camera_dist", label: "camera distance", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Camera distance from the target." },
+  { name: "camera_fov", label: "camera fov", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Camera field of view." },
+  { name: "camera_theta", label: "camera theta", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Camera azimuth angle (radians)." },
+  { name: "camera_phi", label: "camera phi", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Camera elevation angle (radians)." },
+  { name: "num_models", label: "num models", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Number of <ComponentModel> entries in the model list." },
+  // ComponentModel (a single model within the list).
+  { name: "filepath", label: "model file", type: "path", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "VariantMesh definition for the model (e.g. VariantMeshes/.../emp_captains.VariantMeshDefinition)." },
+  { name: "num_anims", label: "num anims", type: "number", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Number of <path> animation entries for this model." },
+  { name: "skeleton_type", label: "skeleton", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Skeleton the model uses (e.g. humanoid01, horse01)." },
+  { name: "current_animation_name", label: "current anim", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Name of the animation currently playing on the model." },
+  { name: "render_when_not_animating", label: "render when idle", type: "bool", enumValues: BOOL, appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Keep rendering the model when no animation is playing." },
+  { name: "bone_dock_point", label: "bone dock point", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Bone the model docks UI elements to." },
+  { name: "dock_bone", label: "dock bone", type: "text", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Bone used as the dock anchor for the model." },
+  { name: "atlas_path", label: "atlas path", type: "path", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "Texture atlas path used by the model view." },
+  { name: "json_path", label: "json path", type: "path", appliesTo: M, category: "Model", versions: { min: 142 },
+    description: "JSON descriptor path used by the model view." },
 ];
 
 const BY_NAME = new Map<string, AttrSchema[]>();
@@ -361,20 +430,26 @@ for (const s of SCHEMA_LIST) {
   BY_NAME.set(s.name, list);
 }
 
-/** The schema for an attribute — prefer one that applies to `kind`, else the first. */
-export function schemaFor(name: string, kind?: AttrKind): AttrSchema | undefined {
+/** The schema for an attribute — prefer one that applies to `kind` (and, when several do,
+ *  one that is valid in `version`), else the first applying to `kind`, else the first overall.
+ *  Always returns a match when the name is known, even if it is out-of-version, so a present
+ *  out-of-version attribute still renders with its label/type. */
+export function schemaFor(name: string, kind?: AttrKind, version = 0): AttrSchema | undefined {
   const list = BY_NAME.get(name);
   if (!list) return undefined;
   if (kind) {
-    const m = list.find((s) => s.appliesTo.includes(kind));
-    if (m) return m;
+    const forKind = list.filter((s) => s.appliesTo.includes(kind));
+    if (forKind.length) {
+      return forKind.find((s) => attrInVersion(s, version)) ?? forKind[0];
+    }
   }
   return list[0];
 }
 
-/** All schema entries that apply to a given element kind (for "add attribute"). */
-export function attrsFor(kind: AttrKind): AttrSchema[] {
-  return SCHEMA_LIST.filter((s) => s.appliesTo.includes(kind));
+/** All schema entries that apply to a given element kind and are valid in `version` (for the
+ *  "add attribute" dropdown). `version` 0 (unknown) includes everything. */
+export function attrsFor(kind: AttrKind, version = 0): AttrSchema[] {
+  return SCHEMA_LIST.filter((s) => s.appliesTo.includes(kind) && attrInVersion(s, version));
 }
 
 /** Advisory validation — returns a human message when the value looks malformed, else

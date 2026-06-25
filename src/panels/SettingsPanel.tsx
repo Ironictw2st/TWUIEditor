@@ -12,8 +12,17 @@ import {
 } from "../keybinds";
 import { checkForUpdateVerbose, installAndRelaunch, type CheckResult } from "../updater";
 import Markdown from "../components/Markdown";
+import { dockShowPanel } from "./DockLayout";
 
-type Category = "game" | "keybinds" | "perspective" | "visualizer" | "editor" | "theme" | "about";
+type Category =
+  | "game"
+  | "keybinds"
+  | "perspective"
+  | "visualizer"
+  | "editor"
+  | "experimental"
+  | "theme"
+  | "about";
 
 const CATEGORIES: { id: Category; label: string }[] = [
   { id: "game", label: "Game & Data" },
@@ -21,6 +30,7 @@ const CATEGORIES: { id: Category; label: string }[] = [
   { id: "perspective", label: "Perspective" },
   { id: "visualizer", label: "Visualizer" },
   { id: "editor", label: "Editor" },
+  { id: "experimental", label: "Experimental" },
   { id: "theme", label: "Theme" },
   { id: "about", label: "About / Updates" },
 ];
@@ -89,41 +99,181 @@ function KeyCaptureField({ binding, onCapture }: { binding: string; onCapture: (
   );
 }
 
+/** Last two path segments, for compact display of a long folder path. */
+function shortPath(p?: string | null): string | null {
+  if (!p) return null;
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2).join("/");
+}
+
 function GameSection() {
   const games = useStore((s) => s.games);
   const game = useStore((s) => s.game);
   const setGame = useStore((s) => s.setGame);
+  const setGamePath = useStore((s) => s.setGamePath);
+  const gamePaths = useStore((s) => s.settings.gamePaths);
   const dataRoot = useStore((s) => s.dataRoot);
   const setDataRoot = useStore((s) => s.setDataRoot);
+  const setPackSource = useStore((s) => s.setPackSource);
+  const packMode = useStore((s) => s.packMode);
+  const packLayouts = useStore((s) => s.packLayouts);
+  const packIncludeMods = useStore((s) => s.packIncludeMods);
+  const setPackIncludeMods = useStore((s) => s.setPackIncludeMods);
+  const schemaPath = useStore((s) => s.schemaPath);
+  const setSchemaPath = useStore((s) => s.setSchemaPath);
 
-  const pick = async () => {
-    const dir = await open({ directory: true, defaultPath: dataRoot ?? undefined });
-    if (typeof dir === "string") setDataRoot(dir);
+  const pickDir = async (def?: string | null): Promise<string | null> => {
+    const d = await open({ directory: true, defaultPath: def ?? undefined });
+    return typeof d === "string" ? d : null;
   };
+
+  // Row pickers: persist the path, and when it's the active game in the matching
+  // read mode, apply it — reverting the persisted path if the backend rejects it
+  // (e.g. a folder without `ui/`), so a bad pick can't re-break every boot.
+  const pickOutside = async (g: string) => {
+    const d = await pickDir(gamePaths[g]?.outside ?? dataRoot);
+    if (!d) return;
+    setGamePath(g, "outside", d);
+    if (g === game && !packMode) {
+      const ok = await setDataRoot(d);
+      if (!ok) setGamePath(g, "outside", null);
+    }
+  };
+  const pickData = async (g: string) => {
+    const d = await pickDir(gamePaths[g]?.data ?? dataRoot);
+    if (!d) return;
+    setGamePath(g, "data", d);
+    if (g === game && packMode) {
+      const ok = await setPackSource(d);
+      if (!ok) setGamePath(g, "data", null);
+    }
+  };
+
+  // Read-from buttons: switch the active game to folder/pack using its configured
+  // path, prompting once if unset; persist only when the apply succeeds.
+  const useFolder = async () => {
+    if (!game) return;
+    const existing = gamePaths[game]?.outside ?? null;
+    const p = existing ?? (await pickDir(dataRoot));
+    if (!p) return;
+    const ok = await setDataRoot(p);
+    if (ok && !existing) setGamePath(game, "outside", p);
+  };
+  const usePack = async () => {
+    if (!game) return;
+    const existing = gamePaths[game]?.data ?? null;
+    const p = existing ?? (await pickDir(dataRoot));
+    if (!p) return;
+    const ok = await setPackSource(p);
+    if (ok) {
+      if (!existing) setGamePath(game, "data", p);
+      dockShowPanel("packfiles");
+    }
+  };
+
+  const pickSchema = async () => {
+    const f = await open({ filters: [{ name: "RPFM schema", extensions: ["ron"] }] });
+    if (typeof f === "string") setSchemaPath(f);
+  };
+  const schemaName = schemaPath ? schemaPath.split(/[\\/]/).pop() : null;
+
+  const pathBtn = "px-2 py-0.5 rounded text-[11px] bg-button hover:bg-buttonHover border border-edge shrink-0";
+  const clearBtn = "text-[11px] text-gray-500 hover:text-text shrink-0";
 
   return (
     <div>
-      <SectionTitle>Game & Data</SectionTitle>
-      <Row label="Active game" hint="games/ subfolder">
-        {games.length > 0 ? (
-          <select className={sel} value={game ?? ""} onChange={(e) => setGame(e.target.value)}>
-            {!game && <option value="">Game…</option>}
-            {games.map((g) => (
-              <option key={g} value={g}>
-                {g}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span className="text-gray-500 text-[12px]">No games detected.</span>
-        )}
-      </Row>
-      <Row label="Data folder" hint="where the game data lives">
+      <SectionTitle>Game &amp; Data</SectionTitle>
+      {games.length === 0 ? (
+        <span className="text-gray-500 text-[12px]">No games detected.</span>
+      ) : (
+        <div className="mb-3">
+          <div className="grid grid-cols-[96px_1fr_1fr] gap-2 text-[10px] uppercase tracking-wide text-gray-500 mb-1 px-1">
+            <span>Game</span>
+            <span>Outside Path (loose)</span>
+            <span>Data Pathway (.pack)</span>
+          </div>
+          {games.map((g) => {
+            const gp = gamePaths[g] ?? { outside: null, data: null };
+            const active = g === game;
+            return (
+              <div
+                key={g}
+                className={`grid grid-cols-[96px_1fr_1fr] gap-2 items-center px-1 py-1 rounded ${
+                  active ? "bg-accent/10" : ""
+                }`}
+              >
+                <button
+                  className={`text-left text-[12px] truncate ${
+                    active ? "text-accent font-medium" : "text-text hover:underline"
+                  }`}
+                  onClick={() => setGame(g)}
+                  title="Make this the active game"
+                >
+                  {active ? "● " : ""}
+                  {g}
+                </button>
+                <div className="flex items-center gap-1 min-w-0">
+                  <button className={pathBtn} onClick={() => pickOutside(g)}>
+                    Set…
+                  </button>
+                  <span className="text-[10px] text-textMuted truncate" title={gp.outside ?? ""}>
+                    {shortPath(gp.outside) ?? `default (games/${g})`}
+                  </span>
+                  {gp.outside && (
+                    <button className={clearBtn} onClick={() => setGamePath(g, "outside", null)} title="Clear">
+                      ×
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 min-w-0">
+                  <button className={pathBtn} onClick={() => pickData(g)}>
+                    Set…
+                  </button>
+                  <span className="text-[10px] text-textMuted truncate" title={gp.data ?? ""}>
+                    {shortPath(gp.data) ?? "—"}
+                  </span>
+                  {gp.data && (
+                    <button className={clearBtn} onClick={() => setGamePath(g, "data", null)} title="Clear">
+                      ×
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <Row label="Read from" hint="apply the active game's path">
         <div className="flex items-center gap-2">
-          <button className={btn} onClick={pick}>
-            Change…
+          <button className={`${btn} ${!packMode ? "border-accent text-accent" : ""}`} onClick={useFolder}>
+            Folder
           </button>
-          <span className="text-[11px] text-textMuted truncate">{dataRoot ?? "not set"}</span>
+          <button className={`${btn} ${packMode ? "border-accent text-accent" : ""}`} onClick={usePack}>
+            Pack
+          </button>
+          <span className="text-[11px] text-textMuted truncate">
+            {packMode ? `pack — ${packLayouts.length} layouts` : "folder"} · {shortPath(dataRoot) ?? "not set"}
+          </span>
+        </div>
+      </Row>
+      {packMode && (
+        <Row label="Include mod packs" hint="off = vanilla only (Boot/Release packs)">
+          <label className="flex items-center gap-2 text-[12px] text-text">
+            <input
+              type="checkbox"
+              checked={packIncludeMods}
+              onChange={(e) => setPackIncludeMods(e.target.checked)}
+            />
+            {packIncludeMods ? "mods override vanilla" : "vanilla only"}
+          </label>
+        </Row>
+      )}
+      <Row label="RPFM schema" hint="decodes db/loc from packs (.ron)">
+        <div className="flex items-center gap-2">
+          <button className={btn} onClick={pickSchema}>
+            Choose…
+          </button>
+          <span className="text-[11px] text-textMuted truncate">{schemaName ?? "auto / not set"}</span>
         </div>
       </Row>
     </div>
@@ -339,6 +489,28 @@ function EditorSection() {
   );
 }
 
+function ExperimentalSection() {
+  const settings = useStore((s) => s.settings);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const ex = settings.experimental;
+  const patch = (p: Partial<typeof ex>) => updateSettings({ experimental: { ...ex, ...p } });
+
+  return (
+    <div>
+      <SectionTitle>Experimental</SectionTitle>
+      <p className="text-[11px] text-gray-500 mb-3">
+        Unfinished features that may change file contents. Use with care.
+      </p>
+      <Row
+        label="Layout version conversion"
+        hint="adds a converter on the root component to migrate between format versions (135/136/142)"
+      >
+        <Toggle checked={ex.versionConversion} onChange={(v) => patch({ versionConversion: v })} />
+      </Row>
+    </div>
+  );
+}
+
 function ThemeSection() {
   const settings = useStore((s) => s.settings);
   const updateSettings = useStore((s) => s.updateSettings);
@@ -487,6 +659,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             {cat === "perspective" && <PerspectiveSection />}
             {cat === "visualizer" && <VisualizerSection />}
             {cat === "editor" && <EditorSection />}
+            {cat === "experimental" && <ExperimentalSection />}
             {cat === "theme" && <ThemeSection />}
             {cat === "about" && <UpdatesSection />}
           </div>

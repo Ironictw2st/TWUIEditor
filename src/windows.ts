@@ -10,12 +10,14 @@ const TITLE: Record<PanelId, string> = {
   inspector: "Inspector",
   perspective: "Perspective",
   visualizer: "Visualizer",
+  packfiles: "Pack Files",
 };
 const SIZE: Record<PanelId, { width: number; height: number }> = {
   hierarchy: { width: 360, height: 820 },
   inspector: { width: 430, height: 900 },
   perspective: { width: 560, height: 220 },
   visualizer: { width: 1040, height: 780 },
+  packfiles: { width: 380, height: 820 },
 };
 
 /** Open (or focus) the OS window for a panel. `onClosed` fires when the user closes that window. */

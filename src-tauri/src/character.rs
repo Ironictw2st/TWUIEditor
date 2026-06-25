@@ -9,9 +9,9 @@
 //! Each `*_tables/data__.tsv` is: a header row, a `#` metadata line to skip,
 //! then tab-separated rows (same format `db.rs` reads).
 
+use crate::db::read_db_table;
 use crate::state::AppState;
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(serde::Serialize, Default)]
 pub struct CharacterDb {
@@ -29,20 +29,6 @@ pub struct CharacterTemplate {
     pub card: String,
 }
 
-fn read_tsv(path: &Path) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let header: Vec<String> = lines.next()?.split('\t').map(|s| s.to_string()).collect();
-    let mut rows = Vec::new();
-    for line in lines {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        rows.push(line.split('\t').map(|s| s.to_string()).collect::<Vec<_>>());
-    }
-    Some((header, rows))
-}
-
 fn col_index(header: &[String], name: &str) -> Option<usize> {
     header.iter().position(|h| h == name)
 }
@@ -54,10 +40,9 @@ fn get<'a>(row: &'a [String], idx: Option<usize>) -> &'a str {
 /// art_set_id -> the adult (portrait folder, card). When an art set has several
 /// rows (baby / child / adult), prefer the one that has come of age (the adult),
 /// else the highest age, else the first seen.
-fn art_set_art(db: &Path) -> HashMap<String, (String, String)> {
+fn art_set_art(state: &AppState) -> HashMap<String, (String, String)> {
     let mut out: HashMap<String, (String, String)> = HashMap::new();
-    let Some((h, rows)) = read_tsv(&db.join("campaign_character_arts_tables").join("data__.tsv"))
-    else {
+    let Some((h, rows)) = read_db_table(state, "campaign_character_arts_tables") else {
         return out;
     };
     let (set, port, card, age, coa) = (
@@ -90,16 +75,10 @@ fn art_set_art(db: &Path) -> HashMap<String, (String, String)> {
 }
 
 pub fn load(state: &AppState) -> CharacterDb {
-    let Some(root) = state.data_root() else {
-        return CharacterDb::default();
-    };
-    let db = root.join("DB");
-    let art = art_set_art(&db);
+    let art = art_set_art(state);
 
     let mut out = CharacterDb::default();
-    if let Some((h, rows)) = read_tsv(
-        &db.join("character_generation_templates_tables").join("data__.tsv"),
-    ) {
+    if let Some((h, rows)) = read_db_table(state, "character_generation_templates_tables") {
         let (k, ov) = (col_index(&h, "key"), col_index(&h, "art_set_override"));
         for r in &rows {
             let key = get(r, k).to_string();

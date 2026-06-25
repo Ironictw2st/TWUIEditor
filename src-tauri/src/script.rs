@@ -15,40 +15,34 @@ pub struct ScriptHit {
     pub text: String,
 }
 
-/// Find the first `.lua` under `<root>/script` whose contents call
+/// Find the first `.lua` under `script/` whose contents call
 /// `set_context_value("<script_id>"` — the script that publishes the panel data.
 pub fn find_by_id(state: &AppState, script_id: &str) -> Option<ScriptHit> {
-    let root = state.data_root()?;
     let needle = format!("set_context_value(\"{script_id}\"");
-    let mut stack = vec![root.join("script")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("lua") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if text.contains(&needle) {
-                        let rel = path
-                            .strip_prefix(&root)
-                            .unwrap_or(&path)
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        return Some(ScriptHit { path: rel, text });
-                    }
-                }
+    let candidates =
+        state.list(&|p| p.starts_with("script/") && p.ends_with(".lua"));
+    for rel in candidates {
+        if let Some(text) = state.read_text(&rel) {
+            if text.contains(&needle) {
+                return Some(ScriptHit { path: rel, text });
             }
         }
     }
     None
 }
 
-/// Read a `.lua` file, sandboxed to the data root. Accepts an absolute path
-/// (from the file dialog) that lies under the root, or a root-relative path.
+/// Read a `.lua` file. In pack mode the path is a source-relative path read
+/// straight from the pack. In folder mode it accepts an absolute path (from the
+/// file dialog) under the root, or a root-relative path, with sandboxing.
 pub fn read_file(state: &AppState, path: &str) -> Result<String, String> {
+    if state.pack_mode() {
+        if path.to_ascii_lowercase().ends_with(".lua") {
+            return state
+                .read_text(path)
+                .ok_or_else(|| format!("cannot read {path} from pack"));
+        }
+        return Err("not a .lua file".into());
+    }
     let root = state.data_root().ok_or("3K data root not set")?;
     let candidate = {
         let p = Path::new(path);

@@ -24,6 +24,7 @@ import { extractDataPack, LuaValue } from "../twui/lua";
 import { collectTemplateIds } from "../twui/template";
 import { defaultContext } from "../twui/context";
 import { collectCreatorPaths } from "../twui/creator";
+import { migrateLayout, MigrationResult } from "../twui/migrate";
 import { collectScriptComponents, pageScriptId } from "../twui/script";
 import {
   addCallback,
@@ -63,8 +64,8 @@ interface View {
 export type Mode = "view" | "move" | "create" | "align" | "sim" | "tooltip";
 
 /** Dockable panels that can be collapsed or popped out into their own OS window. */
-export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer";
-export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer"];
+export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles";
+export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles"];
 
 /** Persisted user preferences (localStorage `twui-settings`). Document/runtime
  *  state is never persisted — only this subset (+ `background`/`view`). */
@@ -81,11 +82,20 @@ export interface Settings {
     palette: { x: number | null; y: number | null; hidden: boolean };
   };
   editor: { undoLimit: number; rememberLastFile: boolean };
+  /** Opt-in experimental features, off by default. `versionConversion` reveals the
+   *  layout-version converter (root component only) in the Inspector. */
+  experimental: { versionConversion: boolean };
   /** Appearance: colour scheme (system follows the OS), accent colour, and UI density.
    *  Applied by src/theme.ts. */
   theme: { mode: "system" | "light" | "dark"; accent: string; density: "comfortable" | "compact" };
   /** Serialized dockview layout (`api.toJSON()`), restored on load. Pop-out state is session-only. */
   dockLayout: unknown | null;
+  /** Last-used read mode, restored on launch (so a pack location reopens in pack mode). */
+  readMode: "folder" | "pack";
+  /** Per-game configured paths: `outside` = a loose extracted data folder (folder
+   *  mode); `data` = the game's install `data` folder of `.pack` files (pack mode).
+   *  Selecting a game applies its path for the active read mode. */
+  gamePaths: Record<string, { outside: string | null; data: string | null }>;
   lastGame: string | null;
   lastFile: string | null;
 }
@@ -102,8 +112,11 @@ const DEFAULT_SETTINGS: Settings = {
     palette: { x: null, y: null, hidden: false },
   },
   editor: { undoLimit: 100, rememberLastFile: false },
+  experimental: { versionConversion: false },
   theme: { mode: "system", accent: "#c9a227", density: "comfortable" },
   dockLayout: null,
+  readMode: "folder",
+  gamePaths: {},
   lastGame: null,
   lastFile: null,
 };
@@ -118,8 +131,11 @@ function mergePersisted(current: AppStore, persisted: unknown): AppStore {
     ...ps,
     visualizer: { ...current.settings.visualizer, ...(ps.visualizer ?? {}) },
     editor: { ...current.settings.editor, ...(ps.editor ?? {}) },
+    experimental: { ...current.settings.experimental, ...(ps.experimental ?? {}) },
     theme: { ...current.settings.theme, ...(ps.theme ?? {}) },
     dockLayout: ps.dockLayout ?? current.settings.dockLayout,
+    readMode: ps.readMode ?? current.settings.readMode,
+    gamePaths: { ...(ps.gamePaths ?? {}) },
     keybinds: { ...(ps.keybinds ?? {}) },
     perspective: ps.perspective ?? null,
   };
@@ -152,7 +168,29 @@ export interface AppStore {
   /** Multi-selection set (Align tool). The first entry is the alignment anchor; `selectedGuid`
    *  is the active one (for the Inspector). Single-select keeps this in sync as `[guid]`. */
   selectedGuids: string[];
+  /** Component currently hovered (hierarchy row or canvas) — drives the highlight.
+   *  Session- and window-local (not persisted, not mirrored across windows). */
+  hoveredGuid: string | null;
+  /** A file switch awaiting the unsaved-changes prompt (null = none). */
+  pendingOpen: { path: string; fromPack: boolean } | null;
+  /** True when a window-close is awaiting the unsaved-changes prompt. */
+  pendingClose: boolean;
   dataRoot: string | null;
+  /** Reading from `.pack` archives (true) vs a loose folder (false). Session-only. */
+  packMode: boolean;
+  /** Source-relative path of a file opened from a pack (drives Save-As default name). */
+  packPath: string | null;
+  /** Every `.twui.xml` in the active pack(s) — backs the pack content browser. */
+  packLayouts: string[];
+  /** Whether pack mode includes Mod-type packs (false = vanilla only). */
+  packIncludeMods: boolean;
+  /** Absolute path of a single `.pack` overlaid on the base source, or null. */
+  overlayPack: string | null;
+  /** Path to the user's RPFM `.ron` schema (decodes binary db tables), or null. */
+  schemaPath: string | null;
+  /** True until the initial boot `init()` (all game data) has fully loaded — drives
+   *  the loading screen. */
+  loading: boolean;
   status: string;
   view: View;
   undoStack: TwuiDocument[];
@@ -215,6 +253,8 @@ export interface AppStore {
   setKeybind: (actionId: string, binding: string | null) => void;
   resetKeybinds: () => void;
   setGame: (name: string) => Promise<void>;
+  /** Set a game's configured `outside`/`data` path (persisted); pass null to clear. */
+  setGamePath: (game: string, kind: "outside" | "data", path: string | null) => void;
   setCharacter: (role: string, templateKey: string | null) => void;
   connectScript: (path: string) => Promise<void>;
   clearScript: () => void;
@@ -229,13 +269,30 @@ export interface AppStore {
   setFaction: (key: string) => void;
   setCulture: (key: string) => void;
   setSubculture: (key: string) => void;
-  openFile: (path: string) => Promise<void>;
+  openFile: (path: string, fromPack?: boolean, force?: boolean) => Promise<void>;
   openFileDialog: () => Promise<void>;
+  /** Resolve the unsaved-changes prompt for a pending file switch. */
+  confirmDiscardOpen: (choice: "save" | "saveAs" | "discard" | "cancel") => Promise<void>;
+  /** Resolve the unsaved-changes prompt for a window close; resolves true if the
+   *  window should now actually close. */
+  confirmClose: (choice: "save" | "saveAs" | "discard" | "cancel") => Promise<boolean>;
+  /** Switch to pack mode, reading `.pack` files under `gameDir` (read-only).
+   *  `includeMods` defaults to the current `packIncludeMods`. */
+  setPackSource: (gameDir: string, includeMods?: boolean) => Promise<boolean>;
+  /** Re-scan the current pack folder including/excluding Mod-type packs. */
+  setPackIncludeMods: (on: boolean) => Promise<void>;
+  /** Overlay a single `.pack` (absolute path) on the base source. */
+  setOverlayPack: (path: string) => Promise<void>;
+  /** Remove the single-pack overlay. */
+  clearOverlayPack: () => Promise<void>;
+  /** Point at the user's RPFM `.ron` schema and reload db/character/loc. */
+  setSchemaPath: (path: string) => Promise<void>;
   save: () => Promise<void>;
   saveAs: (path: string) => Promise<void>;
   saveAsDialog: () => Promise<void>;
-  setDataRoot: (path: string) => Promise<void>;
+  setDataRoot: (path: string) => Promise<boolean>;
   select: (guid: string | null) => void;
+  setHovered: (guid: string | null) => void;
   toggleSelect: (guid: string | null) => void;
   alignSelected: (axis: "x" | "y", refGuid: string) => void;
   centerBetween: (midGuid: string) => void;
@@ -245,6 +302,9 @@ export interface AppStore {
   setView: (v: Partial<View>) => void;
 
   mutate: (fn: (doc: TwuiDocument) => void) => void;
+  /** Opt-in: convert the open layout to `target` version (renames/removes per migrate.ts).
+   *  Goes through `mutate` so it is a single undoable step. Returns a summary for the caller. */
+  migrateVersion: (target: number) => MigrationResult | null;
   editAttr: (guid: string, key: string, value: string) => void;
   editAttrs: (guid: string, updates: Record<string, string>) => void;
   editLayoutEngineAttr: (guid: string, key: string, value: string) => void;
@@ -300,9 +360,19 @@ export const useStore = create<AppStore>()(
     dirty: false,
     selectedGuid: null,
     selectedGuids: [],
+    hoveredGuid: null,
+    pendingOpen: null,
+    pendingClose: false,
     poppedPanels: {},
     dockedPanels: [],
     dataRoot: null,
+    packMode: false,
+    packPath: null,
+    packLayouts: [],
+    packIncludeMods: false,
+    overlayPack: null,
+    schemaPath: null,
+    loading: true,
     status: "Ready",
     view: { ...DEFAULT_VIEW },
     undoStack: [],
@@ -357,20 +427,40 @@ export const useStore = create<AppStore>()(
       }),
 
     setGame: async (name) => {
+      set((s) => {
+        s.game = name;
+        s.settings.lastGame = name; // remembered across sessions
+      });
+      const paths = get().settings.gamePaths[name];
+      const wantPack = get().packMode; // keep the current read mode across the switch
       try {
-        await ipc.setGame(name);
-        set((s) => {
-          s.game = name;
-          s.settings.lastGame = name; // remembered across sessions
-        });
-        // Reload data for the new game; `false` skips re-applying lastGame (no loop).
-        await get().init(false);
+        if (wantPack && paths?.data) {
+          await get().setPackSource(paths.data); // applies + reloads (init)
+        } else if (paths?.outside) {
+          await get().setDataRoot(paths.outside); // applies + reloads, sets folder mode
+        } else {
+          // No configured path -> the default loose folder under games/<name>.
+          await ipc.setGame(name);
+          set((s) => {
+            s.packMode = false;
+            s.packLayouts = [];
+            s.overlayPack = null;
+            s.settings.readMode = "folder";
+          });
+          await get().init(false);
+        }
       } catch (e) {
         set((s) => {
           s.status = `${e}`;
         });
       }
     },
+
+    setGamePath: (game, kind, path) =>
+      set((s) => {
+        const cur = s.settings.gamePaths[game] ?? { outside: null, data: null };
+        s.settings.gamePaths[game] = { ...cur, [kind]: path };
+      }),
 
     setCharacter: (role, templateKey) =>
       set((s) => {
@@ -444,8 +534,14 @@ export const useStore = create<AppStore>()(
 
       await Promise.all([
         load(ipc.getDataRoot(), (s, root) => { s.dataRoot = root; }, "Failed to read data root"),
+        load(ipc.getSchemaPath(), (s, p) => { s.schemaPath = p; }),
         Promise.all([ipc.listGames(), ipc.currentGame()]).then(
-          ([games, game]) => set((s) => { s.games = games; s.game = game; }),
+          ([games, game]) => set((s) => {
+            s.games = games;
+            // `game` is frontend-authoritative once selected (custom paths make the
+            // backend's current_game() None); only seed it when nothing is chosen yet.
+            if (s.game == null) s.game = game;
+          }),
           () => {}
         ),
         load(ipc.loadContextDb(), (s, db) => { s.contextDb = db; }, "Failed to load DB"),
@@ -482,13 +578,19 @@ export const useStore = create<AppStore>()(
       }
       // Seed the active tool from the persisted default (parity with the old panel useState).
       set((s) => { s.mode = st.settings.visualizer.defaultMode; });
-      if (
-        applyPrefs &&
-        st.settings.lastGame &&
-        st.games.includes(st.settings.lastGame) &&
-        st.settings.lastGame !== st.game
-      ) {
-        await get().setGame(st.settings.lastGame); // setGame reloads with applyPrefs=false
+
+      // Restore the last game in its saved read mode (so a saved pack location reopens
+      // in pack mode). Only re-apply when there's actually something to switch to,
+      // avoiding a redundant reload for the plain folder-default case.
+      const lg = st.settings.lastGame;
+      if (applyPrefs && lg && st.games.includes(lg)) {
+        const gp = st.settings.gamePaths[lg];
+        const wantPack = st.settings.readMode === "pack" && !!gp?.data;
+        const wantCustomFolder = st.settings.readMode !== "pack" && !!gp?.outside;
+        if (wantPack || wantCustomFolder || lg !== st.game) {
+          set((s) => { s.packMode = wantPack; }); // steer setGame's branch
+          await get().setGame(lg); // setGame reloads with applyPrefs=false
+        }
       }
 
       // Reopen the last file on first launch, when opted in and nothing is open yet.
@@ -540,15 +642,26 @@ export const useStore = create<AppStore>()(
         if (sc?.culture) s.context.culture = sc.culture;
       }),
 
-    openFile: async (path) => {
+    openFile: async (path, fromPack = false, force = false) => {
+      // Guard unsaved edits: stash the request and let the UI prompt Save/Discard.
+      if (!force && get().dirty && get().doc) {
+        set((s) => {
+          s.pendingOpen = { path, fromPack };
+        });
+        return;
+      }
       set((s) => {
+        s.pendingOpen = null;
         s.status = `Loading ${baseName(path)}…`;
       });
       try {
-        const doc = await ipc.readLayout(path);
+        // Pack files are read by source-relative path; loose files by absolute path.
+        const doc = fromPack ? await ipc.readLayoutRel(path) : await ipc.readLayout(path);
         set((s) => {
           s.doc = doc;
-          s.filePath = path;
+          // No on-disk path for pack files -> Save falls through to Save-As.
+          s.filePath = fromPack ? null : path;
+          s.packPath = fromPack ? path : null;
           s.fileName = baseName(path);
           s.dirty = false;
           s.selectedGuid = null;
@@ -563,7 +676,7 @@ export const useStore = create<AppStore>()(
           s.scriptDraft = null;
           s.previewState = {};
           s.status = `Loaded ${baseName(path)}`;
-          if (s.settings.editor.rememberLastFile) s.settings.lastFile = path;
+          if (!fromPack && s.settings.editor.rememberLastFile) s.settings.lastFile = path;
         });
         // Auto-connect the page's backing Lua script (from its script_id).
         const scriptId = pageScriptId(doc);
@@ -649,7 +762,12 @@ export const useStore = create<AppStore>()(
 
     save: async () => {
       const { doc, filePath } = get();
-      if (!doc || !filePath) return;
+      if (!doc) return;
+      // No on-disk path (e.g. opened from a pack) -> prompt for a destination.
+      if (!filePath) {
+        await get().saveAsDialog();
+        return;
+      }
       try {
         await ipc.saveLayout(filePath, doc);
         set((s) => {
@@ -691,11 +809,53 @@ export const useStore = create<AppStore>()(
       if (typeof path === "string") await get().openFile(path);
     },
 
+    confirmDiscardOpen: async (choice) => {
+      const p = get().pendingOpen;
+      if (!p) return;
+      if (choice === "cancel") {
+        set((s) => {
+          s.pendingOpen = null;
+        });
+        return;
+      }
+      if (choice === "save") await get().save();
+      else if (choice === "saveAs") await get().saveAsDialog();
+      // Proceed when discarding, or when the save actually cleared the dirty flag
+      // (a cancelled Save-As leaves it dirty -> keep the prompt up).
+      if (choice === "discard" || !get().dirty) {
+        set((s) => {
+          s.pendingOpen = null;
+        });
+        await get().openFile(p.path, p.fromPack, true);
+      }
+    },
+
+    confirmClose: async (choice) => {
+      if (choice === "cancel") {
+        set((s) => {
+          s.pendingClose = false;
+        });
+        return false;
+      }
+      if (choice === "save") await get().save();
+      else if (choice === "saveAs") await get().saveAsDialog();
+      // Close on discard, or when the save actually cleared the dirty flag.
+      if (choice === "discard" || !get().dirty) {
+        set((s) => {
+          s.pendingClose = false;
+        });
+        return true;
+      }
+      return false; // save/Save-As cancelled -> stay open
+    },
+
     saveAsDialog: async () => {
       if (!get().doc) return;
+      // Suggest the pack file's own name when saving a pack-opened file.
+      const suggested = get().packPath ? baseName(get().packPath!) : undefined;
       const path = await saveDialog({
         filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
-        defaultPath: get().dataRoot ?? undefined,
+        defaultPath: suggested ?? get().dataRoot ?? undefined,
       });
       if (path) await get().saveAs(path);
     },
@@ -705,8 +865,98 @@ export const useStore = create<AppStore>()(
         await ipc.setDataRoot(path);
         set((s) => {
           s.dataRoot = path;
+          s.packMode = false;
+          s.packLayouts = [];
+          s.overlayPack = null;
+          s.settings.readMode = "folder";
           s.status = `Data root: ${path}`;
         });
+        await get().init(false);
+        return true;
+      } catch (e) {
+        set((s) => {
+          s.status = `${e}`;
+        });
+        return false;
+      }
+    },
+
+    setPackSource: async (gameDir, includeMods) => {
+      const withMods = includeMods ?? get().packIncludeMods;
+      try {
+        set((s) => {
+          s.status = `Indexing packs in ${gameDir}…`;
+        });
+        await ipc.setPackSource(gameDir, withMods);
+        set((s) => {
+          s.packMode = true;
+          s.dataRoot = gameDir;
+          s.packIncludeMods = withMods;
+          s.overlayPack = null; // backend clears overlay on base change
+          s.settings.readMode = "pack";
+        });
+        // Reload game data (db/cco/loc/templates resolve through the pack now).
+        await get().init(false);
+        const layouts = await ipc.listLayouts();
+        set((s) => {
+          s.packLayouts = layouts;
+          s.status = `Pack mode (${withMods ? "with mods" : "vanilla"}): ${layouts.length} layouts`;
+        });
+        return true;
+      } catch (e) {
+        set((s) => {
+          s.status = `${e}`;
+        });
+        return false;
+      }
+    },
+
+    setPackIncludeMods: async (on) => {
+      const dir = get().dataRoot;
+      if (!dir) return;
+      await get().setPackSource(dir, on);
+    },
+
+    setOverlayPack: async (path) => {
+      try {
+        await ipc.setOverlayPack(path);
+        const layouts = await ipc.listLayouts();
+        set((s) => {
+          s.overlayPack = path;
+          s.packLayouts = layouts;
+          s.status = `Overlay: ${baseName(path)} (${layouts.length} layouts)`;
+        });
+      } catch (e) {
+        set((s) => {
+          s.status = `${e}`;
+        });
+      }
+    },
+
+    clearOverlayPack: async () => {
+      try {
+        await ipc.clearOverlayPack();
+        const layouts = await ipc.listLayouts();
+        set((s) => {
+          s.overlayPack = null;
+          s.packLayouts = layouts;
+          s.status = `Overlay cleared (${layouts.length} layouts)`;
+        });
+      } catch (e) {
+        set((s) => {
+          s.status = `${e}`;
+        });
+      }
+    },
+
+    setSchemaPath: async (path) => {
+      try {
+        await ipc.setSchemaPath(path);
+        set((s) => {
+          s.schemaPath = path;
+          s.status = `RPFM schema: ${baseName(path)}`;
+        });
+        // Reload db/character/loc now that the schema can decode binary tables.
         await get().init(false);
       } catch (e) {
         set((s) => {
@@ -719,6 +969,11 @@ export const useStore = create<AppStore>()(
       set((s) => {
         s.selectedGuid = guid;
         s.selectedGuids = guid ? [guid] : [];
+      }),
+
+    setHovered: (guid) =>
+      set((s) => {
+        if (s.hoveredGuid !== guid) s.hoveredGuid = guid;
       }),
 
     // Additive toggle for the Align tool's multi-selection.
@@ -835,6 +1090,22 @@ export const useStore = create<AppStore>()(
         fn(s.doc);
         s.dirty = true;
       });
+    },
+
+    migrateVersion: (target) => {
+      const cur = get().doc;
+      if (!cur) return null;
+      let result: MigrationResult | null = null;
+      get().mutate((doc) => {
+        result = migrateLayout(doc, target);
+      });
+      if (result) {
+        const r = result as MigrationResult;
+        set((s) => {
+          s.status = `Converted layout v${r.from} -> v${r.to} (${r.renamed} renamed, ${r.removed} removed, ${r.elementsRemoved} elements removed)`;
+        });
+      }
+      return result;
     },
 
     editAttr: (guid, key, value) => {

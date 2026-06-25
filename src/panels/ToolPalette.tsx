@@ -269,13 +269,25 @@ export default function ToolPalette() {
     return { x: Math.min(Math.max(0, x), maxX), y: Math.min(Math.max(0, y), maxY) };
   };
 
-  // Pull a persisted position back into view if the canvas is now smaller than when it was saved.
+  // Keep a positioned palette inside the canvas: on mount, and whenever the canvas
+  // wrapper resizes (e.g. the user widens another dock panel) or the palette itself
+  // grows (Align mode), re-clamp so it sticks to the shrinking edge instead of
+  // clipping out of view.
   useLayoutEffect(() => {
-    setPos((p) => {
-      if (!p) return p;
-      const c = clamp(p.x, p.y);
-      return c.x === p.x && c.y === p.y ? p : c;
-    });
+    const reclamp = () =>
+      setPos((p) => {
+        if (!p) return p;
+        const c = clamp(p.x, p.y);
+        return c.x === p.x && c.y === p.y ? p : c;
+      });
+    reclamp();
+    const el = ref.current;
+    const parent = el?.offsetParent as HTMLElement | null;
+    if (!el || !parent) return;
+    const ro = new ResizeObserver(reclamp);
+    ro.observe(parent);
+    ro.observe(el);
+    return () => ro.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -60,22 +60,19 @@ fn parse_def(name: &str, v: &serde_json::Value) -> ShorthandDef {
 
 pub fn load(state: &AppState) -> CcoShorthand {
     let mut out = CcoShorthand::default();
-    let Some(root) = state.data_root() else {
-        return out;
-    };
-    let dir = root.join("ui").join("cco");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for e in entries.flatten() {
-        let path = e.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+    let files = state.list(&|p| p.starts_with("ui/cco/") && p.ends_with(".json"));
+    for rel in files {
+        // file stem (lowercased) is the CCO type key.
+        let stem = rel
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.strip_suffix(".json"))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if stem.is_empty() {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Some(text) = state.read_text(&rel) else {
             continue;
         };
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -89,7 +86,7 @@ pub fn load(state: &AppState) -> CcoShorthand {
             table.insert(name.clone(), parse_def(name, v));
         }
         if !table.is_empty() {
-            out.objects.insert(stem.to_ascii_lowercase(), table);
+            out.objects.insert(stem, table);
         }
     }
     out

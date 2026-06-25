@@ -196,7 +196,9 @@ export default function VisualizerPanel() {
   const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [, forceTick] = useState(0);
-  const [hover, setHover] = useState<string | null>(null);
+  // Hover is shared (hierarchy <-> canvas) via the store; window-local (see sync.ts).
+  const hover = useStore((s) => s.hoveredGuid);
+  const setHover = useStore((s) => s.setHovered);
   const showBounds = useStore((s) => s.showBounds);
   const mode = useStore((s) => s.mode);
   const viz = useStore((s) => s.settings.visualizer);
@@ -396,14 +398,26 @@ export default function VisualizerPanel() {
   };
 
   const hitTest = (wx: number, wy: number): string | null => {
-    // Topmost (drawn last) first.
-    for (let i = layout.items.length - 1; i >= 0; i--) {
-      const r = layout.items[i].rect;
-      if (wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h) {
-        return layout.items[i].guid;
+    // The most SPECIFIC component under the point: smallest area among the items
+    // whose rect contains it, tie-broken by deeper nesting then later draw order.
+    // (A plain "topmost-drawn" pick lets a large container/overlay that merely
+    // spans the cursor swallow every click — e.g. court-screen frames.)
+    let best: string | null = null;
+    let bestArea = Infinity;
+    let bestDepth = -1;
+    for (let i = 0; i < layout.items.length; i++) {
+      const it = layout.items[i];
+      const r = it.rect;
+      if (r.w <= 0 || r.h <= 0) continue;
+      if (wx < r.x || wx > r.x + r.w || wy < r.y || wy > r.y + r.h) continue;
+      const area = r.w * r.h;
+      if (area < bestArea || (area === bestArea && it.depth >= bestDepth)) {
+        best = it.guid;
+        bestArea = area;
+        bestDepth = it.depth;
       }
     }
-    return null;
+    return best;
   };
 
   const inRect = (wx: number, wy: number, r: Rect) =>

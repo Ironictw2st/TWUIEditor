@@ -85,6 +85,52 @@ export function setGame(name: string): Promise<void> {
   return invoke("set_game", { name });
 }
 
+/** Switch to pack mode: read `.pack` files under `gameDir` (read-only).
+ *  `includeMods=false` loads only vanilla (non-Mod-type) packs. */
+export function setPackSource(gameDir: string, includeMods: boolean): Promise<void> {
+  return invoke("set_pack_source", { gameDir, includeMods });
+}
+
+/** True when the active source is `.pack` archives (vs a loose folder). */
+export function isPackMode(): Promise<boolean> {
+  return invoke("is_pack_mode");
+}
+
+/** Every `.twui.xml` reachable from the active source (pack content browser). */
+export function listLayouts(): Promise<string[]> {
+  return invoke("list_layouts");
+}
+
+/** Every image (png/dds/tga/jpg) in the active source — backs the image finder. */
+export function listImages(): Promise<string[]> {
+  return invoke("list_images");
+}
+
+/** Overlay a single `.pack` (absolute path) over the active source. */
+export function setOverlayPack(path: string): Promise<void> {
+  return invoke("set_overlay_pack", { path });
+}
+
+/** Remove the single-pack overlay, restoring the base source. */
+export function clearOverlayPack(): Promise<void> {
+  return invoke("clear_overlay_pack");
+}
+
+/** The configured RPFM `.ron` schema path (decodes binary db tables), or null. */
+export function getSchemaPath(): Promise<string | null> {
+  return invoke("get_schema_path");
+}
+
+/** Point at the user's local RPFM `.ron` schema file (e.g. schema_3k.ron). */
+export function setSchemaPath(path: string): Promise<void> {
+  return invoke("set_schema_path", { path });
+}
+
+/** Read+parse a layout by source-relative path (open from the pack browser). */
+export function readLayoutRel(rel: string): Promise<TwuiDocument> {
+  return invoke("read_layout_rel", { rel });
+}
+
 export function readLayout(path: string): Promise<TwuiDocument> {
   return invoke("read_layout", { path });
 }

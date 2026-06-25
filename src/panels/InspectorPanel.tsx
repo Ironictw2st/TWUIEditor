@@ -11,9 +11,11 @@ import {
   getAttr,
   getLayoutEngine,
   guidOf,
+  hierarchyRoot,
   layoutVersion,
   stateImages,
 } from "../twui/doc";
+import { describeMigration, previewMigration } from "../twui/migrate";
 import { componentScriptId } from "../twui/script";
 import { inheritedContexts, Inheritance, representativeScope } from "../twui/inherit";
 import {
@@ -38,7 +40,7 @@ import { extractDataPack, LuaValue } from "../twui/lua";
 import { bindingHint } from "../twui/cco_docs";
 import { shorthandHint } from "../twui/cco_shorthand";
 import { componentCreatorLayout } from "../twui/creator";
-import { AttrKind, attrsFor, DOCKING_VALUES, schemaFor, validateAttr } from "../twui/schema";
+import { attrInVersion, AttrKind, attrsFor, DOCKING_VALUES, schemaFor, validateAttr } from "../twui/schema";
 import { locateHier } from "../twui/mutate";
 import { RawElement, TwuiDocument } from "../types/twui";
 import { imageUrl, parseElement, serializeElement } from "../ipc/commands";
@@ -114,9 +116,10 @@ function SchemaField({
 }) {
   const editAttr = useStore((s) => s.editAttr);
   const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
+  const version = useStore((s) => (s.doc ? layoutVersion(s.doc) : 0));
   // The LayoutEngine child has no guid; its edits route through the component's guid.
   const edit = kind === "layoutEngine" ? editLayoutEngineAttr : editAttr;
-  const schema = schemaFor(attrKey, kind);
+  const schema = schemaFor(attrKey, kind, version);
   const [local, setLocal] = useState(value ?? "");
   useEffect(() => setLocal(value ?? ""), [value, guid]);
 
@@ -133,29 +136,44 @@ function SchemaField({
   );
   const warn = validateAttr(schema, local);
   const warnEl = warn ? <div className="text-[10px] text-amber-400 mt-0.5 pl-[120px]">{warn}</div> : null;
+  // Advisory note when a present attribute is out of range for this file's version (e.g. a
+  // 3K-era attr left on a 142 file, or a 142 attr on a 135 file). Never blocks editing.
+  const verHint = !attrInVersion(schema, version)
+    ? schema.versions?.max !== undefined && version > schema.versions.max
+      ? `removed after v${schema.versions.max}`
+      : schema.versions?.min !== undefined && version < schema.versions.min
+        ? `added in v${schema.versions.min}`
+        : null
+    : null;
+  const verHintEl = verHint ? (
+    <div className="text-[10px] text-amber-500/80 mt-0.5 pl-[120px]">not in v{version} ({verHint})</div>
+  ) : null;
 
   if (schema.type === "enum" || schema.type === "bool") {
     const opts = schema.enumValues ?? [];
     const withCurrent = local && !opts.includes(local) ? [local, ...opts] : opts;
     return (
-      <label className="flex items-center gap-2 mb-1">
-        {labelEl}
-        <select
-          className="flex-1"
-          value={local}
-          onChange={(e) => {
-            setLocal(e.target.value);
-            edit(guid, attrKey, e.target.value);
-          }}
-        >
-          {!local && <option value="" />}
-          {withCurrent.map((o) => (
-            <option key={o} value={o}>
-              {o}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="mb-1">
+        <label className="flex items-center gap-2">
+          {labelEl}
+          <select
+            className="flex-1"
+            value={local}
+            onChange={(e) => {
+              setLocal(e.target.value);
+              edit(guid, attrKey, e.target.value);
+            }}
+          >
+            {!local && <option value="" />}
+            {withCurrent.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </label>
+        {verHintEl}
+      </div>
     );
   }
 
@@ -181,6 +199,7 @@ function SchemaField({
         />
       </label>
       {warnEl}
+      {verHintEl}
     </div>
   );
 }
@@ -190,8 +209,11 @@ function SchemaField({
 function AddAttr({ guid, kind, present }: { guid: string; kind: AttrKind; present: string[] }) {
   const editAttr = useStore((s) => s.editAttr);
   const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
+  const version = useStore((s) => (s.doc ? layoutVersion(s.doc) : 0));
   const edit = kind === "layoutEngine" ? editLayoutEngineAttr : editAttr;
-  const missing = attrsFor(kind).filter((s) => !present.includes(s.name));
+  // Only offer attributes valid in this file's layout version (advisory: out-of-version
+  // attrs already present stay editable, they're just not suggested for adding).
+  const missing = attrsFor(kind, version).filter((s) => !present.includes(s.name));
   if (!missing.length) return null;
   return (
     <label className="flex items-center gap-2 mt-1.5">
@@ -365,6 +387,98 @@ function Section({ title, children, defaultOpen = true }: { title: string; child
       </div>
       {open && <div className="px-3 py-2">{children}</div>}
     </div>
+  );
+}
+
+/** Read-only labelled rows for the attributes of a WH3 (v142) model element. These elements
+ *  (`component_model_view`, `ComponentModel`) carry no guid, so they cannot be edited through
+ *  the guid-based store path — we surface schema labels here and route edits to the Raw tab. */
+function ModelRows({ el }: { el: RawElement }) {
+  const version = useStore((s) => (s.doc ? layoutVersion(s.doc) : 0));
+  return (
+    <>
+      {el.attrs.map(([k, v]) => {
+        const schema = schemaFor(k, "model", version);
+        return (
+          <div key={k} className="flex items-center gap-2 mb-1">
+            <span className={LABEL_CLS} title={schema?.description}>
+              {schema?.label ?? k}
+            </span>
+            <span className="flex-1 text-[11px] text-textMuted break-all">{v}</span>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** The WH3 (v142) `<component_model_view>` (3D model porthole) for a component, if present. */
+function ModelViewSection({ comp }: { comp: RawElement }) {
+  const mv = childByTag(comp, "component_model_view");
+  if (!mv) return null;
+  const list = childByTag(mv, "model_list");
+  const models = list ? elementChildren(list).filter((e) => e.tag === "ComponentModel") : [];
+  return (
+    <Section title={`Model View (3D)${models.length ? ` · ${models.length}` : ""}`} defaultOpen={false}>
+      <div className="text-[10px] text-gray-600 mb-1.5">Read-only here (no guid) — edit via the Raw tab.</div>
+      <ModelRows el={mv} />
+      {models.map((m, i) => (
+        <div key={i} className="mt-2 pt-1.5 border-t border-edge/50">
+          <div className="text-[11px] font-medium mb-1">{getAttr(m, "id") ?? `model ${i + 1}`}</div>
+          <ModelRows el={m} />
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+/** Supported conversion targets (129 is read-only legacy, not offered). */
+const MIGRATE_TARGETS = [135, 136, 142];
+
+/** Experimental layout-version converter. Rendered only on the root component (see the main
+ *  panel) and only when `Settings > Experimental > Layout version conversion` is enabled.
+ *  Converting renames/removes attributes per migrate.ts and is a single undoable step. */
+function VersionSection() {
+  const doc = useStore((s) => s.doc);
+  const migrateVersion = useStore((s) => s.migrateVersion);
+  const enabled = useStore((s) => s.settings.experimental.versionConversion);
+  if (!doc) return null;
+  const cur = layoutVersion(doc);
+  const onConvert = (target: number) => {
+    if (target === cur) return;
+    const preview = previewMigration(doc, target);
+    if (window.confirm(`${describeMigration(preview)}\n\nProceed? (undoable)`)) migrateVersion(target);
+  };
+  return (
+    <Section title="Layout Version" defaultOpen={enabled}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className={LABEL_CLS}>version</span>
+        <span className="flex-1 text-[12px] tabular-nums">v{cur}</span>
+      </div>
+      {enabled ? (
+        <>
+          <div className="text-[10px] text-amber-500/80 mb-1.5">
+            Experimental — converting rewrites version-specific attributes (undoable).
+          </div>
+          <label className="flex items-center gap-2">
+            <span className={LABEL_CLS}>convert to</span>
+            <select className="flex-1" value={cur} onChange={(e) => onConvert(parseInt(e.target.value, 10))}>
+              {!MIGRATE_TARGETS.includes(cur) && <option value={cur}>v{cur}</option>}
+              {MIGRATE_TARGETS.map((v) => (
+                <option key={v} value={v}>
+                  v{v}
+                  {v === cur ? " (current)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      ) : (
+        <div className="text-[10px] text-gray-600">
+          Version conversion is experimental — enable it in Settings &gt; Experimental.
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -828,6 +942,9 @@ export default function InspectorPanel() {
   const guid = guidOf(comp) ?? "";
   const states = componentStates(comp);
   const hierNode = locateHier(doc, guid)?.node;
+  // The root of the TWUI hierarchy — the only component where layout-version conversion is offered.
+  const rootEl = hierarchyRoot(doc);
+  const isRoot = !!guid && !!rootEl && guidOf(rootEl) === guid;
 
   // Effective images for display: override_images (resolved against the template) for
   // templated components, and a parent-determined slot 0 when a ContextImageSetter
@@ -889,6 +1006,7 @@ export default function InspectorPanel() {
         </div>
       ) : (
       <div className="flex-1 overflow-auto">
+        {isRoot && <VersionSection />}
         {componentScriptId(comp) && <ScriptSection scriptId={componentScriptId(comp)!} />}
         <InheritanceSection doc={doc} guid={guid} />
         <Section title="Component">
@@ -926,6 +1044,8 @@ export default function InspectorPanel() {
         <StatesSection guid={guid} comp={comp} states={states} />
 
         <ComponentImagesSection guid={guid} comp={comp} dataRoot={dataRoot} />
+
+        <ModelViewSection comp={comp} />
 
         <Section title={`Images (${images.length})`} defaultOpen={images.length <= 6}>
           {images.length === 0 && <div className="text-gray-600 text-[11px]">No images.</div>}
@@ -1177,15 +1297,22 @@ function ExprField({ guid, index, expr }: { guid: string; index: number; expr: s
 function EmbeddedLayoutSection({ comp }: { comp: RawElement }) {
   const layout = componentCreatorLayout(comp);
   const dataRoot = useStore((s) => s.dataRoot);
+  const packMode = useStore((s) => s.packMode);
   const openFile = useStore((s) => s.openFile);
   if (!layout) return null;
+  // In pack mode resolve through the data source by relative path; in folder
+  // mode open the absolute file so Save writes back in place.
+  const open = () =>
+    packMode
+      ? openFile(`${layout}.twui.xml`, true)
+      : dataRoot && openFile(`${dataRoot}/${layout}.twui.xml`);
   return (
     <Section title="Embedded layout">
       <div className="text-[11px] text-text break-all mb-1.5 font-mono">{layout}</div>
       <button
         className="text-[11px] px-2 py-1 rounded bg-button border border-edge hover:bg-buttonHover disabled:opacity-40"
-        onClick={() => dataRoot && openFile(`${dataRoot}/${layout}.twui.xml`)}
-        disabled={!dataRoot}
+        onClick={open}
+        disabled={!dataRoot && !packMode}
         title="Open this ComponentCreator template as the root layout"
       >
         Open as layout →

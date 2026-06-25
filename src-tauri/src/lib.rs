@@ -1,3 +1,4 @@
+mod bin;
 mod bug_report;
 mod cco_docs;
 mod cco_shorthand;
@@ -7,7 +8,9 @@ mod db;
 mod image;
 mod loc;
 mod model;
+mod schema;
 mod script;
+mod source;
 mod state;
 mod update;
 
@@ -33,7 +36,13 @@ pub fn run() {
             let app = ctx.app_handle();
             let state = app.state::<AppState>();
             let rel = rel_from_uri(request.uri());
-            match image::resolve_png(&state, &rel) {
+            // Backstop: never let a decode panic unwind across the wry FFI
+            // boundary (that aborts the process). Treat any panic as a 404.
+            let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                image::resolve_png(&state, &rel)
+            }))
+            .unwrap_or(Err(image::ResolveError::Decode("panic".into())));
+            match resolved {
                 Ok(bytes) => Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "image/png")
@@ -54,6 +63,16 @@ pub fn run() {
             commands::list_games,
             commands::current_game,
             commands::set_game,
+            commands::set_pack_source,
+            commands::is_pack_mode,
+            commands::list_layouts,
+            commands::list_images,
+            commands::set_overlay_pack,
+            commands::clear_overlay_pack,
+            commands::get_overlay_pack,
+            commands::get_schema_path,
+            commands::set_schema_path,
+            commands::read_layout_rel,
             commands::read_layout,
             commands::save_layout,
             commands::roundtrip_check,

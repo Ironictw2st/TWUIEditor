@@ -13,9 +13,14 @@ import PerspectivePanel from "./panels/PerspectivePanel";
 import DockLayout, { dockShowPanel, dockHidePanel } from "./panels/DockLayout";
 import ToolsPanel from "./panels/ToolsPanel";
 import SettingsPanel from "./panels/SettingsPanel";
+import PackFilesPanel from "./panels/PackFilesPanel";
+import LoadingScreen from "./panels/LoadingScreen";
+import UnsavedChangesDialog from "./panels/UnsavedChangesDialog";
 import SearchPalette from "./panels/SearchPalette";
 import BugReportPanel from "./panels/BugReportPanel";
 import UpdateBanner from "./panels/UpdateBanner";
+import DocsPanel from "./panels/DocsPanel";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { captureAppWindow } from "./ipc/commands";
 
 const PANEL_TITLES: Record<PanelId, string> = {
@@ -23,6 +28,7 @@ const PANEL_TITLES: Record<PanelId, string> = {
   inspector: "Inspector",
   visualizer: "Visualizer",
   perspective: "Perspective",
+  packfiles: "Pack Files",
 };
 
 /** App mark (rider on horseback raising a scroll) shown top-left in place of a text title. */
@@ -42,14 +48,18 @@ function Toolbar() {
     fileName,
     dirty,
     status,
+    packMode,
   } = useStore();
 
   useEffect(() => {
-    init();
+    // Keep the loading screen up until the whole boot chain (incl. restoring the
+    // last game in its saved read mode) has resolved.
+    init().finally(() => useStore.setState({ loading: false }));
   }, [init]);
 
   const [showTools, setShowTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showDocs, setShowDocs] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
   const [bugProgramShot, setBugProgramShot] = useState<string | null>(null);
 
@@ -77,6 +87,11 @@ function Toolbar() {
       <button className={btn} onClick={() => openFileDialog()}>
         Open…
       </button>
+      {packMode && (
+        <button className={btn} onClick={() => dockShowPanel("packfiles")} title="Show the Pack Files panel">
+          Pack Files
+        </button>
+      )}
       <button className={btn} onClick={() => saveFile()} disabled={!fileName}>
         Save
       </button>
@@ -109,12 +124,16 @@ function Toolbar() {
       <button className={btn} onClick={() => setShowSettings(true)} title="Game, keybinds & preferences">
         Settings
       </button>
+      <button className={btn} onClick={() => setShowDocs(true)} title="Reference docs (TWUI version differences, etc.)">
+        Docs
+      </button>
       <button className={btn} onClick={openBugReport} title="Report a bug to the author">
         Report a Bug
       </button>
       <PanelsMenu />
       {showTools && <ToolsPanel onClose={() => setShowTools(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      {showDocs && <DocsPanel onClose={() => setShowDocs(false)} />}
       {showBugReport && (
         <BugReportPanel onClose={() => setShowBugReport(false)} initialProgramShot={bugProgramShot} />
       )}
@@ -182,12 +201,14 @@ function PanelWindow({ panel }: { panel: PanelId }) {
   if (panel === "hierarchy") return <div className="h-full flex flex-col bg-panel">{<TreePanel />}</div>;
   if (panel === "inspector") return <div className="h-full flex flex-col bg-panel">{<InspectorPanel />}</div>;
   if (panel === "perspective") return <div className="h-full overflow-auto bg-panel">{<PerspectivePanel />}</div>;
+  if (panel === "packfiles") return <div className="h-full flex flex-col bg-panel">{<PackFilesPanel />}</div>;
   return <div className="h-full bg-canvas">{<VisualizerPanel />}</div>;
 }
 
 export default function App() {
   const searchOpen = useStore((s) => s.searchOpen);
   const closeSearch = useStore((s) => s.closeSearch);
+  const loading = useStore((s) => s.loading);
 
   // Global shortcuts run through the central keybinding registry (src/keybinds.ts),
   // resolving each action's binding from the user's persisted overrides. Reading the
@@ -201,6 +222,26 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Intercept window close (main window only): if there are unsaved edits, hold the
+  // close and raise the unsaved-changes prompt instead of losing them.
+  useEffect(() => {
+    if (panelParam()) return; // popped-out panel windows close freely
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        const s = useStore.getState();
+        if (s.dirty && s.doc) {
+          // Hold the close on every attempt while dirty; raise the prompt once.
+          event.preventDefault();
+          if (!s.pendingClose) useStore.setState({ pendingClose: true });
+        }
+      })
+      .then((un) => {
+        unlisten = un;
+      });
+    return () => unlisten?.();
   }, []);
 
   // A popped-out panel window renders only that panel; its store is mirrored from the main window.
@@ -217,6 +258,8 @@ export default function App() {
       </div>
       {searchOpen && <SearchPalette onClose={closeSearch} />}
       {import.meta.env.PROD && <UpdateBanner />}
+      <UnsavedChangesDialog />
+      {loading && <LoadingScreen />}
     </div>
   );
 }

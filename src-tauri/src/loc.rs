@@ -11,14 +11,10 @@
 
 use crate::state::AppState;
 use std::collections::HashMap;
-use std::path::Path;
 
-/// Merge a `.loc.tsv` into `out`. With `Some(prefix)` only rows starting with it
-/// are kept, stripped to the bare key. With `None` all rows are kept full-keyed.
-fn merge_loc(out: &mut HashMap<String, String>, path: &Path, prefix: Option<&str>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
+/// Parse a `.loc.tsv` body (header + `#`-comment + `key<TAB>text<TAB>tooltip`
+/// rows) into `out`, full-keyed.
+fn parse_loc_tsv(text: &str, out: &mut HashMap<String, String>) {
     let mut lines = text.lines();
     lines.next(); // header row
     for line in lines {
@@ -26,74 +22,54 @@ fn merge_loc(out: &mut HashMap<String, String>, path: &Path, prefix: Option<&str
             continue;
         }
         let mut cols = line.split('\t');
-        let (Some(key), Some(value)) = (cols.next(), cols.next()) else {
-            continue;
-        };
-        let bare = match prefix {
-            Some(p) => match key.strip_prefix(p) {
-                Some(k) => k,
-                None => continue,
-            },
-            None => key,
-        };
-        out.insert(bare.to_string(), value.to_string());
-    }
-}
-
-/// Merge only rows whose full key starts with one of `prefixes`, keeping the
-/// FULL key (for record tables where several fields share a record key).
-fn merge_loc_fields(out: &mut HashMap<String, String>, path: &Path, prefixes: &[&str]) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let mut lines = text.lines();
-    lines.next(); // header row
-    for line in lines {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let mut cols = line.split('\t');
-        let (Some(key), Some(value)) = (cols.next(), cols.next()) else {
-            continue;
-        };
-        if prefixes.iter().any(|p| key.starts_with(p)) {
+        if let (Some(key), Some(value)) = (cols.next(), cols.next()) {
             out.insert(key.to_string(), value.to_string());
         }
     }
 }
 
+/// Every localised string in the active source, full-keyed. Scans binary `.loc`
+/// (inside packs) and `.loc.tsv` (loose folder) wherever they live, so mods and
+/// non-`text/db` locations are covered. Later sources override earlier.
+pub fn load_all(state: &AppState) -> HashMap<String, String> {
+    let mut all = HashMap::new();
+    // One combined walk over both binary `.loc` and TSV `.loc.tsv` (a source is one
+    // or the other, so a single pass covers it).
+    for rel in state.list(&|p| p.ends_with(".loc") || p.ends_with(".loc.tsv")) {
+        if rel.ends_with(".loc.tsv") {
+            if let Some(text) = state.read_text(&rel) {
+                parse_loc_tsv(&text, &mut all);
+            }
+        } else if let Some(bytes) = state.read(&rel) {
+            crate::bin::decode_loc(&bytes, &mut all);
+        }
+    }
+    all
+}
+
 pub fn load(state: &AppState) -> HashMap<String, String> {
+    let all = state.loc_all(); // cached full-key map (shared with db court titles)
     let mut out = HashMap::new();
-    let Some(root) = state.data_root() else {
-        return out;
-    };
-    let db = root.join("text").join("db");
 
     // UI text, looked up bare by `Loc(...)` / `this.title`.
-    merge_loc(
-        &mut out,
-        &db.join("campaign_localised_strings__.loc.tsv"),
-        Some("campaign_localised_strings_string_"),
-    );
-
+    const CAMPAIGN: &str = "campaign_localised_strings_string_";
     // DB-record display text, kept full-keyed for the record-context resolver.
-    merge_loc_fields(
-        &mut out,
-        &db.join("effect_bundles__.loc.tsv"),
-        &["effect_bundles_localised_title_", "effect_bundles_localised_description_"],
-    );
-    merge_loc_fields(
-        &mut out,
-        &db.join("pooled_resources__.loc.tsv"),
-        &["pooled_resources_display_name_"],
-    );
-    merge_loc_fields(
-        &mut out,
-        &db.join("ceo_equipped_set_bonuses__.loc.tsv"),
-        &["ceo_equipped_set_bonuses_title_", "ceo_equipped_set_bonuses_description_"],
-    );
-    merge_loc_fields(&mut out, &db.join("effects__.loc.tsv"), &["effects_description_"]);
+    const RECORD_PREFIXES: &[&str] = &[
+        "effect_bundles_localised_title_",
+        "effect_bundles_localised_description_",
+        "pooled_resources_display_name_",
+        "ceo_equipped_set_bonuses_title_",
+        "ceo_equipped_set_bonuses_description_",
+        "effects_description_",
+    ];
 
+    for (key, value) in all.iter() {
+        if let Some(bare) = key.strip_prefix(CAMPAIGN) {
+            out.insert(bare.to_string(), value.clone());
+        } else if RECORD_PREFIXES.iter().any(|p| key.starts_with(p)) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
     out
 }
 

@@ -27,25 +27,16 @@ pub fn parse_element(text: String) -> Result<Element, String> {
     parse::parse(&text).map(|d| d.root)
 }
 
-/// List selectable background images under `<data_root>/background`.
+/// List selectable background images under `background/`.
 #[tauri::command]
 pub fn list_backgrounds(state: State<AppState>) -> Vec<String> {
-    let Some(root) = state.data_root() else {
-        return Vec::new();
-    };
-    let dir = root.join("background");
-    let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "dds") {
-                out.push(format!("background/{name}"));
-            }
-        }
-    }
-    out.sort();
-    out
+    state.list(&|p| {
+        p.starts_with("background/")
+            && matches!(
+                p.rsplit('.').next().unwrap_or(""),
+                "png" | "jpg" | "jpeg" | "dds"
+            )
+    })
 }
 
 #[tauri::command]
@@ -102,16 +93,13 @@ pub fn load_templates(
     ids: Vec<String>,
 ) -> std::collections::HashMap<String, Document> {
     let mut out = std::collections::HashMap::new();
-    let Some(root) = state.data_root() else {
-        return out;
-    };
     for id in ids {
         // template_id should be a bare name; guard against path escapes.
         if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
             continue;
         }
-        let path = root.join("ui").join("templates").join(format!("{id}.twui.xml"));
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        let rel = format!("ui/templates/{id}.twui.xml");
+        if let Some(content) = state.read_text(&rel) {
             if let Ok(doc) = parse::parse(&content) {
                 out.insert(id, doc);
             }
@@ -129,15 +117,11 @@ pub fn load_layouts(
     paths: Vec<String>,
 ) -> std::collections::HashMap<String, Document> {
     let mut out = std::collections::HashMap::new();
-    let Some(root) = state.data_root() else {
-        return out;
-    };
     for rel in paths {
         if rel.is_empty() || rel.contains("..") || std::path::Path::new(&rel).is_absolute() {
             continue;
         }
-        let path = root.join(format!("{rel}.twui.xml"));
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Some(content) = state.read_text(&format!("{rel}.twui.xml")) {
             if let Ok(doc) = parse::parse(&content) {
                 out.insert(rel, doc);
             }
@@ -198,6 +182,88 @@ pub fn set_data_root(state: State<AppState>, path: String) -> Result<(), String>
     }
     state.set_data_root(p);
     Ok(())
+}
+
+/// Switch to pack mode: read the `.pack` files under `game_dir` (read-only).
+/// `include_mods=false` loads only vanilla (non-Mod-type) packs.
+#[tauri::command]
+pub fn set_pack_source(
+    state: State<AppState>,
+    game_dir: String,
+    include_mods: bool,
+) -> Result<(), String> {
+    state.set_pack_source(std::path::PathBuf::from(game_dir), include_mods)
+}
+
+/// True when the active source is `.pack` archives (vs a loose folder).
+#[tauri::command]
+pub fn is_pack_mode(state: State<AppState>) -> bool {
+    state.pack_mode()
+}
+
+/// Every `.twui.xml` reachable from the active source, as relative paths —
+/// backs the pack content browser (also works in folder mode).
+#[tauri::command]
+pub fn list_layouts(state: State<AppState>) -> Vec<String> {
+    state.list(&|p| p.ends_with(".twui.xml"))
+}
+
+/// Every image (png/dds/tga/jpg) reachable from the active source — backs the
+/// Pack Files panel's image finder.
+#[tauri::command]
+pub fn list_images(state: State<AppState>) -> Vec<String> {
+    state.list(&|p| {
+        matches!(
+            p.rsplit('.').next().unwrap_or(""),
+            "png" | "dds" | "tga" | "jpg" | "jpeg"
+        )
+    })
+}
+
+/// Overlay a single `.pack` over the active source (reads resolve from it first,
+/// then fall back). The path is an absolute file path from the OS dialog.
+#[tauri::command]
+pub fn set_overlay_pack(state: State<AppState>, path: String) -> Result<(), String> {
+    state.set_overlay_pack(std::path::PathBuf::from(path))
+}
+
+/// Remove the single-pack overlay, restoring the base source.
+#[tauri::command]
+pub fn clear_overlay_pack(state: State<AppState>) {
+    state.clear_overlay_pack();
+}
+
+/// The active single-pack overlay path, or None.
+#[tauri::command]
+pub fn get_overlay_pack(state: State<AppState>) -> Option<String> {
+    state.overlay_pack().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The configured RPFM `.ron` schema path (decodes binary db tables), or None.
+#[tauri::command]
+pub fn get_schema_path(state: State<AppState>) -> Option<String> {
+    state.schema_path().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Point at the user's local RPFM `.ron` schema file (e.g. `schema_3k.ron`).
+#[tauri::command]
+pub fn set_schema_path(state: State<AppState>, path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("'{path}' is not a file"));
+    }
+    state.set_schema_path(p);
+    Ok(())
+}
+
+/// Read+parse a layout by source-relative path (used to open files from the
+/// pack content browser; folder mode resolves under the data root).
+#[tauri::command]
+pub fn read_layout_rel(state: State<AppState>, rel: String) -> Result<Document, String> {
+    let content = state
+        .read_text(&rel)
+        .ok_or_else(|| format!("Failed to read {rel} from data source"))?;
+    parse::parse(&content)
 }
 
 #[tauri::command]

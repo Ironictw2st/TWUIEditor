@@ -75,15 +75,9 @@ fn parse_functions(section: &str) -> HashMap<String, CcoFunc> {
 
 pub fn load(state: &AppState) -> CcoDocs {
     let mut out = CcoDocs::default();
-    let Some(root) = state.data_root() else {
-        return out;
-    };
-    let path = root
-        .join("documentation")
-        .join("ui")
-        .join("documentation")
-        .join("documentation.html");
-    let Ok(html) = std::fs::read_to_string(&path) else {
+    let Some(html) =
+        state.read_text("documentation/ui/documentation/documentation.html")
+    else {
         return out;
     };
 

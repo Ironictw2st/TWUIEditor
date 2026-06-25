@@ -3,7 +3,6 @@
 //! `.png`); `.dds` decode is feature-gated since no layout references it.
 
 use crate::state::AppState;
-use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum ResolveError {
@@ -20,35 +19,6 @@ pub struct ImageStatus {
     pub absolute: bool,
     pub exists: bool,
     pub kind: String, // "png" | "dds" | "other"
-}
-
-/// Reject absolute paths, drive letters, backslashes and `..` traversal.
-/// Returns the cleaned relative path components.
-fn sanitize(rel: &str) -> Option<Vec<String>> {
-    if rel.contains('\\') {
-        return None;
-    }
-    // Drive-letter (e.g. "T:/...") or UNC -> absolute, reject.
-    if rel.len() >= 2 && rel.as_bytes()[1] == b':' {
-        return None;
-    }
-    if rel.starts_with('/') {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for seg in rel.split('/') {
-        if seg.is_empty() || seg == "." {
-            continue;
-        }
-        if seg == ".." {
-            return None;
-        }
-        parts.push(seg.to_string());
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts)
 }
 
 fn ext_of(rel: &str) -> String {
@@ -72,7 +42,7 @@ pub fn status(state: &AppState, rel: &str) -> ImageStatus {
     }
     .to_string();
     let absolute = is_absolute_path(rel);
-    let exists = resolved_path(state, rel).map(|p| p.exists()).unwrap_or(false);
+    let exists = !absolute && state.exists(rel);
     ImageStatus {
         resolved: !absolute,
         absolute,
@@ -81,26 +51,10 @@ pub fn status(state: &AppState, rel: &str) -> ImageStatus {
     }
 }
 
-fn resolved_path(state: &AppState, rel: &str) -> Option<PathBuf> {
-    let root = state.data_root()?;
-    let parts = sanitize(rel)?;
-    let mut p = root.clone();
-    for seg in parts {
-        p.push(seg);
-    }
-    // Ensure the resolved path stays under the data root.
-    match (p.canonicalize(), root.canonicalize()) {
-        (Ok(cp), Ok(cr)) if cp.starts_with(&cr) => Some(cp),
-        // File may not exist yet -> fall back to the lexical join (already sandboxed).
-        (Err(_), _) => Some(p),
-        _ => None,
-    }
-}
-
-/// Resolve to PNG bytes. `.png` is passed through; `.dds` is decoded if the
-/// `dds` feature is enabled.
+/// Resolve to PNG bytes via the active data source. `.png` is passed through;
+/// `.dds` is decoded if the `dds` feature is enabled.
 pub fn resolve_png(state: &AppState, rel: &str) -> Result<Vec<u8>, ResolveError> {
-    if state.data_root().is_none() {
+    if !state.has_source() {
         return Err(ResolveError::NoDataRoot);
     }
     if is_absolute_path(rel) {
@@ -115,16 +69,13 @@ pub fn resolve_png(state: &AppState, rel: &str) -> Result<Vec<u8>, ResolveError>
         }
     }
 
-    let path = resolved_path(state, rel).ok_or(ResolveError::Unsafe)?;
+    let raw = state.read(rel).ok_or(ResolveError::NotFound)?;
     let ext = ext_of(rel);
 
     let bytes = if ext == "png" {
-        if !path.exists() {
-            return Err(ResolveError::NotFound);
-        }
-        std::fs::read(&path).map_err(|e| ResolveError::Io(e.to_string()))?
+        raw
     } else if ext == "dds" {
-        decode_dds(&path)?
+        decode_dds_cached(&raw)?
     } else {
         return Err(ResolveError::NotFound);
     };
@@ -138,13 +89,33 @@ pub fn resolve_png(state: &AppState, rel: &str) -> Result<Vec<u8>, ResolveError>
     Ok(bytes)
 }
 
-#[cfg(feature = "dds")]
-fn decode_dds(path: &std::path::Path) -> Result<Vec<u8>, ResolveError> {
-    if !path.exists() {
-        return Err(ResolveError::NotFound);
+/// Decode DDS to PNG with a persistent, content-addressed disk cache: the same
+/// DDS bytes always hash to the same file, so the expensive decode runs once and
+/// survives restarts. The in-memory LRU stays the hot layer above this.
+fn decode_dds_cached(raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    let dir = std::env::temp_dir().join("twui-editor-cache");
+    let file = dir.join(format!("{:016x}.png", h.finish()));
+    if let Ok(bytes) = std::fs::read(&file) {
+        return Ok(bytes);
     }
-    let mut file = std::fs::File::open(path).map_err(|e| ResolveError::Io(e.to_string()))?;
-    let dds = ddsfile::Dds::read(&mut file).map_err(|e| ResolveError::Decode(e.to_string()))?;
+    // Some DDS variants make the decoder panic; contain it so one bad texture
+    // returns an error (404) instead of aborting the whole process (the
+    // twuiimg:// handler runs across an FFI boundary where an unwind is fatal).
+    let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_dds(raw)))
+        .map_err(|_| ResolveError::Decode("dds decode panicked".into()))??;
+    // Best-effort write; a cache miss next time is harmless.
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&file, &bytes);
+    Ok(bytes)
+}
+
+#[cfg(feature = "dds")]
+fn decode_dds(raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    let dds = ddsfile::Dds::read(&mut std::io::Cursor::new(raw))
+        .map_err(|e| ResolveError::Decode(e.to_string()))?;
     // image_dds decodes BC1-7 / DX10 formats to RGBA8.
     let img = image_dds::image_from_dds(&dds, 0).map_err(|e| ResolveError::Decode(e.to_string()))?;
     let mut out = std::io::Cursor::new(Vec::new());
@@ -155,7 +126,7 @@ fn decode_dds(path: &std::path::Path) -> Result<Vec<u8>, ResolveError> {
 }
 
 #[cfg(not(feature = "dds"))]
-fn decode_dds(_path: &std::path::Path) -> Result<Vec<u8>, ResolveError> {
+fn decode_dds(_raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
     Err(ResolveError::Decode(
         "DDS decoding not enabled (build with --features dds)".to_string(),
     ))
