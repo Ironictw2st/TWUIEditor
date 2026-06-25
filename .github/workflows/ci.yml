@@ -1,0 +1,42 @@
+name: CI
+
+# Compile + typecheck on every push to master and on PRs. Game data (games/) is
+# gitignored, so the data-dependent Rust tests can't run here — we compile the
+# tests instead (cargo test --no-run) to catch breakage without that data.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # Typecheck (tsc) + frontend bundle. Must run before cargo: the Rust build
+      # embeds ../dist via tauri::generate_context!().
+      - run: npm run build
+
+      - name: Cargo build (dds feature is on by default)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Compile tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run --locked
