@@ -149,24 +149,24 @@ function GameSection() {
     }
   };
 
-  // Read-from buttons: switch the active game to folder/pack using its configured
-  // path, prompting once if unset; persist only when the apply succeeds.
+  // Read-from buttons: switch to folder/pack using the active game's configured
+  // path (prompting once if unset). With no active game (e.g. no games/ folder
+  // beside a portable exe), just prompt and apply — so you're never stuck.
+  // Persist to the game's row only when there is an active game.
   const useFolder = async () => {
-    if (!game) return;
-    const existing = gamePaths[game]?.outside ?? null;
+    const existing = game ? gamePaths[game]?.outside ?? null : null;
     const p = existing ?? (await pickDir(dataRoot));
     if (!p) return;
     const ok = await setDataRoot(p);
-    if (ok && !existing) setGamePath(game, "outside", p);
+    if (ok && game && !existing) setGamePath(game, "outside", p);
   };
   const usePack = async () => {
-    if (!game) return;
-    const existing = gamePaths[game]?.data ?? null;
+    const existing = game ? gamePaths[game]?.data ?? null : null;
     const p = existing ?? (await pickDir(dataRoot));
     if (!p) return;
     const ok = await setPackSource(p);
     if (ok) {
-      if (!existing) setGamePath(game, "data", p);
+      if (game && !existing) setGamePath(game, "data", p);
       dockShowPanel("packfiles");
     }
   };
@@ -184,7 +184,12 @@ function GameSection() {
     <div>
       <SectionTitle>Game &amp; Data</SectionTitle>
       {games.length === 0 ? (
-        <span className="text-gray-500 text-[12px]">No games detected.</span>
+        <div className="text-gray-500 text-[12px] mb-3">
+          No games auto-detected. Drop a <code className="text-textMuted">games/&lt;name&gt;/</code>{" "}
+          folder (with a <code className="text-textMuted">ui/</code> subfolder) next to the program, or
+          just use <span className="text-text">Folder</span> / <span className="text-text">Pack</span>{" "}
+          below to point at a data source.
+        </div>
       ) : (
         <div className="mb-3">
           <div className="grid grid-cols-[96px_1fr_1fr] gap-2 text-[10px] uppercase tracking-wide text-gray-500 mb-1 px-1">
@@ -217,7 +222,7 @@ function GameSection() {
                     Set…
                   </button>
                   <span className="text-[10px] text-textMuted truncate" title={gp.outside ?? ""}>
-                    {shortPath(gp.outside) ?? `default (games/${g})`}
+                    {shortPath(gp.outside) ?? "not set"}
                   </span>
                   {gp.outside && (
                     <button className={clearBtn} onClick={() => setGamePath(g, "outside", null)} title="Clear">
@@ -243,13 +248,21 @@ function GameSection() {
           })}
         </div>
       )}
-      <Row label="Read from" hint="apply the active game's path">
+      <Row label="Read from" hint="active game's path, or pick one">
         <div className="flex items-center gap-2">
-          <button className={`${btn} ${!packMode ? "border-accent text-accent" : ""}`} onClick={useFolder}>
-            Folder
+          <button
+            className={`${btn} ${!packMode ? "border-accent text-accent" : ""}`}
+            onClick={useFolder}
+            title="Read from a loose extracted folder (pick one if unset)"
+          >
+            Folder…
           </button>
-          <button className={`${btn} ${packMode ? "border-accent text-accent" : ""}`} onClick={usePack}>
-            Pack
+          <button
+            className={`${btn} ${packMode ? "border-accent text-accent" : ""}`}
+            onClick={usePack}
+            title="Read from a folder of .pack files (pick one if unset)"
+          >
+            Pack…
           </button>
           <span className="text-[11px] text-textMuted truncate">
             {packMode ? `pack — ${packLayouts.length} layouts` : "folder"} · {shortPath(dataRoot) ?? "not set"}

@@ -67,6 +67,10 @@ export type Mode = "view" | "move" | "create" | "align" | "sim" | "tooltip";
 export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles";
 export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles"];
 
+/** Games the editor supports. The Settings table always offers these; the user
+ *  points each at its own folders (no folder scanning / auto-detect). */
+export const SUPPORTED_GAMES = ["3K", "WH3"];
+
 /** Persisted user preferences (localStorage `twui-settings`). Document/runtime
  *  state is never persisted — only this subset (+ `background`/`view`). */
 export interface Settings {
@@ -378,7 +382,7 @@ export const useStore = create<AppStore>()(
     undoStack: [],
     redoStack: [],
 
-    games: [],
+    games: [...SUPPORTED_GAMES],
     game: null,
     contextDb: null,
     context: { campaign: "", faction: "", culture: "", subculture: "" },
@@ -431,24 +435,20 @@ export const useStore = create<AppStore>()(
         s.game = name;
         s.settings.lastGame = name; // remembered across sessions
       });
-      const paths = get().settings.gamePaths[name];
-      const wantPack = get().packMode; // keep the current read mode across the switch
+      // Apply this game's configured folder for the current read mode; if only the
+      // other folder is set, switch to it; if neither is set, just mark it active
+      // and prompt (no folder scanning — the user picks the two folders explicitly).
+      const gp = get().settings.gamePaths[name];
+      const wantPack = get().packMode;
       try {
-        if (wantPack && paths?.data) {
-          await get().setPackSource(paths.data); // applies + reloads (init)
-        } else if (paths?.outside) {
-          await get().setDataRoot(paths.outside); // applies + reloads, sets folder mode
-        } else {
-          // No configured path -> the default loose folder under games/<name>.
-          await ipc.setGame(name);
+        if (wantPack && gp?.data) await get().setPackSource(gp.data);
+        else if (!wantPack && gp?.outside) await get().setDataRoot(gp.outside);
+        else if (gp?.data) await get().setPackSource(gp.data);
+        else if (gp?.outside) await get().setDataRoot(gp.outside);
+        else
           set((s) => {
-            s.packMode = false;
-            s.packLayouts = [];
-            s.overlayPack = null;
-            s.settings.readMode = "folder";
+            s.status = `Set an Outside or Data folder for ${name} in Settings → Game & Data`;
           });
-          await get().init(false);
-        }
       } catch (e) {
         set((s) => {
           s.status = `${e}`;
@@ -535,15 +535,6 @@ export const useStore = create<AppStore>()(
       await Promise.all([
         load(ipc.getDataRoot(), (s, root) => { s.dataRoot = root; }, "Failed to read data root"),
         load(ipc.getSchemaPath(), (s, p) => { s.schemaPath = p; }),
-        Promise.all([ipc.listGames(), ipc.currentGame()]).then(
-          ([games, game]) => set((s) => {
-            s.games = games;
-            // `game` is frontend-authoritative once selected (custom paths make the
-            // backend's current_game() None); only seed it when nothing is chosen yet.
-            if (s.game == null) s.game = game;
-          }),
-          () => {}
-        ),
         load(ipc.loadContextDb(), (s, db) => { s.contextDb = db; }, "Failed to load DB"),
         load(ipc.loadCharacterDb(), (s, cdb) => { s.characterDb = cdb; }),
         load(ipc.loadCcoDocs(), (s, docs) => { s.ccoDocs = docs; }),
