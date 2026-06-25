@@ -11,6 +11,7 @@ import {
   normalizeEvent,
 } from "../keybinds";
 import { checkForUpdateVerbose, installAndRelaunch, type CheckResult } from "../updater";
+import Markdown from "../components/Markdown";
 
 type Category = "game" | "keybinds" | "perspective" | "visualizer" | "editor" | "theme" | "about";
 
@@ -428,8 +429,8 @@ function UpdatesSection() {
             <span className="text-textMuted">v{result.info.version}</span>
           </div>
           {result.info.notes && (
-            <div className="text-[11px] text-textMuted max-h-32 overflow-auto whitespace-pre-wrap mb-2">
-              {result.info.notes}
+            <div className="text-[11px] text-textMuted max-h-32 overflow-auto mb-2">
+              <Markdown text={result.info.notes} />
             </div>
           )}
           {busy ? (

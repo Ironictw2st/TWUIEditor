@@ -31,6 +31,14 @@ export function childByTag(el: RawElement, tag: string): RawElement | undefined 
   return elementChildren(el).find((c) => c.tag === tag);
 }
 
+/** The <layout version="…"> number (0 when absent/unparseable). Behaviour can be
+ *  gated on this to avoid regressing older files (see MIN_PARENT_IMAGE_VERSION). */
+export function layoutVersion(doc: TwuiDocument): number {
+  const v = getAttr(doc.root, "version");
+  const n = v ? parseInt(v, 10) : NaN;
+  return Number.isNaN(n) ? 0 : n;
+}
+
 /** The <hierarchy> section element. */
 export function hierarchySection(doc: TwuiDocument): RawElement | undefined {
   return childByTag(doc.root, "hierarchy");
@@ -116,6 +124,12 @@ export function componentStates(comp: RawElement): RawElement[] {
 export function componentImages(comp: RawElement): RawElement[] {
   const imgs = childByTag(comp, "componentimages");
   return imgs ? elementChildren(imgs) : [];
+}
+
+/** The <imagemetrics><image> entries of a state (each references a componentimage by guid). */
+export function stateImages(state: RawElement): RawElement[] {
+  const m = childByTag(state, "imagemetrics");
+  return m ? elementChildren(m).filter((e) => e.tag === "image") : [];
 }
 
 /** Pick the active state element for rendering: current, else default, else first. */

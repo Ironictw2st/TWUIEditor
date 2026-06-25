@@ -11,6 +11,7 @@ import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { imageUrl } from "../ipc/commands";
+import { setCaptureFn } from "./visualizerCapture";
 
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
 
@@ -73,6 +74,96 @@ function drawImageTinted(
   ctx.globalAlpha = alpha;
   ctx.drawImage(tc, rect.x, rect.y, rect.w, rect.h);
   ctx.globalAlpha = 1;
+}
+
+/** Paint the design surface: canvas background, its border, and every layout item (images +
+ *  text) in DFS order. This is the shared scene-painting pass used by both the live canvas
+ *  (after it applies the pan/zoom transform, then draws selection/hover overlays on top) and
+ *  the offscreen native-resolution capture (identity transform, no overlays). `zoom` only
+ *  scales hairline widths so 1px strokes stay 1px on screen; pass 1 for native capture. */
+function drawScene(
+  ctx: CanvasRenderingContext2D,
+  layout: LayoutResult,
+  opts: { getImage: (path: string) => HTMLImageElement | null; background: string | null; zoom: number }
+): void {
+  const { getImage, background, zoom } = opts;
+
+  // Canvas background (the design surface). `@white`/`@black` are solid-colour choices; any
+  // other non-empty value is a background image path (the campaign map) behind the HUD.
+  const cv = layout.canvas;
+  const solidBg = background === "@white" ? "#ffffff" : background === "@black" ? "#000000" : null;
+  ctx.fillStyle = solidBg ?? "#0c0d12";
+  ctx.fillRect(cv.x, cv.y, cv.w, cv.h);
+  if (background && !solidBg) {
+    const bg = getImage(background);
+    if (bg && bg.complete && bg.naturalWidth > 0) {
+      try {
+        ctx.drawImage(bg, cv.x, cv.y, cv.w, cv.h);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  ctx.strokeStyle = "#2a2d3a";
+  ctx.lineWidth = 1 / zoom;
+  ctx.strokeRect(cv.x, cv.y, cv.w, cv.h);
+
+  // Draw items in DFS order (parents behind children).
+  for (const item of layout.items) {
+    if (!item.visible) continue;
+    const clipped = !!item.clip && item.clip.w > 0 && item.clip.h > 0;
+    if (clipped) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(item.clip!.x, item.clip!.y, item.clip!.w, item.clip!.h);
+      ctx.clip();
+    }
+    for (const di of item.images) {
+      const img = getImage(di.imagepath);
+      if (img && img.complete && img.naturalWidth > 0) {
+        // Size to the image's natural pixels when no explicit size was given.
+        const r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
+        // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
+        // Runtime-swapped placeholders are drawn faint so they don't dominate.
+        const { rgb, alpha } = parseColour(di.colour);
+        const a = alpha * (isFaint(di.imagepath) ? 0.25 : 1);
+        // A `margin` image draws as a nine-patch border (corners 1:1, edges/center
+        // stretched) so a bordered texture isn't smeared across the whole rect.
+        const regions = di.margin
+          ? nineSliceRegions(r, img.naturalWidth, img.naturalHeight, di.margin)
+          : null;
+        try {
+          if (regions) {
+            for (const reg of regions) {
+              if (rgb) drawImageTinted(ctx, img, reg.dst, rgb, a, reg.src);
+              else {
+                ctx.globalAlpha = a;
+                ctx.drawImage(img, reg.src.x, reg.src.y, reg.src.w, reg.src.h, reg.dst.x, reg.dst.y, reg.dst.w, reg.dst.h);
+                ctx.globalAlpha = 1;
+              }
+            }
+          } else if (rgb) {
+            drawImageTinted(ctx, img, r, rgb, a);
+          } else {
+            ctx.globalAlpha = a;
+            ctx.drawImage(img, r.x, r.y, r.w, r.h);
+            ctx.globalAlpha = 1;
+          }
+        } catch {
+          /* ignore */
+        }
+      } else if (img && !img.complete) {
+        // still loading; leave blank
+      } else {
+        // missing image -> hatched placeholder at its known/box size
+        drawPlaceholder(ctx, imageDrawRect(di, 0, 0), zoom);
+      }
+    }
+    if (item.text) {
+      drawText(ctx, item);
+    }
+    if (clipped) ctx.restore();
+  }
 }
 
 export default function VisualizerPanel() {
@@ -176,6 +267,9 @@ export default function VisualizerPanel() {
     let img = cache.get(path);
     if (!img) {
       img = new Image();
+      // Load via CORS (the twuiimg protocol sends Access-Control-Allow-Origin: *) so the
+      // canvas stays untainted and the bug-report capture can call toDataURL() on it.
+      img.crossOrigin = "anonymous";
       img.onload = () => forceTick((t) => t + 1);
       img.onerror = () => forceTick((t) => t + 1);
       img.src = imageUrl(path);
@@ -213,82 +307,8 @@ export default function VisualizerPanel() {
     ctx.save();
     ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * panX, dpr * panY);
 
-    // Canvas background (the design surface). `@white`/`@black` are solid-colour choices; any
-    // other non-empty value is a background image path (the campaign map) behind the HUD.
-    const cv = layout.canvas;
-    const solidBg = background === "@white" ? "#ffffff" : background === "@black" ? "#000000" : null;
-    ctx.fillStyle = solidBg ?? "#0c0d12";
-    ctx.fillRect(cv.x, cv.y, cv.w, cv.h);
-    if (background && !solidBg) {
-      const bg = getImage(background);
-      if (bg && bg.complete && bg.naturalWidth > 0) {
-        try {
-          ctx.drawImage(bg, cv.x, cv.y, cv.w, cv.h);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    ctx.strokeStyle = "#2a2d3a";
-    ctx.lineWidth = 1 / zoom;
-    ctx.strokeRect(cv.x, cv.y, cv.w, cv.h);
-
-    // Draw items in DFS order (parents behind children).
-    for (const item of layout.items) {
-      if (!item.visible) continue;
-      const clipped = !!item.clip && item.clip.w > 0 && item.clip.h > 0;
-      if (clipped) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(item.clip!.x, item.clip!.y, item.clip!.w, item.clip!.h);
-        ctx.clip();
-      }
-      for (const di of item.images) {
-        const img = getImage(di.imagepath);
-        if (img && img.complete && img.naturalWidth > 0) {
-          // Size to the image's natural pixels when no explicit size was given.
-          const r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
-          // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
-          // Runtime-swapped placeholders are drawn faint so they don't dominate.
-          const { rgb, alpha } = parseColour(di.colour);
-          const a = alpha * (isFaint(di.imagepath) ? 0.25 : 1);
-          // A `margin` image draws as a nine-patch border (corners 1:1, edges/center
-          // stretched) so a bordered texture isn't smeared across the whole rect.
-          const regions = di.margin
-            ? nineSliceRegions(r, img.naturalWidth, img.naturalHeight, di.margin)
-            : null;
-          try {
-            if (regions) {
-              for (const reg of regions) {
-                if (rgb) drawImageTinted(ctx, img, reg.dst, rgb, a, reg.src);
-                else {
-                  ctx.globalAlpha = a;
-                  ctx.drawImage(img, reg.src.x, reg.src.y, reg.src.w, reg.src.h, reg.dst.x, reg.dst.y, reg.dst.w, reg.dst.h);
-                  ctx.globalAlpha = 1;
-                }
-              }
-            } else if (rgb) {
-              drawImageTinted(ctx, img, r, rgb, a);
-            } else {
-              ctx.globalAlpha = a;
-              ctx.drawImage(img, r.x, r.y, r.w, r.h);
-              ctx.globalAlpha = 1;
-            }
-          } catch {
-            /* ignore */
-          }
-        } else if (img && !img.complete) {
-          // still loading; leave blank
-        } else {
-          // missing image -> hatched placeholder at its known/box size
-          drawPlaceholder(ctx, imageDrawRect(di, 0, 0), zoom);
-        }
-      }
-      if (item.text) {
-        drawText(ctx, item);
-      }
-      if (clipped) ctx.restore();
-    }
+    // Paint the design surface + all items (shared with the offscreen capture).
+    drawScene(ctx, layout, { getImage, background, zoom });
 
     // Structure outlines are opt-in (the "Bounds" toggle) so the preview stays clean.
     if (showBounds) {
@@ -330,6 +350,25 @@ export default function VisualizerPanel() {
 
     ctx.restore();
   }, [doc, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode]);
+
+  // Expose a clean, native-resolution PNG of the current layout for the bug-report menu.
+  // Renders the shared scene (no pan/zoom/overlays) into an offscreen canvas sized to the
+  // layout's own canvas, translated so (cv.x, cv.y) maps to the origin.
+  useEffect(() => {
+    setCaptureFn(() => {
+      if (!doc) return null;
+      const cv = layout.canvas;
+      const off = document.createElement("canvas");
+      off.width = Math.max(1, Math.round(cv.w));
+      off.height = Math.max(1, Math.round(cv.h));
+      const octx = off.getContext("2d");
+      if (!octx) return null;
+      octx.setTransform(1, 0, 0, 1, -cv.x, -cv.y);
+      drawScene(octx, layout, { getImage, background, zoom: 1 });
+      return off.toDataURL("image/png");
+    });
+    return () => setCaptureFn(null);
+  }, [doc, layout, getImage, background]);
 
   // Interaction depends on the mode: View pans, Move edits offsets, Simulation
   // scrolls lists / clicks widgets.

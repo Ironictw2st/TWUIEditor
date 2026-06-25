@@ -26,18 +26,27 @@ import { defaultContext } from "../twui/context";
 import { collectCreatorPaths } from "../twui/creator";
 import { collectScriptComponents, pageScriptId } from "../twui/script";
 import {
+  addCallback,
+  addComponentImage,
+  addImageMetric,
   addNode,
+  addState,
   componentGuidSet,
+  deleteComponentImage,
   deleteNode,
+  deleteState,
   duplicateNode,
   extractSubtree,
+  moveChild,
   moveNode,
   pasteSubtree,
   regenAllGuids,
   regenGuidSet,
+  removeChild,
   renameNode,
   replaceComponent,
   replaceHierarchyNode,
+  setCallbackAttr,
   subtreeGuidSet,
   SubtreeClip,
 } from "../twui/mutate";
@@ -237,9 +246,21 @@ export interface AppStore {
 
   mutate: (fn: (doc: TwuiDocument) => void) => void;
   editAttr: (guid: string, key: string, value: string) => void;
+  editAttrs: (guid: string, updates: Record<string, string>) => void;
   editLayoutEngineAttr: (guid: string, key: string, value: string) => void;
   addLayoutEngine: (guid: string) => void;
   setCallbackFunc: (guid: string, index: number, value: string) => void;
+  // Structural CRUD below the component level (states / component images / image-metrics /
+  // callbacks). Add/delete by element-index within the parent container; reorder via moveChild.
+  addState: (compGuid: string) => void;
+  deleteState: (compGuid: string, index: number) => void;
+  addComponentImage: (compGuid: string) => void;
+  deleteComponentImage: (compGuid: string, index: number) => void;
+  addImageMetric: (stateGuid: string, ciGuid: string | undefined) => void;
+  addCallback: (compGuid: string) => void;
+  setCallbackAttr: (compGuid: string, containerTag: string, index: number, key: string, value: string) => void;
+  moveChild: (parentGuid: string, containerTag: string, index: number, dir: -1 | 1) => void;
+  removeChild: (parentGuid: string, containerTag: string, index: number) => void;
   toggleVisible: (guid: string) => void;
   beginDrag: () => void;
   liveSetOffset: (guid: string, x: number, y: number) => void;
@@ -825,6 +846,17 @@ export const useStore = create<AppStore>()(
       });
     },
 
+    // Write several attributes of one element in a single undo step. Used by the
+    // Inspector to keep linked-GUID pairs (this/uniqueguid, currentstate/defaultstate)
+    // in sync — editing the merged field updates every member at once.
+    editAttrs: (guid, updates) => {
+      get().mutate((doc) => {
+        const el = findComponentElement(doc, guid);
+        if (!el) return;
+        for (const [k, v] of Object.entries(updates)) setAttr(el, k, v);
+      });
+    },
+
     // The <LayoutEngine> child has no guid of its own, so it's reached via the
     // component's guid (the Inspector's Layout Engine section edits it).
     editLayoutEngineAttr: (guid, key, value) => {
@@ -864,6 +896,44 @@ export const useStore = create<AppStore>()(
           }
         }
       });
+    },
+
+    // --- Structural CRUD (states / component images / image-metrics / callbacks). Each routes
+    //     through mutate(), so they snapshot for undo automatically. New elements are selected
+    //     where it helps the user continue editing. ---
+    addState: (compGuid) => {
+      get().mutate((doc) => {
+        addState(doc, compGuid);
+      });
+    },
+    deleteState: (compGuid, index) => {
+      get().mutate((doc) => deleteState(doc, compGuid, index));
+    },
+    addComponentImage: (compGuid) => {
+      get().mutate((doc) => {
+        addComponentImage(doc, compGuid);
+      });
+    },
+    deleteComponentImage: (compGuid, index) => {
+      get().mutate((doc) => deleteComponentImage(doc, compGuid, index));
+    },
+    addImageMetric: (stateGuid, ciGuid) => {
+      get().mutate((doc) => {
+        addImageMetric(doc, stateGuid, ciGuid);
+      });
+    },
+    addCallback: (compGuid) => {
+      get().mutate((doc) => addCallback(doc, compGuid));
+    },
+    setCallbackAttr: (compGuid, containerTag, index, key, value) => {
+      const v = key === "context_function_id" ? encodeEntities(value) : value;
+      get().mutate((doc) => setCallbackAttr(doc, compGuid, containerTag, index, key, v));
+    },
+    moveChild: (parentGuid, containerTag, index, dir) => {
+      get().mutate((doc) => moveChild(doc, parentGuid, containerTag, index, dir));
+    },
+    removeChild: (parentGuid, containerTag, index) => {
+      get().mutate((doc) => removeChild(doc, parentGuid, containerTag, index));
     },
 
     // Hide/show a component by toggling visible="false" on its <components>

@@ -1,3 +1,4 @@
+mod bug_report;
 mod cco_docs;
 mod cco_shorthand;
 mod character;
@@ -71,6 +72,8 @@ pub fn run() {
             commands::list_backgrounds,
             update::check_update,
             update::install_update,
+            bug_report::capture_app_window,
+            bug_report::submit_bug_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

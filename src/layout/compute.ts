@@ -18,12 +18,21 @@ import {
   getLayoutEngine,
   guidOf,
   hierarchyRoot,
+  layoutVersion,
   parseVec2,
 } from "../twui/doc";
 import { ContextTokens } from "../twui/context";
 import { isComponentVisible } from "../twui/visibility";
 import { postTitle } from "../twui/posts";
-import { isTemplated, ResolvedLayer, resolveAgainst, resolveTemplated, templateIdMap } from "../twui/template";
+import {
+  componentImagePaths,
+  isTemplated,
+  MIN_PARENT_IMAGE_VERSION,
+  ResolvedLayer,
+  resolveAgainst,
+  resolveTemplated,
+  templateIdMap,
+} from "../twui/template";
 import { LuaValue } from "../twui/lua";
 import {
   callbacks,
@@ -103,9 +112,13 @@ export function textAnchor(
 export function imageDrawRect(di: DrawImage, naturalW: number, naturalH: number): Rect {
   const w = di.w ?? (naturalW || di.box.w);
   const h = di.h ?? (naturalH || di.box.h);
+  // A centered axis centers the image exactly; the per-image offset does not apply on
+  // that axis (matches the game — offset only nudges edge/corner-docked images).
+  const ox = di.hf === 0.5 ? 0 : di.ox;
+  const oy = di.vf === 0.5 ? 0 : di.oy;
   return {
-    x: di.box.x + di.hf * di.box.w - di.hf * w + di.ox,
-    y: di.box.y + di.vf * di.box.h - di.vf * h + di.oy,
+    x: di.box.x + di.hf * di.box.w - di.hf * w + ox,
+    y: di.box.y + di.vf * di.box.h - di.vf * h + oy,
     w,
     h,
   };
@@ -416,11 +429,13 @@ function imagesForComp(
 ): DrawImage[] {
   if (isTemplated(comp)) {
     // Own `template_id`, else (a part_of_template child) the ancestor template's
-    // matching component, looked up by id during the pre-walk.
-    let r = resolveTemplated(comp, templates);
+    // matching component, looked up by id during the pre-walk. A resolved
+    // ContextImageSetter (incl. parent-determined `ParentContext.ImagePath`) swaps the
+    // slot-0 component image inside the resolver, so it lands on the right drawn layer.
+    let r = resolveTemplated(comp, templates, iconOverride);
     if (!r) {
       const tc = tplCompMap.get(guidOf(comp) ?? "");
-      if (tc) r = resolveAgainst(comp, tc);
+      if (tc) r = resolveAgainst(comp, tc, iconOverride);
     }
     if (r) return layerImages(r.layers, rect);
     return [];
@@ -672,7 +687,14 @@ export function computeLayout(
     const isCb = cbs.find((c) => c.id === "ContextImageSetter");
     const iconOverride = isCb?.funcId ? evalImageSetter(isCb.funcId, scope) ?? undefined : undefined;
 
-    const images = imagesForComp(comp, state, rect, templates, tplCompMap, iconOverride);
+    // Templated components historically draw a resolved ContextImageSetter as an extra
+    // image on top (the fallback below). Only a parent-determined icon
+    // (`ParentContext.ImagePath`) replaces their slot-0 placeholder in place — every other
+    // templated icon renders exactly as before, so unrelated templated panels are untouched.
+    const parentDetermined = !!isCb?.funcId?.includes("ParentContext.ImagePath");
+    const overrideForImages = isTemplated(comp) && !parentDetermined ? undefined : iconOverride;
+
+    const images = imagesForComp(comp, state, rect, templates, tplCompMap, overrideForImages);
     // Fallback: the override resolved but the component has no slot-0 imagemetric
     // to carry it (a placeholder-less dynamic icon) — draw it at the slot-0
     // component_image size, else the rect.
@@ -870,6 +892,26 @@ export function computeLayout(
     // so a sub-scripted list (e.g. the schemes list_box) resolves its own table.
     const ownPack = comp ? componentDataPacks[guidOf(comp) ?? ""] : undefined;
     if (ownPack !== undefined) scope = { ...scope, dataPack: ownPack };
+
+    // Expose THIS component's slot-ordered image paths to its children so a child's
+    // `self.ParentContext.ImagePath(N)` (a ContextImageSetter) resolves to the parent's
+    // slot-N component image. Version-gated, and only when a child actually reads it.
+    if (
+      comp &&
+      layoutVersion(lDoc) >= MIN_PARENT_IMAGE_VERSION &&
+      children.some((ch) => {
+        const cc = cmap.get(guidOf(ch) ?? "");
+        return (
+          !!cc &&
+          callbacks(cc).some(
+            (cb) => cb.id === "ContextImageSetter" && !!cb.funcId?.includes("ParentContext.ImagePath")
+          )
+        );
+      })
+    ) {
+      const paths = componentImagePaths(comp);
+      if (paths.length) scope = { ...scope, parentImages: paths };
+    }
 
     // A clipchildren container is a scrollable viewport: shift its children up by
     // the sim scroll offset; the clip stays the (fixed) viewport.
@@ -1199,6 +1241,28 @@ export function layoutEngine(
 
   const ordered = reverse ? [...children].reverse() : children;
   const out: Placed[] = [];
+
+  // RadialList: each item's CENTRE sits on a circle of `radius` px around the container
+  // centre, stepping `spacing` radians per item from `starting_angle`. `spacing` is a single
+  // angular value (sx). The game measures angles with y UP (maths convention): angle 0 = east,
+  // positive angle goes up the screen — so the y term is subtracted. `clockwise` (default)
+  // steps +spacing. `reverse_order` via `ordered`.
+  if (type === "RadialList") {
+    const radius = num(le, "radius", 0);
+    const start = num(le, "starting_angle", 0);
+    const step = sx; // spacing's first value = per-item angular step (radians)
+    const dir = getAttr(le, "clockwise") === "false" ? -1 : 1;
+    const cx0 = parentRect.x + parentRect.w / 2;
+    const cy0 = parentRect.y + parentRect.h / 2;
+    ordered.forEach(({ node, comp, state, scope }, i) => {
+      const { w, h } = measure(node, comp, state, scope);
+      const angle = start + dir * i * step;
+      const x = cx0 + radius * Math.cos(angle) - w / 2;
+      const y = cy0 - radius * Math.sin(angle) - h / 2;
+      out.push({ node, comp, state, rect: { x, y, w, h }, scope });
+    });
+    return out;
+  }
 
   // Grid: a vertical List that packs `cols` items per row, then wraps.
   if (!horizontal && cols > 1) {

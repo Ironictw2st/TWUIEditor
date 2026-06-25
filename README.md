@@ -1,7 +1,7 @@
 # TWUI Editor
 
-A desktop viewer/editor for **Total War: Three Kingdoms** `.twui.xml` UI layout
-files. Three synced panels:
+A desktop viewer/editor for **Total War: Three Kingdoms** (and experimental
+**Warhammer III**) `.twui.xml` UI layout files. Three synced panels:
 
 - **Hierarchy** (left) — the component tree; select, add child, duplicate,
   delete, and drag to reparent/reorder.
@@ -12,6 +12,22 @@ files. Three synced panels:
 
 Saving writes byte-identical `.twui.xml` (verified by round-trip tests on the
 1 MB `campaign_hud_faction_header.twui.xml` primary fixture).
+
+## Confirmed panels
+
+Panels whose editor render has been verified against in-game references
+(screenshots live in each game's `view/` folder).
+
+### Three Kingdoms (3K)
+
+- `campaign_hud_faction_header.twui.xml`
+- `court_screen.twui.xml`
+- `3k_dlc07_ambition_panel.twui.xml`
+- `3k_dlc07_schemes_panel.twui.xml`
+
+### Warhammer III (WH3)
+
+- None confirmed yet — `hud_campaign.twui.xml` is in progress.
 
 ## Requirements
 
@@ -30,9 +46,22 @@ button (pick the folder that contains `ui/`).
 
 ## Build
 
+Prerequisites: Node 18+, Rust (stable; MSVC toolchain on Windows), and the
+WebView2 runtime (preinstalled on current Windows 10/11).
+
+Portable build (one self-contained exe):
+
 ```bash
-npm run tauri build
+npm install
+npx tauri build --no-bundle
 ```
+
+Output: `src-tauri/target/release/twui-editor.exe` — the frontend is embedded, so
+just run it. Use `tauri build`, **not** plain `cargo build`: the latter doesn't
+embed the frontend and the app shows a blank "can't reach this page".
+
+Releases: push a `v*` tag and CI publishes the portable `TWUI-Editor-x64.exe`;
+installed copies self-update from the latest GitHub release. See `RELEASING.md`.
 
 ## Tests
 

@@ -16,6 +16,9 @@
 /src-tauri/.tauri-updater.key
 /src-tauri/.tauri-updater.key.pub
 
+# Local backend secrets (bug-report webhook etc.); .env.example is the committed template
+/src-tauri/.env
+
 # Editor / OS cruft
 .DS_Store
 Thumbs.db

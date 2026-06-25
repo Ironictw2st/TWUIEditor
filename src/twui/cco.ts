@@ -23,6 +23,9 @@ export interface Scope {
   thisEntry?: LuaValue;
   /** Named sub-contexts from ContextPropagator (e.g. `Reward`). */
   vars: Record<string, LuaValue>;
+  /** The hierarchy parent's resolved image paths (slot order), for
+   *  `self.ParentContext.ImagePath(N)`. Threaded down by the layout walk. */
+  parentImages?: string[];
   /** Content-defined CCO shorthand macros (`ui/cco/*.json`), keyed by CCO type. */
   shorthand?: CcoShorthand;
   /** The current callback's context object type (e.g. `CcoCampaignCharacter`). */
@@ -391,6 +394,15 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
   if (expr === "true") return true;
   if (expr === "false") return false;
   if (expr === "nil") return null;
+
+  // `self.ParentContext.ImagePath(N)` / `ParentContext.ImagePath(N)` — the hierarchy
+  // parent's resolved image at slot N (threaded in via scope.parentImages). Unresolved
+  // (no parent / index out of range) → undefined, so the static placeholder survives.
+  const pim = /^(?:self\.)?ParentContext\.ImagePath\(\s*(\d+)\s*\)$/.exec(expr);
+  if (pim) {
+    const p = scope.parentImages?.[Number(pim[1])];
+    return p && p.length ? p : undefined;
+  }
 
   const call = headCall(expr);
   if (call && call.rest === "") {

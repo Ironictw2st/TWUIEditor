@@ -34,8 +34,21 @@ jobs:
       # Publish the portable exe under the stable name the in-app updater looks for.
       - run: cp src-tauri/target/release/twui-editor.exe TWUI-Editor-x64.exe
 
+      # Use this version's CHANGELOG section as the release notes (shown by the in-app updater).
+      - name: Extract release notes
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$ver]" '
+            index($0, v)==1 {f=1; next}
+            /^## \[/ {if(f) exit}
+            f {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then echo "TWUI Editor ${GITHUB_REF_NAME}." > RELEASE_NOTES.md; fi
+          echo "----- release notes -----"; cat RELEASE_NOTES.md
+
       - uses: softprops/action-gh-release@v2
         with:
           name: "TWUI Editor ${{ github.ref_name }}"
-          body: "Portable build — download TWUI-Editor-x64.exe and run it. Installed copies auto-update from here."
+          body_path: RELEASE_NOTES.md
           files: TWUI-Editor-x64.exe

@@ -11,16 +11,19 @@ GitHub Releases (RPFM-style): the running app checks the latest release, downloa
    - `src-tauri/tauri.conf.json`
    - `src-tauri/Cargo.toml`
    - `src-tauri/Cargo.lock` (the `twui-editor` package entry)
-2. Commit the bump.
-3. Tag and push:
+2. Add a `## [x.y.z] - <date>` section to `CHANGELOG.md` (move the `Unreleased` items into
+   it). CI uses this section as the release notes shown in the in-app updater.
+3. Commit the bump.
+4. Tag and push:
    ```
-   git tag v0.0.3
-   git push origin v0.0.3
+   git tag v0.0.5
+   git push origin v0.0.5
    ```
-4. The **Release** workflow (`.github/workflows/release.yml`) builds the frontend + a release
-   `cargo build`, then publishes a GitHub Release with the portable **`TWUI-Editor-x64.exe`**.
-5. Anyone running an older copy is prompted (startup banner, or Settings -> About / Updates ->
-   Check for updates) to download and relaunch into the new version.
+5. The **Release** workflow (`.github/workflows/release.yml`) builds the portable exe with
+   `tauri build --no-bundle`, extracts the version's `CHANGELOG.md` section as the notes, and
+   publishes a GitHub Release with **`TWUI-Editor-x64.exe`**.
+6. Anyone running an older copy is prompted (startup banner, or Settings -> About / Updates ->
+   Check for updates) with those notes, and can download and relaunch into the new version.
 
 ## How the updater works
 

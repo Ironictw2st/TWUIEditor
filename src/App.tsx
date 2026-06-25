@@ -14,7 +14,9 @@ import DockLayout, { dockShowPanel, dockHidePanel } from "./panels/DockLayout";
 import ToolsPanel from "./panels/ToolsPanel";
 import SettingsPanel from "./panels/SettingsPanel";
 import SearchPalette from "./panels/SearchPalette";
+import BugReportPanel from "./panels/BugReportPanel";
 import UpdateBanner from "./panels/UpdateBanner";
+import { captureAppWindow } from "./ipc/commands";
 
 const PANEL_TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -48,6 +50,20 @@ function Toolbar() {
 
   const [showTools, setShowTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showBugReport, setShowBugReport] = useState(false);
+  const [bugProgramShot, setBugProgramShot] = useState<string | null>(null);
+
+  // Capture the app window before the modal renders (best-effort) so the shot is clean.
+  const openBugReport = async () => {
+    let shot: string | null = null;
+    try {
+      shot = await captureAppWindow();
+    } catch {
+      shot = null;
+    }
+    setBugProgramShot(shot);
+    setShowBugReport(true);
+  };
 
   const btn =
     "px-2.5 py-1 rounded bg-button hover:bg-buttonHover border border-edge text-[12px] disabled:opacity-40";
@@ -55,6 +71,9 @@ function Toolbar() {
   return (
     <div className="flex items-center gap-2 px-3 h-11 border-b border-edge bg-panel shrink-0">
       <Logo />
+      <span className="text-[10px] text-textMuted mr-1 self-center tabular-nums" title="Version">
+        v{__APP_VERSION__}
+      </span>
       <button className={btn} onClick={() => openFileDialog()}>
         Open…
       </button>
@@ -90,9 +109,15 @@ function Toolbar() {
       <button className={btn} onClick={() => setShowSettings(true)} title="Game, keybinds & preferences">
         Settings
       </button>
+      <button className={btn} onClick={openBugReport} title="Report a bug to the author">
+        Report a Bug
+      </button>
       <PanelsMenu />
       {showTools && <ToolsPanel onClose={() => setShowTools(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      {showBugReport && (
+        <BugReportPanel onClose={() => setShowBugReport(false)} initialProgramShot={bugProgramShot} />
+      )}
       <div className="flex-1" />
       <span className="text-[12px] text-gray-500 max-w-[420px] truncate">
         {status}

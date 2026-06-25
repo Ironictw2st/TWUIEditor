@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import pkg from "./package.json";
 
 // Tauri expects a fixed port and ignores HMR websocket on the same.
 const host = process.env.TAURI_DEV_HOST;
@@ -7,6 +8,8 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // Expose the app version (from package.json) to the frontend as a compile-time constant.
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   server: {
     port: 1420,
     // Auto-pick the next free port if 1420 is taken (e.g. a stale dev server),

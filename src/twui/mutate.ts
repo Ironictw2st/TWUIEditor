@@ -7,10 +7,12 @@ import {
   childByTag,
   componentsSection,
   elementChildren,
+  findComponentElement,
   getAttr,
   guidOf,
   hierarchyRoot,
   hierarchySection,
+  removeAttr,
   setAttr,
 } from "./doc";
 
@@ -416,6 +418,230 @@ export function renameNode(doc: TwuiDocument, guid: string, newId: string): void
     comp.tag = newId;
     setAttr(comp, "id", newId);
   }
+}
+
+// --- Structural CRUD below the component level (states / component images / image-metrics /
+//     callbacks). Addressing is by element-child INDEX within the parent container, so it works
+//     uniformly whether or not the child carries a guid. New elements get a fresh this/uniqueguid
+//     so their attributes are immediately editable. All of these run inside `mutate`. ---
+
+/** Find or create a direct child container with `tag`; clears self_closing on creation. */
+function ensureContainer(parent: RawElement, tag: string): RawElement {
+  const existing = childByTag(parent, tag);
+  if (existing) return existing;
+  const c: RawElement = { kind: "element", tag, attrs: [], children: [], self_closing: false };
+  parent.children.push(c);
+  parent.self_closing = false;
+  return c;
+}
+
+function appendChild(container: RawElement, el: RawElement): void {
+  container.children.push(el);
+  container.self_closing = false;
+}
+
+/** Swap the element-child at element-index `index` with its neighbour (dir -1 up / +1 down). */
+function moveChildAt(container: RawElement, index: number, dir: -1 | 1): void {
+  const kids = elementChildren(container);
+  const j = index + dir;
+  if (index < 0 || index >= kids.length || j < 0 || j >= kids.length) return;
+  const a = container.children.indexOf(kids[index]);
+  const b = container.children.indexOf(kids[j]);
+  if (a < 0 || b < 0) return;
+  [container.children[a], container.children[b]] = [container.children[b], container.children[a]];
+}
+
+/** Remove the element-child at element-index `index`; returns it. */
+function removeChildAt(container: RawElement, index: number): RawElement | undefined {
+  const kids = elementChildren(container);
+  if (index < 0 || index >= kids.length) return undefined;
+  const at = container.children.indexOf(kids[index]);
+  if (at < 0) return undefined;
+  return container.children.splice(at, 1)[0] as RawElement;
+}
+
+/** Generic reorder of a child within a named container of the element addressed by `parentGuid`. */
+export function moveChild(
+  doc: TwuiDocument,
+  parentGuid: string,
+  containerTag: string,
+  index: number,
+  dir: -1 | 1
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  const cont = parent && childByTag(parent, containerTag);
+  if (cont) moveChildAt(cont, index, dir);
+}
+
+/** Generic remove of a child (no reference cleanup) — used for image-metrics and callbacks. */
+export function removeChild(
+  doc: TwuiDocument,
+  parentGuid: string,
+  containerTag: string,
+  index: number
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  const cont = parent && childByTag(parent, containerTag);
+  if (cont) removeChildAt(cont, index);
+}
+
+// --- States ---
+
+function uniqueStateName(statesEl: RawElement): string {
+  const used = new Set(elementChildren(statesEl).map((s) => getAttr(s, "name")));
+  if (!used.has("NewState")) return "NewState";
+  for (let i = 2; ; i++) if (!used.has(`NewState ${i}`)) return `NewState ${i}`;
+}
+
+/** Add a new state to a component; points current/default state at it if unset. Returns its guid. */
+export function addState(doc: TwuiDocument, compGuid: string): string | undefined {
+  const comp = findComponentElement(doc, compGuid);
+  if (!comp) return undefined;
+  const statesEl = ensureContainer(comp, "states");
+  const sample = elementChildren(statesEl)[0];
+  const stateGuid = genGuid();
+  const state: RawElement = {
+    kind: "element",
+    tag: "newstate",
+    attrs: [
+      ["this", stateGuid],
+      ["name", uniqueStateName(statesEl)],
+      ["width", (sample && getAttr(sample, "width")) ?? "100"],
+      ["height", (sample && getAttr(sample, "height")) ?? "40"],
+      ["interactive", "true"],
+      ["uniqueguid", stateGuid],
+    ],
+    children: [],
+    self_closing: true,
+  };
+  appendChild(statesEl, state);
+  if (!getAttr(comp, "currentstate")) setAttr(comp, "currentstate", stateGuid);
+  if (!getAttr(comp, "defaultstate")) setAttr(comp, "defaultstate", stateGuid);
+  return stateGuid;
+}
+
+/** Delete a state by index; repoints current/default state to the first survivor (or drops it). */
+export function deleteState(doc: TwuiDocument, compGuid: string, index: number): void {
+  const comp = findComponentElement(doc, compGuid);
+  const statesEl = comp && childByTag(comp, "states");
+  if (!comp || !statesEl) return;
+  const removed = removeChildAt(statesEl, index);
+  const removedGuid = removed && guidOf(removed);
+  if (!removedGuid) return;
+  const firstGuid = elementChildren(statesEl)[0] ? guidOf(elementChildren(statesEl)[0]) : undefined;
+  for (const key of ["currentstate", "defaultstate"]) {
+    if (getAttr(comp, key) === removedGuid) {
+      if (firstGuid) setAttr(comp, key, firstGuid);
+      else removeAttr(comp, key);
+    }
+  }
+}
+
+// --- Component images ---
+
+/** Add an empty <component_image> to a component. Returns its guid. */
+export function addComponentImage(doc: TwuiDocument, compGuid: string): string | undefined {
+  const comp = findComponentElement(doc, compGuid);
+  if (!comp) return undefined;
+  const cont = ensureContainer(comp, "componentimages");
+  const g = genGuid();
+  appendChild(cont, {
+    kind: "element",
+    tag: "component_image",
+    attrs: [
+      ["this", g],
+      ["uniqueguid", g],
+      ["imagepath", ""],
+      ["width", "0"],
+      ["height", "0"],
+    ],
+    children: [],
+    self_closing: true,
+  });
+  return g;
+}
+
+/** Delete a component image by index; cascade-removes state image-metrics that referenced it. */
+export function deleteComponentImage(doc: TwuiDocument, compGuid: string, index: number): void {
+  const comp = findComponentElement(doc, compGuid);
+  const cont = comp && childByTag(comp, "componentimages");
+  if (!comp || !cont) return;
+  const removed = removeChildAt(cont, index);
+  const ciGuid = removed && guidOf(removed);
+  if (!ciGuid) return;
+  const statesEl = childByTag(comp, "states");
+  if (!statesEl) return;
+  for (const st of elementChildren(statesEl)) {
+    const im = childByTag(st, "imagemetrics");
+    if (im) {
+      im.children = im.children.filter(
+        (c) => !(isElement(c) && getAttr(c, "componentimage") === ciGuid)
+      );
+    }
+  }
+}
+
+// --- Image-metrics (a state's <imagemetrics><image> draw layers) ---
+
+/** Add an <image> draw layer to a state, referencing component image `ciGuid`. Returns its guid. */
+export function addImageMetric(
+  doc: TwuiDocument,
+  stateGuid: string,
+  ciGuid: string | undefined
+): string | undefined {
+  const state = findComponentElement(doc, stateGuid);
+  if (!state) return undefined;
+  const cont = ensureContainer(state, "imagemetrics");
+  const g = genGuid();
+  appendChild(cont, {
+    kind: "element",
+    tag: "image",
+    attrs: [
+      ["componentimage", ciGuid ?? ""],
+      ["this", g],
+      ["uniqueguid", g],
+      ["width", "0"],
+      ["height", "0"],
+    ],
+    children: [],
+    self_closing: true,
+  });
+  return g;
+}
+
+// --- Callbacks (<callbackwithcontextlist|callbacks_with_context><callback_with_context>) ---
+
+/** Add an empty callback under the inline list (creating it if needed). */
+export function addCallback(doc: TwuiDocument, compGuid: string): void {
+  const comp = findComponentElement(doc, compGuid);
+  if (!comp) return;
+  const cont =
+    childByTag(comp, "callbackwithcontextlist") ??
+    childByTag(comp, "callbacks_with_context") ??
+    ensureContainer(comp, "callbackwithcontextlist");
+  appendChild(cont, {
+    kind: "element",
+    tag: "callback_with_context",
+    attrs: [["callback_id", ""]],
+    children: [],
+    self_closing: true,
+  });
+}
+
+/** Set one attribute of a callback addressed by (container tag, element index). */
+export function setCallbackAttr(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  index: number,
+  key: string,
+  value: string
+): void {
+  const comp = findComponentElement(doc, compGuid);
+  const cont = comp && childByTag(comp, containerTag);
+  if (!cont) return;
+  const el = elementChildren(cont)[index];
+  if (el) setAttr(el, key, value);
 }
 
 export function isElementNode(n: TwuiNode): n is RawElement {

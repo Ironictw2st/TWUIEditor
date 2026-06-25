@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { checkForUpdate, installAndRelaunch, type UpdateInfo } from "../updater";
+import Markdown from "../components/Markdown";
 
 /** Checks for a newer GitHub release once on mount; if one is found, shows a small prompt to install
  *  and restart (with a download progress bar). Mounted only in the main window, production builds. */
@@ -43,7 +44,9 @@ export default function UpdateBanner() {
         )}
       </div>
       {info.notes && (
-        <div className="text-[11px] text-textMuted max-h-24 overflow-auto whitespace-pre-wrap mb-2">{info.notes}</div>
+        <div className="text-[11px] text-textMuted max-h-24 overflow-auto mb-2">
+          <Markdown text={info.notes} />
+        </div>
       )}
       {busy ? (
         <div>

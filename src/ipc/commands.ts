@@ -101,6 +101,34 @@ export function imageStatus(imagePath: string): Promise<ImageStatus> {
   return invoke("image_status", { imagePath });
 }
 
+/** An image passed inline to the bug-report webhook (program shot / visualizer render).
+ *  `b64` may be a bare base64 string or a full `data:image/png;base64,...` data URL. */
+export interface InlineImage {
+  name: string;
+  b64: string;
+}
+
+/** A bug report submitted from the in-app menu; mirrors the Rust `BugReport` struct. */
+export interface BugReport {
+  description: string;
+  contact?: string;
+  /** Diagnostic key/values (app version, OS, game, file, resolution) shown as embed fields. */
+  meta: Record<string, string | number | null>;
+  inlineImages: InlineImage[];
+  /** Absolute paths to user-picked images, read by the backend at submit time. */
+  filePaths: string[];
+}
+
+/** Capture the whole app window; returns a `data:image/png;base64,...` URL. */
+export function captureAppWindow(): Promise<string> {
+  return invoke("capture_app_window");
+}
+
+/** Deliver a bug report (description + images) to the author's configured Discord webhook. */
+export function submitBugReport(report: BugReport): Promise<void> {
+  return invoke("submit_bug_report", { report });
+}
+
 // On Windows (and Android) Tauri serves custom URI schemes as
 // `http://<scheme>.localhost/...`; on macOS/Linux as `<scheme>://localhost/...`.
 const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);

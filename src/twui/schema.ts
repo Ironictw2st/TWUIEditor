@@ -9,7 +9,7 @@
 // constrained here — they stay fully editable via the raw element tree / Raw tab, so
 // nothing is hidden or lost (our round-trip keeps the verbatim attrs regardless).
 
-export type AttrKind = "component" | "state" | "image" | "layoutEngine";
+export type AttrKind = "component" | "state" | "image" | "component_image" | "layoutEngine";
 export type AttrType = "text" | "number" | "vec2" | "enum" | "bool" | "colour" | "path";
 
 export interface AttrSchema {
@@ -21,6 +21,8 @@ export interface AttrSchema {
   category: string;
   enumValues?: string[];
   default?: string;
+  /** Editor-only / rarely-edited cruft — sinks to the bottom of its section when present. */
+  priorityHint?: "low";
 }
 
 // --- Shared enum value sets (observed across games/3K/ui/**) ------------------------
@@ -84,7 +86,12 @@ export const LE_VALIGN = ["Center", "Bottom"];
 const C: AttrKind[] = ["component"];
 const S: AttrKind[] = ["state"];
 const I: AttrKind[] = ["image"];
+const CI: AttrKind[] = ["component_image"];
 const LE: AttrKind[] = ["layoutEngine"];
+
+// Shared by several kinds: GUID identity attrs (engine writes both `this` and `uniqueguid`
+// on most elements; templated instances also carry `uniqueguid_in_template`).
+const GUID_T: AttrType = "text";
 
 const SCHEMA_LIST: AttrSchema[] = [
   // Layout / component
@@ -126,9 +133,9 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Interaction sound bank key (e.g. UI_GBL_TMP_Square_Large_Text_Button)." },
 
   // State
-  { name: "width", label: "width", type: "number", appliesTo: ["state", "image"], category: "Size",
+  { name: "width", label: "width", type: "number", appliesTo: ["state", "image", "component_image"], category: "Size",
     description: "Width in pixels for this state / image." },
-  { name: "height", label: "height", type: "number", appliesTo: ["state", "image"], category: "Size",
+  { name: "height", label: "height", type: "number", appliesTo: ["state", "image", "component_image"], category: "Size",
     description: "Height in pixels for this state / image." },
   { name: "text", label: "text", type: "text", appliesTo: S, category: "Text",
     description: "Static display text for this state (a ContextTextLabel callback can override it)." },
@@ -152,8 +159,6 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Material/shader used to render (greyscale, glow, outline, etc.)." },
 
   // Image
-  { name: "imagepath", label: "image path", type: "path", appliesTo: I, category: "Image",
-    description: "Texture path (relative to the data root), e.g. ui/skins/default/foo.png." },
   { name: "dockpoint", label: "dock point", type: "enum", enumValues: DOCKING_VALUES, appliesTo: I, category: "Image", default: "Top Left",
     description: "Where this image sits within the component rect." },
   { name: "tile", label: "tile", type: "bool", enumValues: BOOL, appliesTo: I, category: "Image", default: "false",
@@ -165,9 +170,9 @@ const SCHEMA_LIST: AttrSchema[] = [
 
   // LayoutEngine (the <LayoutEngine> child that arranges a container's children).
   { name: "type", label: "type", type: "enum", enumValues: LE_TYPE, appliesTo: LE, category: "Layout Engine", default: "List",
-    description: "List (vertical stack), HorizontalList (horizontal stack), or RadialList (circular). Honoured by the renderer (RadialList partially)." },
+    description: "List (vertical stack), HorizontalList (horizontal stack), or RadialList (circular). Honoured by the renderer." },
   { name: "spacing", label: "spacing (x,y)", type: "vec2", appliesTo: LE, category: "Layout Engine", default: "0.00,0.00",
-    description: "Gap between children: x between columns, y between rows. Honoured by the renderer." },
+    description: "Gap between children: x between columns, y between rows. For a RadialList it is a single value: the per-item angular step in radians. Honoured by the renderer." },
   { name: "margins", label: "margins (x,y)", type: "vec2", appliesTo: LE, category: "Layout Engine", default: "0.00,0.00",
     description: "Inset of the content from the container's edges. Honoured by the renderer." },
   { name: "sizetocontent", label: "size to content", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
@@ -187,13 +192,166 @@ const SCHEMA_LIST: AttrSchema[] = [
   { name: "allow_overlap", label: "allow overlap", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
     description: "Let children overlap when they exceed max_length (game only; not used by the editor renderer)." },
   { name: "starting_angle", label: "starting angle", type: "number", appliesTo: LE, category: "Layout Engine",
-    description: "RadialList: angle (radians) of the first item (game only)." },
+    description: "RadialList: angle (radians) of the first item (0 = east/right). Honoured by the renderer." },
   { name: "arc", label: "arc", type: "number", appliesTo: LE, category: "Layout Engine",
-    description: "RadialList: total arc (radians); 0 = full circle (game only)." },
+    description: "RadialList: total arc (radians); 0 = full circle (not yet applied by the renderer; spacing drives placement)." },
   { name: "radius", label: "radius", type: "number", appliesTo: LE, category: "Layout Engine",
-    description: "RadialList: radius in pixels (game only)." },
+    description: "RadialList: radius in pixels from the container centre. Honoured by the renderer." },
   { name: "clockwise", label: "clockwise", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine", default: "true",
-    description: "RadialList: lay items out clockwise (game only)." },
+    description: "RadialList: lay items out clockwise. Honoured by the renderer." },
+  { name: "is_listview_lookup_enabled", label: "listview lookup", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Enable list-view lookup acceleration for the laid-out children (game only)." },
+  { name: "min_dimensions", label: "min dimensions (w,h)", type: "vec2", appliesTo: LE, category: "Layout Engine",
+    description: "Minimum size the container is allowed to shrink to under size-to-content (game only)." },
+  { name: "matchfontsizes", label: "match font sizes", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Normalise the font sizes of laid-out text children to match (game only)." },
+  { name: "allow_scale_items_down", label: "scale items down", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Allow children to be scaled down to fit when they overflow (game only)." },
+  { name: "autocalc_rows", label: "auto-calc rows", type: "text", appliesTo: LE, category: "Layout Engine",
+    description: "Automatically compute the number of rows from the item count (game only)." },
+  // LayoutEngine — WH3-shared engine attrs.
+  { name: "resize_children", label: "resize children", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Resize children to the container's cross-axis extent (game only)." },
+  { name: "even_distribution", label: "even distribution", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Distribute children evenly across the available length (game only)." },
+  { name: "central_alignment", label: "central alignment", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Centre the laid-out block within the container (game only)." },
+  { name: "is_using_variable_line_length", label: "variable line length", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Allow rows of differing length when wrapping (game only)." },
+  { name: "equal_spacing_size", label: "equal spacing size", type: "bool", enumValues: BOOL, appliesTo: LE, category: "Layout Engine",
+    description: "Force equal spacing slots regardless of child size (game only)." },
+
+  // --- Identity / GUID (shared across element kinds) ---------------------------------
+  { name: "this", label: "guid (this)", type: GUID_T, appliesTo: ["component", "state", "image", "component_image"], category: "Identity",
+    description: "This element's GUID. Editing it breaks any currentstate/defaultstate/componentimage references that point here — use the GUIDs section to regenerate safely." },
+  { name: "uniqueguid", label: "unique guid", type: GUID_T, appliesTo: ["component", "state", "image", "component_image"], category: "Identity",
+    description: "The element's unique GUID (mirrors `this`). Same editing caveat as `this`." },
+  { name: "uniqueguid_in_template", label: "template guid", type: GUID_T, appliesTo: C, category: "Identity",
+    description: "GUID this templated instance maps to inside its template file (WH3)." },
+  { name: "name", label: "name", type: "text", appliesTo: S, category: "Identity",
+    description: "The state's name (active, hover, selected, NewState, ...). Referenced by the preview-state selector." },
+
+  // --- Component additions ----------------------------------------------------------
+  { name: "tooltipslocalised", label: "tooltips localised", type: "bool", enumValues: BOOL, appliesTo: C, category: "Tooltip",
+    description: "Treat tooltip text as a localisation key rather than literal text." },
+  { name: "tooltips_localised", label: "tooltips localised", type: "bool", enumValues: BOOL, appliesTo: C, category: "Tooltip",
+    description: "Treat tooltip text as a localisation key (newer underscore spelling)." },
+  { name: "tooltiplabel", label: "tooltip label", type: "text", appliesTo: ["component", "state"], category: "Tooltip",
+    description: "Localisation key for the tooltip text." },
+  { name: "componentleveltooltip", label: "component tooltip", type: "text", appliesTo: C, category: "Tooltip",
+    description: "A component-level tooltip reference, e.g. {{tt:ui/common ui/tooltip_x}}." },
+  { name: "allowhorizontalresize", label: "allow h-resize", type: "bool", enumValues: BOOL, appliesTo: C, category: "Layout",
+    description: "Allow this component's width to be resized by the layout/engine." },
+  { name: "allowverticalresize", label: "allow v-resize", type: "bool", enumValues: BOOL, appliesTo: C, category: "Layout",
+    description: "Allow this component's height to be resized by the layout/engine." },
+  { name: "isaspectratiolocked", label: "aspect locked", type: "bool", enumValues: BOOL, appliesTo: ["component", "image"], category: "Layout",
+    description: "Lock the aspect ratio when the element is resized." },
+  { name: "isrelativeresize", label: "relative resize", type: "bool", enumValues: BOOL, appliesTo: ["component", "image"], category: "Layout",
+    description: "Resize relative to the parent rather than to an absolute size." },
+  { name: "aspect_ratio_locked_behaviour", label: "aspect behaviour", type: "text", appliesTo: ["component", "image"], category: "Layout",
+    description: "How aspect-ratio locking is applied when resizing (WH3)." },
+  { name: "is_visible", label: "is visible", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "true",
+    description: "Static visibility (newer flag; engine also honours the older `visible`)." },
+  { name: "soundcategory", label: "sound category", type: "text", appliesTo: ["component", "state"], category: "Behaviour",
+    description: "Interaction sound bank key (engine variant of `sound_category`, no underscore)." },
+  { name: "updatewhennotvisible", label: "update when hidden", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
+    description: "Keep updating this component's bindings even while it is not visible." },
+  { name: "clipimagestocomponent", label: "clip images", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
+    description: "Clip the component's images to its own rect." },
+  { name: "renderwhendragged", label: "render when dragged", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
+    description: "Keep rendering the component while it is being dragged." },
+  { name: "useglobalclicks", label: "use global clicks", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour", default: "false",
+    description: "Receive global click events even when not directly hit-tested." },
+  { name: "renderifroot", label: "render if root", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour",
+    description: "Render this component when it is the root of the layout." },
+  { name: "maskimage", label: "mask image", type: "text", appliesTo: C, category: "Style",
+    description: "GUID of a component image used as an alpha mask for this component." },
+  { name: "fontscale", label: "font scale", type: "number", appliesTo: C, category: "Text",
+    description: "Multiplier applied to this component's font sizes." },
+  { name: "layouttransition", label: "layout transition", type: "text", appliesTo: C, category: "Behaviour",
+    description: "Named layout transition to play (engine spelling without underscore)." },
+  { name: "layout_transition", label: "layout transition", type: "text", appliesTo: C, category: "Behaviour",
+    description: "Named layout transition to play (underscore spelling)." },
+  { name: "create_ingame", label: "create in-game", type: "bool", enumValues: BOOL, appliesTo: C, category: "Behaviour",
+    description: "Whether the component is created at runtime in-game (WH3)." },
+  { name: "text_label", label: "text label", type: "text", appliesTo: C, category: "Text",
+    description: "Component-level localisation key for text (WH3)." },
+  { name: "component_level_text", label: "component text", type: "text", appliesTo: C, category: "Text",
+    description: "Component-level static/override text (WH3)." },
+  { name: "text_clip_behaviour", label: "text clip", type: "text", appliesTo: ["component", "state"], category: "Text",
+    description: "How over-long text is clipped (WH3)." },
+  { name: "comment", label: "comment", type: "text", appliesTo: C, category: "Editor", priorityHint: "low",
+    description: "Author comment kept in the file; no runtime effect." },
+  { name: "locked", label: "locked", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
+    description: "Editor-only: locked against selection/editing in the original tool." },
+  { name: "marked_for_deletion", label: "marked for deletion", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
+    description: "Editor-only flag from the original tool; no runtime effect." },
+  { name: "renderlastonfocused", label: "render last on focus", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
+    description: "Render this component last (on top) when focused." },
+  { name: "is_dev_only", label: "dev only", type: "bool", enumValues: BOOL, appliesTo: C, category: "Editor", priorityHint: "low",
+    description: "Component exists only in dev builds." },
+
+  // --- State additions --------------------------------------------------------------
+  { name: "textlabel", label: "text label", type: "text", appliesTo: S, category: "Text",
+    description: "Localisation key for this state's text (used when textlocalised)." },
+  { name: "textlocalised", label: "text localised", type: "bool", enumValues: BOOL, appliesTo: S, category: "Text",
+    description: "Treat the text as a localisation key (textlabel) rather than literal." },
+  { name: "textxoffset", label: "text x-offset", type: "number", appliesTo: S, category: "Text",
+    description: "Horizontal pixel offset applied to the text within the rect." },
+  { name: "textyoffset", label: "text y-offset", type: "number", appliesTo: S, category: "Text",
+    description: "Vertical pixel offset applied to the text within the rect." },
+  { name: "font_m_leading", label: "font leading", type: "number", appliesTo: S, category: "Text",
+    description: "Line leading (line-height) for multi-line text." },
+  { name: "font_m_tracking", label: "font tracking", type: "number", appliesTo: S, category: "Text",
+    description: "Letter tracking (spacing between glyphs)." },
+  { name: "font_colour_override_preset_key", label: "font colour preset", type: "text", appliesTo: S, category: "Text",
+    description: "Named colour preset overriding the font colour (e.g. green, red)." },
+  { name: "shadervars", label: "shader vars", type: "text", appliesTo: S, category: "Style",
+    description: "Comma-separated parameters for the state's shader (e.g. 1.00,0.50,0.00,0.00)." },
+  { name: "textshadervars", label: "text shader vars", type: "text", appliesTo: S, category: "Style",
+    description: "Comma-separated parameters for the text shader." },
+  { name: "text_shader_name", label: "text shader", type: "enum", enumValues: SHADER_NAMES, appliesTo: S, category: "Style",
+    description: "Shader/material used to render this state's text." },
+  { name: "material_name", label: "material", type: "text", appliesTo: ["state", "image"], category: "Style",
+    description: "Named material override for rendering." },
+  { name: "tooltip", label: "tooltip", type: "text", appliesTo: S, category: "Tooltip",
+    description: "Literal tooltip text (or a key when tooltips are localised)." },
+  { name: "pixelcollision", label: "pixel collision", type: "bool", enumValues: BOOL, appliesTo: S, category: "Behaviour",
+    description: "Hit-test against opaque pixels rather than the bounding rect." },
+  { name: "focustype", label: "focus type", type: "text", appliesTo: S, category: "Behaviour",
+    description: "Keyboard/gamepad focus behaviour for this state." },
+  { name: "imagedock9patch", label: "9-patch dock", type: "text", appliesTo: S, category: "Image",
+    description: "9-patch docking configuration for the state's images." },
+  { name: "blockedanims", label: "blocked anims", type: "text", appliesTo: S, category: "Behaviour",
+    description: "Animations blocked while in this state." },
+  { name: "stateeditordisplaypos", label: "editor pos (x,y)", type: "vec2", appliesTo: S, category: "Editor", priorityHint: "low",
+    description: "Editor-only: where this state's node sits in the original state-graph editor. No runtime effect." },
+
+  // --- Image (imagemetrics <image>) additions ---------------------------------------
+  { name: "componentimage", label: "component image", type: GUID_T, appliesTo: I, category: "Image",
+    description: "GUID of the <component_image> this metric draws. Editing it relinks which texture is shown." },
+  { name: "margin", label: "margin (l,t,r,b)", type: "text", appliesTo: I, category: "Image",
+    description: "Per-edge margins (left,top,right,bottom) — four comma-separated values." },
+  { name: "ui_colour_preset_type_key", label: "colour preset", type: "text", appliesTo: I, category: "Style",
+    description: "Named colour preset applied to the image (e.g. green, red, orange)." },
+  { name: "shadertechnique_vars", label: "shader tech vars", type: "text", appliesTo: I, category: "Style",
+    description: "Comma-separated parameters for the image's shader technique." },
+  { name: "rotation_angle", label: "rotation angle", type: "number", appliesTo: I, category: "Image",
+    description: "Rotation of the image in degrees/radians about its pivot." },
+  { name: "rotation_axis", label: "rotation axis", type: "text", appliesTo: I, category: "Image",
+    description: "Axis the image rotates about." },
+  { name: "pivot_point", label: "pivot point", type: "text", appliesTo: I, category: "Image",
+    description: "Pivot used for rotation/scale." },
+  { name: "x_flipped", label: "flip X", type: "bool", enumValues: BOOL, appliesTo: I, category: "Image", default: "false",
+    description: "Mirror the image horizontally." },
+  { name: "y_flipped", label: "flip Y", type: "bool", enumValues: BOOL, appliesTo: I, category: "Image", default: "false",
+    description: "Mirror the image vertically." },
+
+  // --- Component image (<componentimages><component_image>) --------------------------
+  { name: "imagepath", label: "image path", type: "path", appliesTo: CI, category: "Image",
+    description: "Texture path (relative to the data root), e.g. ui/skins/default/foo.png." },
+  { name: "canuse1bitalpha", label: "1-bit alpha", type: "bool", enumValues: BOOL, appliesTo: CI, category: "Image", default: "false",
+    description: "Allow the texture to use 1-bit alpha (cheaper, no blending)." },
 ];
 
 const BY_NAME = new Map<string, AttrSchema[]>();

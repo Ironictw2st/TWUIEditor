@@ -25,10 +25,17 @@ rand = "0.8"
 percent-encoding = "2"
 
 # Portable self-replacing updater: fetch the latest GitHub release, download the portable
-# exe, and swap the running binary in place.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# exe, and swap the running binary in place. `multipart` is also used to upload bug-report
+# images to a Discord webhook (see bug_report.rs).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
 self-replace = "1"
 semver = "1"
+
+# Bug reporting: capture the app window (xcap), PNG-encode it (png, independent of the
+# optional `image`/`dds` feature), and decode inline base64 images for webhook upload.
+xcap = "0.0"
+png = "0.17"
+base64 = "0.22"
 
 # DDS decode support (ink/material textures are BCn/DX10 .dds).
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
