@@ -40,15 +40,6 @@ pub struct Document {
     pub root: Element,
 }
 
-impl Element {
-    pub fn attr(&self, key: &str) -> Option<&str> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
 #[cfg(test)]
 mod roundtrip_tests {
     use super::{parse, serialize};

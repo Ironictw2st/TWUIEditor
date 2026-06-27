@@ -9,7 +9,7 @@ pub enum ResolveError {
     NoDataRoot,
     Unsafe,
     NotFound,
-    Io(String),
+    /// A `.dds` decode failed; the message is logged once at the protocol handler.
     Decode(String),
 }
 

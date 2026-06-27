@@ -25,9 +25,12 @@ pub enum FieldType {
     F64,
     Boolean,
     ColourRGB,
-    /// Nested sub-table (RPFM `SequenceU16/U32`); carries a boxed definition. We
-    /// can't flatten these into rows, so decoding bails for such tables.
+    /// Nested sub-table (RPFM `SequenceU16/U32`); carries a boxed definition. The payload is
+    /// needed so serde consumes the RON, but we can't flatten these into rows, so decoding
+    /// bails for such tables and never reads it.
+    #[allow(dead_code)]
     SequenceU16(Box<Definition>),
+    #[allow(dead_code)]
     SequenceU32(Box<Definition>),
     #[serde(other)]
     Unknown,

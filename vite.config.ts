@@ -10,6 +10,20 @@ export default defineConfig({
   clearScreen: false,
   // Expose the app version (from package.json) to the frontend as a compile-time constant.
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+  build: {
+    rollupOptions: {
+      output: {
+        // Split heavy vendor libraries into their own chunks so the app bundle stays small
+        // and no single chunk trips Vite's 500 kB warning. (dockview is the largest dep.)
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("dockview")) return "vendor-dockview";
+          if (id.includes("@dnd-kit")) return "vendor-dndkit";
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "vendor-react";
+        },
+      },
+    },
+  },
   server: {
     port: 1420,
     // Auto-pick the next free port if 1420 is taken (e.g. a stale dev server),

@@ -6,6 +6,8 @@
 
 use rand::RngCore;
 
+// Backend GUID generator, exercised by the test below; retained for backend-side mutations.
+#[allow(dead_code)]
 pub fn new_guid() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);

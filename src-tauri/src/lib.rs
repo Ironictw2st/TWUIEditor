@@ -50,11 +50,18 @@ pub fn run() {
                     .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                     .body(Cow::Owned(bytes))
                     .unwrap(),
-                Err(_) => Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Cow::Owned(Vec::<u8>::new()))
-                    .unwrap(),
+                Err(e) => {
+                    // Missing/unsafe paths are silent (layouts reference many images that may
+                    // not exist), but a real decode failure is rare and worth surfacing.
+                    if let image::ResolveError::Decode(msg) = &e {
+                        eprintln!("twuiimg: decode failed for {rel}: {msg}");
+                    }
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .body(Cow::Owned(Vec::<u8>::new()))
+                        .unwrap()
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
