@@ -35,8 +35,10 @@ import {
 } from "../twui/template";
 import { LuaValue } from "../twui/lua";
 import {
+  asRecord,
   callbacks,
   decodeEntities,
+  evalCondition,
   evalExpr,
   evalImageSetter,
   evalTextLabel,
@@ -77,6 +79,16 @@ export interface DrawImage {
   /** Nine-patch slice margins (left, top, right, bottom) in source pixels — when set,
    *  the image draws as a 9-slice border (corners 1:1, edges/center stretched). */
   margin?: [number, number, number, number];
+  /** A textureless image (a component_image with no imagepath) — drawn as a solid `colour`
+   *  fill (white default), the way the game renders untextured quads like divider lines. */
+  fill?: boolean;
+  /** Draw scaled to FIT inside `box` preserving the image's natural aspect (contain), then
+   *  anchored within the leftover space by `hf`/`vf` — used for character portraits so they
+   *  aren't stretched to an oversized container. */
+  contain?: boolean;
+  /** A parent `maskimage` PNG path: this image is clipped/faded by the mask's alpha (drawn
+   *  stretched over `box`), reproducing the game's masked character portrait. */
+  maskPath?: string;
 }
 
 /** Anchor a single line of text within a rect, given edge insets + alignment. Baseline
@@ -425,7 +437,8 @@ function imagesForComp(
   rect: Rect,
   templates: Templates,
   tplCompMap: Map<string, RawElement>,
-  iconOverride?: string
+  iconOverride?: string,
+  slotOverrides?: Map<number, string>
 ): DrawImage[] {
   if (isTemplated(comp)) {
     // Own `template_id`, else (a part_of_template child) the ancestor template's
@@ -440,7 +453,33 @@ function imagesForComp(
     if (r) return layerImages(r.layers, rect);
     return [];
   }
-  return imagesFor(comp, state, rect, iconOverride);
+  return imagesFor(comp, state, rect, iconOverride, slotOverrides);
+}
+
+/** A ContextImageSetter's target component_image slot (its `image_index` child property,
+ *  default 0) — so multiple setters each override their own layer. */
+function imageSetterSlot(cb: RawElement): number {
+  const props = childByTag(cb, "child_m_user_properties");
+  if (props) {
+    for (const p of elementChildren(props)) {
+      if (getAttr(p, "name") === "image_index") {
+        const n = parseInt(getAttr(p, "value") ?? "", 10);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+  }
+  return 0;
+}
+
+/** The PNG path of a component's `maskimage` stencil (the imagepath of the component_image its
+ *  `maskimage` GUID references), or undefined. Used to alpha-clip the component's children. */
+function maskImagePath(comp: RawElement): string | undefined {
+  const g = getAttr(comp, "maskimage");
+  if (!g) return undefined;
+  for (const ci of componentImages(comp)) {
+    if (guidOf(ci) === g) return getAttr(ci, "imagepath") ?? undefined;
+  }
+  return undefined;
 }
 
 /** A callback element's raw children across both callback containers. */
@@ -512,13 +551,19 @@ function imagesFor(
   comp: RawElement,
   state: RawElement | undefined,
   rect: Rect,
-  iconOverride?: string
+  iconOverride?: string,
+  slotOverrides?: Map<number, string>
 ): DrawImage[] {
   if (!state) return [];
   const metrics = state.children.filter(
     (c): c is RawElement => c.kind === "element" && c.tag === "imagemetrics"
   )[0];
   if (!metrics) return [];
+
+  // A `maskimage` is a stencil for the component's children (its alpha clips the masked
+  // child, e.g. a character portrait), NOT a drawn layer. The game never paints it as
+  // content; without runtime masking we just skip it so it doesn't show as an opaque block.
+  const maskGuid = getAttr(comp, "maskimage");
 
   const pathByGuid = new Map<string, string>();
   const sizeByGuid = new Map<string, { w?: number; h?: number }>();
@@ -534,17 +579,44 @@ function imagesFor(
     sizeByGuid.set(g, { w: numOpt(ci, "width"), h: numOpt(ci, "height") });
   }
   if (iconOverride && slot0) pathByGuid.set(slot0, iconOverride);
+  // Higher-slot ContextImageSetter overrides (e.g. unit_card_1's alternative art at slot 2):
+  // map each slot index to its component_image guid and swap the path.
+  if (slotOverrides) {
+    const cis = componentImages(comp);
+    for (const [idx, path] of slotOverrides) {
+      const g = cis[idx] ? guidOf(cis[idx]) : undefined;
+      if (g) pathByGuid.set(g, path);
+    }
+  }
+
+  // A component_image with no imagepath is a solid colour quad in-game (divider lines etc.).
+  // Only fill for purely static components — never a ContextImageSetter override slot (whose
+  // textureless slot is filled at runtime; rendering it white here would flash a block).
+  const hasImageSetter = callbacks(comp).some((c) => c.id === "ContextImageSetter");
 
   const out: DrawImage[] = [];
   for (const img of elementChildren(metrics)) {
     if (img.tag !== "image") continue;
     const ciGuid = getAttr(img, "componentimage");
     if (!ciGuid) continue;
+    if (maskGuid && ciGuid === maskGuid) continue; // stencil layer, not drawn content
     const imagepath = pathByGuid.get(ciGuid);
-    if (!imagepath) continue;
     const ciSize = sizeByGuid.get(ciGuid) ?? {};
     const [hf, vf] = dockFrac(getAttr(img, "dockpoint"));
     const [ox, oy] = parseVec2(getAttr(img, "offset"), [0, 0]);
+    // Size precedence: image metric -> component_image -> natural (at draw).
+    const w = numOpt(img, "width") ?? ciSize.w;
+    const h = numOpt(img, "height") ?? ciSize.h;
+    if (!imagepath) {
+      if (hasImageSetter) continue;
+      // Only paint HAIRLINE textureless quads — divider lines (e.g. `line` 150x1, `l_line`
+      // 1x10). Large textureless images are backgrounds/placeholders the game composites
+      // differently (e.g. root's 1440x900 #F0F0F0 tint, the ink material) — never fill those.
+      const thin = w !== undefined && h !== undefined && Math.min(w, h) <= 4;
+      if (!thin) continue;
+      out.push({ imagepath: "", fill: true, colour: getAttr(img, "colour"), box: rect, hf, vf, ox, oy, w, h });
+      continue;
+    }
     out.push({
       imagepath,
       colour: getAttr(img, "colour"),
@@ -553,9 +625,8 @@ function imagesFor(
       vf,
       ox,
       oy,
-      // Size precedence: image metric -> component_image -> natural (at draw).
-      w: numOpt(img, "width") ?? ciSize.w,
-      h: numOpt(img, "height") ?? ciSize.h,
+      w,
+      h,
       margin: parseMargin(getAttr(img, "margin")),
     });
   }
@@ -577,7 +648,9 @@ export function computeLayout(
   componentDataPacks: Record<string, LuaValue> = {},
   measureText?: MeasureText,
   posts?: MinisterialPosition[],
-  renderResolution?: { w: number; h: number } | null
+  renderResolution?: { w: number; h: number } | null,
+  previewEmptyLists = false,
+  uiPrefs: Record<string, boolean> = {}
 ): LayoutResult {
   activeMeasureText = measureText;
   const items: RenderItem[] = [];
@@ -641,16 +714,24 @@ export function computeLayout(
     dataPack: dataPack ?? null,
     vars: { ...staticVars },
     shorthand: ccoShorthand ?? undefined,
+    previewEmptyLists,
+    uiPrefs,
   };
 
-  // Pick the rendered state: a Simulation forced state (click feedback) wins,
-  // else current/default/active.
+  // Pick the rendered state: a Simulation forced state (click feedback) wins, then the
+  // `ui_alternative_unit_cards` preference (the game flips unit-card components to their
+  // `alternative` state), else current/default/active.
+  const altCards = uiPrefs.ui_alternative_unit_cards === true;
   const stateFor = (comp: RawElement): RawElement | undefined => {
     const g = guidOf(comp);
     const forced = g ? sim?.state[g] : undefined;
     if (forced) {
       const s = componentStates(comp).find((st) => getAttr(st, "name") === forced);
       if (s) return s;
+    }
+    if (altCards) {
+      const alt = componentStates(comp).find((st) => getAttr(st, "name") === "alternative");
+      if (alt) return alt;
     }
     return activeState(comp);
   };
@@ -673,7 +754,8 @@ export function computeLayout(
     clip: Rect | null,
     scope: Scope,
     cmap: Map<string, RawElement>,
-    lDoc: TwuiDocument
+    lDoc: TwuiDocument,
+    parentMaskPath?: string
   ) => {
     // Data binding: ContextImageSetter / ContextTextLabel resolve the icon/text
     // from script/static context. They return null when unresolved, so static
@@ -681,11 +763,21 @@ export function computeLayout(
     // via `scope.entry`, page-level via `scope.vars`, e.g. `ToUpper(PlayersFaction.Name)`).
     const cbs = callbacks(comp);
 
-    // A resolved ContextImageSetter overrides the component's slot-0 image (the
-    // placeholder icon) at the placeholder's imagemetric geometry — NOT the whole
-    // rect. Unresolved → no override → the static placeholder shows.
+    // A resolved ContextImageSetter overrides a component_image at the slot named by its
+    // `image_index` (default 0), keeping the placeholder's imagemetric geometry — NOT the
+    // whole rect. Unresolved → no override → the static placeholder shows. A component can
+    // carry several (e.g. `unit_card_1`: slot 0 = Internal.unit_card, slot 2 = the
+    // alternative), each driving the image its active state draws.
+    const isCbsRaw = rawCallbacks(comp).filter((c) => getAttr(c, "callback_id") === "ContextImageSetter");
+    const slotOverrides = new Map<number, string>();
+    for (const cb of isCbsRaw) {
+      const fid = getAttr(cb, "context_function_id");
+      const funcId = fid !== undefined ? decodeEntities(fid) : undefined;
+      const path = funcId ? evalImageSetter(funcId, scope) ?? undefined : undefined;
+      if (path !== undefined) slotOverrides.set(imageSetterSlot(cb), path);
+    }
     const isCb = cbs.find((c) => c.id === "ContextImageSetter");
-    const iconOverride = isCb?.funcId ? evalImageSetter(isCb.funcId, scope) ?? undefined : undefined;
+    const iconOverride = slotOverrides.get(0);
 
     // Templated components historically draw a resolved ContextImageSetter as an extra
     // image on top (the fallback below). Only a parent-determined icon
@@ -693,8 +785,11 @@ export function computeLayout(
     // templated icon renders exactly as before, so unrelated templated panels are untouched.
     const parentDetermined = !!isCb?.funcId?.includes("ParentContext.ImagePath");
     const overrideForImages = isTemplated(comp) && !parentDetermined ? undefined : iconOverride;
+    // Non-templated components also honour overrides on higher slots (e.g. unit_card_1's
+    // alternative card at slot 2); templated layers stay slot-0 only (above).
+    const slotOverridesForImages = isTemplated(comp) ? undefined : slotOverrides;
 
-    const images = imagesForComp(comp, state, rect, templates, tplCompMap, overrideForImages);
+    const images = imagesForComp(comp, state, rect, templates, tplCompMap, overrideForImages, slotOverridesForImages);
     // Fallback: the override resolved but the component has no slot-0 imagemetric
     // to carry it (a placeholder-less dynamic icon) — draw it at the slot-0
     // component_image size, else the rect.
@@ -751,12 +846,15 @@ export function computeLayout(
       images.push({
         imagepath: portrait,
         box: parentRect,
+        // Contain-fit (aspect-correct) anchored bottom-left, so an oversized holder (e.g. the
+        // faction-leader mask) doesn't stretch the character across the panel. A parent
+        // `maskimage` then alpha-clips/fades it to the in-game portrait shape.
+        contain: true,
+        maskPath: parentMaskPath,
         hf: 0,
-        vf: 0,
+        vf: 1,
         ox: 0,
         oy: 0,
-        w: parentRect.w,
-        h: parentRect.h,
       });
 
     // Resolve inline {{CcoScriptObject/CcoScriptTableNode:…}} tokens embedded in
@@ -808,9 +906,10 @@ export function computeLayout(
     scope: Scope,
     cmap: Map<string, RawElement>,
     lDoc: TwuiDocument,
-    childDesign: { w: number; h: number }
+    childDesign: { w: number; h: number },
+    parentMaskPath?: string
   ): number => {
-    pushItem(child, comp, state, rect, parentRect, depth, clip, scope, cmap, lDoc);
+    pushItem(child, comp, state, rect, parentRect, depth, clip, scope, cmap, lDoc, parentMaskPath);
     const childClip =
       getAttr(comp, "clipchildren") === "true" ? intersectRect(clip, rect) : clip;
     // Pass the child's DESIGN size (not its possibly-grown rect) so a fixed-size panel's
@@ -851,14 +950,45 @@ export function computeLayout(
     if (depth > 6 || !scope || !cm) return undefined;
     const le = getLayoutEngine(comp);
     if (!le || getAttr(le, "sizetocontent") !== "true") return undefined;
-    if (callbacks(comp).some((c) => c.id === "List" || c.id === "ContextList")) return undefined;
+    const stForBox = activeState(comp);
+    const box = { x: 0, y: 0, w: num(stForBox, "width", 0), h: num(stForBox, "height", 0) };
+
+    // Dynamic single-template list (List/ContextList): measure by its RESOLVED rows — one
+    // instance per entry, laid out by the same engine — so a parent centres/sizes it by its
+    // true content (e.g. the 2-wide upgrade-icon grid), not its narrow state width. Empty →
+    // zero (it collapses; matches `collapsesEmpty`). Mirrors the render-time list branch.
+    const listCb = callbacks(comp).find((c) => c.id === "List" || c.id === "ContextList");
+    if (listCb) {
+      const lchildren = elementChildren(hierNode);
+      if (lchildren.length !== 1) return undefined;
+      const entries = listEntries(comp, scope);
+      if (!entries.length) return { w: 0, h: 0 };
+      const tmpl = lchildren[0];
+      const tcomp = cm.get(guidOf(tmpl) ?? "");
+      if (!tcomp) return undefined;
+      const tstate = activeState(tcomp);
+      const instances = entries.map((e) => ({
+        node: tmpl,
+        comp: tcomp,
+        state: tstate,
+        scope: propagate(tcomp, { ...scope, entry: e.value, entryKey: e.key, vars: { ...scope.vars } }),
+      }));
+      const placedList = layoutEngine(
+        le, instances, box, templates, false,
+        (n, c, s, m) => measureContent(n, c, s, m, depth + 1), cm
+      );
+      if (!placedList.length) return undefined;
+      return {
+        w: Math.max(...placedList.map((p) => p.rect.x + p.rect.w)),
+        h: Math.max(...placedList.map((p) => p.rect.y + p.rect.h)),
+      };
+    }
+
     const visible = buildVisible(hierNode, scope, cm);
     // A sizetocontent container with no visible children collapses to zero (it has no content),
     // so a parent's LayoutEngine reserves no slot for it — rather than falling back to its state
     // size, which would leave a phantom gap (e.g. an all-hidden dlc_buttons keeping its 490px).
     if (!visible.length) return { w: 0, h: 0 };
-    const st = activeState(comp);
-    const box = { x: 0, y: 0, w: num(st, "width", 0), h: num(st, "height", 0) };
     const anchored = getAttr(comp, "component_anchor_point") !== undefined;
     const placed = layoutEngine(
       le, visible, box, templates, !anchored,
@@ -886,6 +1016,9 @@ export function computeLayout(
     const comp = cmap.get(guidOf(hierNode) ?? "");
     const children = elementChildren(hierNode);
     const le = comp ? getLayoutEngine(comp) : undefined;
+    // This component's `maskimage` (if any) alpha-clips its children — passed to each emitted
+    // child so a masked child (e.g. the faction-leader portrait) composites through it.
+    const childMaskPath = comp ? maskImagePath(comp) : undefined;
 
     // A component with its own ContextInitScriptObject publishes its own data pack;
     // switch the subtree's `dataPack` to it (like ComponentCreator switches cmap/lDoc),
@@ -955,7 +1088,7 @@ export function computeLayout(
           // to its 1920×1080 canvas) is irrelevant once embedded.
           const { w, h } = sizeFor(wcomp, st, origin, templates);
           track(
-            emit(widget, wcomp, st, { x: origin.x, y: origin.y, w, h }, origin, depth, clip, wscope, subCmap, sub, { w, h })
+            emit(widget, wcomp, st, { x: origin.x, y: origin.y, w, h }, origin, depth, clip, wscope, subCmap, sub, { w, h }, childMaskPath)
           );
         }
         return finish();
@@ -973,22 +1106,31 @@ export function computeLayout(
       const tmpl = children[0];
       const tcomp = cmap.get(guidOf(tmpl) ?? "");
       const tstate = tcomp ? activeState(tcomp) : undefined;
-      if (tcomp && entries.length) {
-        const instances = entries.map((e) => ({
-          node: tmpl,
-          comp: tcomp,
-          state: tstate,
-          scope: propagate(tcomp, { ...scope, entry: e.value, entryKey: e.key, vars: { ...scope.vars } }),
-        }));
+      // Editor-preview skeleton: no pack connected, so show the template once (the game
+      // would repeat it per data row). Bound to a single instance; nested empty lists each
+      // add one too, yielding a representative skeleton rather than a phantom of real data.
+      const placeholder = !entries.length && scope.previewEmptyLists && scope.dataPack == null;
+      const instances =
+        tcomp && entries.length
+          ? entries.map((e) => ({
+              node: tmpl,
+              comp: tcomp,
+              state: tstate,
+              scope: propagate(tcomp, { ...scope, entry: e.value, entryKey: e.key, vars: { ...scope.vars } }),
+            }))
+          : tcomp && placeholder
+            ? [{ node: tmpl, comp: tcomp, state: tstate, scope: propagate(tcomp, { ...scope, vars: { ...scope.vars } }) }]
+            : [];
+      if (instances.length) {
         if (le) {
           for (const p of layoutEngine(le, instances, origin, templates)) {
-            track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }));
+            track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }, childMaskPath));
           }
         } else {
           let y = origin.y;
           for (const inst of instances) {
             const { w, h } = sizeFor(inst.comp, inst.state, origin, templates);
-            track(emit(inst.node, inst.comp, inst.state, { x: origin.x, y, w, h }, origin, depth, clip, inst.scope, cmap, lDoc, { w, h }));
+            track(emit(inst.node, inst.comp, inst.state, { x: origin.x, y, w, h }, origin, depth, clip, inst.scope, cmap, lDoc, { w, h }, childMaskPath));
             y += h;
           }
         }
@@ -1012,7 +1154,7 @@ export function computeLayout(
       let placed = layoutEngine(le, visible, origin, templates, !anchored && !hasHidden, containerContentSize, cmap);
       if (comp && anchored) placed = recenterSizeToContent(placed, le, comp, origin);
       for (const p of placed) {
-        track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }));
+        track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }, childMaskPath));
       }
       return finish();
     }
@@ -1025,7 +1167,7 @@ export function computeLayout(
       const designChild = sizeFor(cc, state, parentDesignRect, templates);
       const { w, h } = resolveSize(cc, designChild, origin, parentDesign);
       const rect = positionChildRes(origin, parentDesign, cc, w, h, designChild);
-      track(emit(node, cc, state, rect, origin, depth, clip, cs, cmap, lDoc, designChild));
+      track(emit(node, cc, state, rect, origin, depth, clip, cs, cmap, lDoc, designChild, childMaskPath));
     }
     return finish();
   };
@@ -1099,6 +1241,12 @@ interface Placed {
   scope?: Scope;
 }
 
+/** Trailing numeric index of a `tier_<n>` key (e.g. `tier_3` -> 3); non-matching -> 0. */
+function tierIndex(key: string): number {
+  const m = /(\d+)\s*$/.exec(key);
+  return m ? Number(m[1]) : 0;
+}
+
 /** A list/ContextList container's data entries (empty when it resolves no data). Shared by
  *  the render recursion and the layout-engine measurer so an empty list collapses identically.
  *   - CharacterList: the character assigned to the propagated post (`__postKey`/`__roleArt`).
@@ -1119,6 +1267,43 @@ export function listEntries(comp: RawElement, scope: Scope): { key: string; valu
   if (isScriptValueList(listCb.funcId)) {
     return scriptNodes(scope.dataPack).map((value, i) => ({ key: String(i), value }));
   }
+  const fn = listCb.funcId ? decodeEntities(listCb.funcId) : "";
+
+  // Pooled-resource tier list (`...PooledResourceFactionSpecificContext.RangedTierList...`):
+  // the game derives the tier count from a runtime DB context we don't model, but the panel's
+  // ContextInitScriptObject publishes the tiers as `tier_0..tier_N` in this subtree's dataPack.
+  // Mirror them as the list rows (each value is the tier node). Honors `.Reverse` / `.Skip(n)`.
+  if (/\bRangedTierList\b/.test(fn)) {
+    const all = toEntries(scope.dataPack);
+    const tierRows = all.filter((e) => /^tier_/i.test(e.key));
+    // Sort tier_* by trailing numeric index so order is deterministic (tier_0..tier_N),
+    // independent of the data pack's key order — then `.Reverse` reliably gives tier_N..tier_0.
+    let rows = tierRows.length
+      ? tierRows.slice().sort((a, b) => tierIndex(a.key) - tierIndex(b.key))
+      : all;
+    if (/\.Reverse\b/.test(fn)) rows = rows.slice().reverse();
+    const skip = /\.Skip\(\s*(\d+)\s*\)/.exec(fn);
+    if (skip) rows = rows.slice(Number(skip[1]));
+    return rows;
+  }
+
+  // A tier node's item list (`...Internal.item_list[.Filter(pred)]`, object CcoRTTierNode),
+  // bound to the current tier row in scope. The optional Filter reuses the CCO condition
+  // evaluator (e.g. `is_elite == false`), evaluated with each item as the row.
+  if (/\bitem_list\b/.test(fn) && !/TableValue/.test(fn)) {
+    const itemList = asRecord(scope.entry)?.item_list;
+    if (itemList !== undefined) {
+      let rows = toEntries(itemList);
+      const filt = /\.Filter\(([\s\S]*?)\)\s*$/.exec(fn);
+      if (filt) {
+        rows = rows.filter(
+          (e) => evalCondition(filt[1], { ...scope, entry: e.value, thisEntry: e.value, entryKey: e.key }) === true
+        );
+      }
+      return rows;
+    }
+  }
+
   const key = listSource(comp);
   const table =
     key && scope.dataPack && typeof scope.dataPack === "object" && !Array.isArray(scope.dataPack)
@@ -1135,7 +1320,11 @@ export function collapsesEmpty(comp: RawElement | undefined, scope: Scope | unde
   const le = getLayoutEngine(comp);
   if (!le || getAttr(le, "sizetocontent") !== "true") return false;
   if (!callbacks(comp).some((c) => c.id === "List" || c.id === "ContextList")) return false;
-  return listEntries(comp, scope).length === 0;
+  if (listEntries(comp, scope).length > 0) return false;
+  // Empty, but in editor-preview (no pack) we render one placeholder instance, so the list
+  // occupies its template's space rather than collapsing — keep the parent's slot for it.
+  if (scope.previewEmptyLists && scope.dataPack == null) return false;
+  return true;
 }
 
 /** Re-centre a `sizetocontent` container's laid-out content within its (state-sized) rect using
@@ -1305,6 +1494,12 @@ export function layoutEngine(
     const useOffset =
       honorOffsets &&
       horizontal &&
+      // The offset only matters as an absolute position when siblings would otherwise
+      // collide/scatter (e.g. a `faction_heir` overlapping the leader). A LONE child has
+      // no sibling to disambiguate against, so its design-time offset is just editor
+      // scatter the engine reproduces by stacking at the origin (e.g. `normal_list`'s
+      // `offset="75,0"` inside `upgrades`) — honouring it would shift it wrongly.
+      children.length > 1 &&
       offsetAttr !== undefined &&
       !(sizeToContent && state && getAttr(state, "texthbehaviour") === "Resize");
 

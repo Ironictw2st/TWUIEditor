@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../state/store";
+import type { PerDocSlice } from "../state/store";
 import ToolPalette from "./ToolPalette";
 import { computeLayout, imageDrawRect, LayoutResult, nineSliceRegions, Rect, Scrollable, Sim, textAnchor } from "../layout/compute";
 import { parseColour } from "../twui/colour";
 import { fontSpec } from "../twui/fonts";
-import { LuaValue } from "../twui/lua";
+import { extractDataPack, LuaValue } from "../twui/lua";
 import { useLayoutInputs } from "../state/useLayoutInputs";
-import { componentMap, guidOf } from "../twui/doc";
+import { componentMap, getAttr, guidOf } from "../twui/doc";
+import { useContextMenu } from "../components/ContextMenu";
+import { buildComponentMenu } from "./componentMenu";
 import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
@@ -14,6 +17,15 @@ import { imageUrl } from "../ipc/commands";
 import { setCaptureFn } from "./visualizerCapture";
 
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
+const EMPTY_LAYOUT: LayoutResult = { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] };
+
+/** One composited layer: a file's computed layout plus whether it's the active (editable) one.
+ *  Stacked bottom-to-top in `tabs` order. */
+interface RenderLayer {
+  id: string;
+  active: boolean;
+  layout: LayoutResult;
+}
 
 // Images the game replaces at runtime (faction flags, dynamic icons, unit cards)
 // plus runtime portrait/character-render textures (masks, empty faces, body
@@ -24,6 +36,9 @@ function isFaint(path: string): boolean {
 
 // Reused offscreen canvas for tinted blits (no per-image allocation).
 let tintCanvas: HTMLCanvasElement | null = null;
+
+// Reused offscreen canvas for maskimage alpha compositing (character portraits).
+let maskCanvas: HTMLCanvasElement | null = null;
 
 // Reused offscreen 2d context for real text measurement (canvas metrics).
 let measureCtx: CanvasRenderingContext2D | null = null;
@@ -84,29 +99,33 @@ function drawImageTinted(
 function drawScene(
   ctx: CanvasRenderingContext2D,
   layout: LayoutResult,
-  opts: { getImage: (path: string) => HTMLImageElement | null; background: string | null; zoom: number }
+  opts: { getImage: (path: string) => HTMLImageElement | null; background: string | null; zoom: number; surface?: boolean }
 ): void {
-  const { getImage, background, zoom } = opts;
+  const { getImage, background, zoom, surface = true } = opts;
 
   // Canvas background (the design surface). `@white`/`@black` are solid-colour choices; any
-  // other non-empty value is a background image path (the campaign map) behind the HUD.
+  // other non-empty value is a background image path (the campaign map) behind the HUD. Drawn
+  // only for the bottom layer when compositing (`surface: false` skips it so overlays don't
+  // repaint the background over the layers beneath them).
   const cv = layout.canvas;
-  const solidBg = background === "@white" ? "#ffffff" : background === "@black" ? "#000000" : null;
-  ctx.fillStyle = solidBg ?? "#0c0d12";
-  ctx.fillRect(cv.x, cv.y, cv.w, cv.h);
-  if (background && !solidBg) {
-    const bg = getImage(background);
-    if (bg && bg.complete && bg.naturalWidth > 0) {
-      try {
-        ctx.drawImage(bg, cv.x, cv.y, cv.w, cv.h);
-      } catch {
-        /* ignore */
+  if (surface) {
+    const solidBg = background === "@white" ? "#ffffff" : background === "@black" ? "#000000" : null;
+    ctx.fillStyle = solidBg ?? "#0c0d12";
+    ctx.fillRect(cv.x, cv.y, cv.w, cv.h);
+    if (background && !solidBg) {
+      const bg = getImage(background);
+      if (bg && bg.complete && bg.naturalWidth > 0) {
+        try {
+          ctx.drawImage(bg, cv.x, cv.y, cv.w, cv.h);
+        } catch {
+          /* ignore */
+        }
       }
     }
+    ctx.strokeStyle = "#2a2d3a";
+    ctx.lineWidth = 1 / zoom;
+    ctx.strokeRect(cv.x, cv.y, cv.w, cv.h);
   }
-  ctx.strokeStyle = "#2a2d3a";
-  ctx.lineWidth = 1 / zoom;
-  ctx.strokeRect(cv.x, cv.y, cv.w, cv.h);
 
   // Draw items in DFS order (parents behind children).
   for (const item of layout.items) {
@@ -119,10 +138,52 @@ function drawScene(
       ctx.clip();
     }
     for (const di of item.images) {
+      if (di.fill) {
+        // Textureless component_image → solid colour quad (divider lines etc.). White default.
+        const r = imageDrawRect(di, 0, 0);
+        const { rgb, alpha } = parseColour(di.colour);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = rgb ?? "#ffffff";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.globalAlpha = 1;
+        continue;
+      }
       const img = getImage(di.imagepath);
       if (img && img.complete && img.naturalWidth > 0) {
-        // Size to the image's natural pixels when no explicit size was given.
-        const r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
+        // `contain`: scale to fit the box preserving aspect, then anchor by hf/vf (e.g. a
+        // bottom-left character portrait). Otherwise size to natural pixels (or explicit w/h).
+        let r;
+        if (di.contain) {
+          const s = Math.min(di.box.w / img.naturalWidth, di.box.h / img.naturalHeight);
+          const cw = img.naturalWidth * s;
+          const ch = img.naturalHeight * s;
+          r = { x: di.box.x + di.hf * (di.box.w - cw) + di.ox, y: di.box.y + di.vf * (di.box.h - ch) + di.oy, w: cw, h: ch };
+        } else {
+          r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
+        }
+        // A parent `maskimage`: composite the (contain-fit) portrait through the mask PNG's
+        // alpha via an offscreen canvas, reproducing the game's masked character portrait.
+        if (di.maskPath) {
+          const mask = getImage(di.maskPath);
+          if (mask && mask.complete && mask.naturalWidth > 0) {
+            const bw = Math.max(1, Math.round(di.box.w));
+            const bh = Math.max(1, Math.round(di.box.h));
+            if (!maskCanvas) maskCanvas = document.createElement("canvas");
+            maskCanvas.width = bw;
+            maskCanvas.height = bh;
+            const mctx = maskCanvas.getContext("2d");
+            if (mctx) {
+              mctx.clearRect(0, 0, bw, bh);
+              mctx.drawImage(img, r.x - di.box.x, r.y - di.box.y, r.w, r.h);
+              mctx.globalCompositeOperation = "destination-in";
+              mctx.drawImage(mask, 0, 0, bw, bh);
+              mctx.globalCompositeOperation = "source-over";
+              ctx.drawImage(maskCanvas, di.box.x, di.box.y);
+              continue;
+            }
+          }
+          // mask not loaded yet → fall through and draw the portrait unmasked this frame
+        }
         // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
         // Runtime-swapped placeholders are drawn faint so they don't dominate.
         const { rgb, alpha } = parseColour(di.colour);
@@ -189,6 +250,13 @@ export default function VisualizerPanel() {
   const revealed = useStore((s) => s.revealed);
   const background = useStore((s) => s.background);
   const ccoShorthand = useStore((s) => s.ccoShorthand);
+  // Layer compositing: every open tab is a layer candidate. The active file's state is the
+  // top-level fields; the other (opt-in) layers read their parked slice from `inactiveDocs`.
+  const tabs = useStore((s) => s.tabs);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const inactiveDocs = useStore((s) => s.inactiveDocs);
+  const switchTab = useStore((s) => s.switchTab);
+  const menu = useContextMenu();
 
   const keybinds = useStore((s) => s.settings.keybinds);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -205,6 +273,8 @@ export default function VisualizerPanel() {
   const updateSettings = useStore((s) => s.updateSettings);
   const paletteHidden = viz.palette.hidden;
   const renderResolution = useStore((s) => s.renderResolution);
+  const previewEmptyLists = useStore((s) => s.previewEmptyLists);
+  const uiPrefs = useStore((s) => s.uiPrefs);
   // Tooltip mode interacts like Simulation (scroll/click-sim, no selection).
   const simLike = mode === "sim" || mode === "tooltip";
   const [sim, setSim] = useState<Sim>(EMPTY_SIM);
@@ -237,30 +307,79 @@ export default function VisualizerPanel() {
     }),
     [sim, previewState, revealed]
   );
-  const layout: LayoutResult = useMemo(
-    () =>
-      doc
+  // Cache reference-layer layouts by their (stable, never-mutated-while-inactive) doc identity so
+  // editing the active doc doesn't recompute every overlay. Invalidated wholesale when any shared
+  // layout input changes.
+  const refLayoutCache = useRef<Map<NonNullable<PerDocSlice["doc"]>, LayoutResult>>(new Map());
+  const refSharedRef = useRef<unknown[]>([]);
+
+  // Compute a layout for each visible layer (active + opt-in overlays), stacked bottom-to-top in
+  // `tabs` order. The active layer uses the live top-level state; reference layers use their
+  // parked slice and render in their default (un-simulated) state.
+  const renderLayers: RenderLayer[] = useMemo(
+    () => {
+      // Shared inputs every reference layer depends on (its own tree and the active doc's live
+      // simulation are excluded — overlays ignore the latter). A change clears the cache.
+      const sharedNow = [context, tokens, loc, staticVars, ccoShorthand, contextDb, renderResolution, previewEmptyLists, simLike, uiPrefs, fontsReady];
+      if (sharedNow.length !== refSharedRef.current.length || sharedNow.some((v, i) => v !== refSharedRef.current[i])) {
+        refLayoutCache.current.clear();
+        refSharedRef.current = sharedNow;
+      }
+
+      const activeLayout: LayoutResult = doc
         ? computeLayout(
-            doc,
-            context,
-            tokens,
-            templates,
-            loc,
-            dataPack,
-            effectiveSim,
-            staticVars,
-            mode === "tooltip",
-            createdLayouts,
-            ccoShorthand,
-            componentDataPacks as Record<string, LuaValue>,
-            measureText,
-            contextDb?.ministerial_positions,
-            renderResolution
+            doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars,
+            mode === "tooltip", createdLayouts, ccoShorthand, componentDataPacks as Record<string, LuaValue>,
+            measureText, contextDb?.ministerial_positions, renderResolution,
+            // Skeleton placeholders are an editor aid — never in Simulation/Tooltip, which
+            // faithfully mirror the game (an unbound list there shows nothing).
+            previewEmptyLists && !simLike, uiPrefs
           )
-        : { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] },
-    // `fontsReady` is a dep so layout re-measures once the bundled fonts load.
+        : EMPTY_LAYOUT;
+
+      const refLayout = (slice: PerDocSlice): LayoutResult => {
+        if (!slice.doc) return EMPTY_LAYOUT;
+        const hit = refLayoutCache.current.get(slice.doc);
+        if (hit) return hit;
+        // Same data-pack rule as useLayoutInputs, but driven by the parked slice.
+        const dp =
+          (slice.dataPackOverride as LuaValue | null) ??
+          (slice.scriptConn.text && slice.scriptConn.id ? extractDataPack(slice.scriptConn.text, slice.scriptConn.id) : null);
+        const l = computeLayout(
+          slice.doc, context, tokens, slice.templates, loc, dp, EMPTY_SIM, staticVars,
+          false, slice.createdLayouts, ccoShorthand, slice.componentDataPacks as Record<string, LuaValue>,
+          measureText, contextDb?.ministerial_positions, renderResolution,
+          previewEmptyLists && !simLike, uiPrefs
+        );
+        refLayoutCache.current.set(slice.doc, l);
+        return l;
+      };
+
+      const layers: RenderLayer[] = [];
+      for (const t of tabs) {
+        const active = t.id === activeTabId;
+        if (!active && !t.visible) continue;
+        if (active) {
+          layers.push({ id: t.id, active: true, layout: activeLayout });
+        } else {
+          const slice = inactiveDocs[t.id];
+          if (slice) layers.push({ id: t.id, active: false, layout: refLayout(slice) });
+        }
+      }
+      // Nothing open (fresh launch) — still draw the empty active surface.
+      if (layers.length === 0) layers.push({ id: activeTabId ?? "", active: true, layout: activeLayout });
+      return layers;
+    },
+    // `fontsReady` is a dep so layouts re-measure once the bundled fonts load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [doc, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb, renderResolution]
+    [doc, tabs, activeTabId, inactiveDocs, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb, renderResolution, previewEmptyLists, simLike, uiPrefs]
+  );
+
+  // The active layer's layout drives all existing interaction (hit-test, move, scrollbars,
+  // overlays, capture) — unchanged from the single-document path.
+  const layout: LayoutResult = useMemo(
+    () => renderLayers.find((l) => l.active)?.layout ?? EMPTY_LAYOUT,
+    [renderLayers]
   );
 
   const getImage = useCallback((path: string): HTMLImageElement | null => {
@@ -309,8 +428,11 @@ export default function VisualizerPanel() {
     ctx.save();
     ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * panX, dpr * panY);
 
-    // Paint the design surface + all items (shared with the offscreen capture).
-    drawScene(ctx, layout, { getImage, background, zoom });
+    // Composite each visible layer bottom-to-top. The bottom layer paints the design surface;
+    // the rest draw items only, so they stack like image layers (top tab = top layer).
+    renderLayers.forEach((l, i) => {
+      drawScene(ctx, l.layout, { getImage, background, zoom, surface: i === 0 });
+    });
 
     // Structure outlines are opt-in (the "Bounds" toggle) so the preview stays clean.
     if (showBounds) {
@@ -351,7 +473,7 @@ export default function VisualizerPanel() {
     }
 
     ctx.restore();
-  }, [doc, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode]);
+  }, [doc, renderLayers, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode]);
 
   // Expose a clean, native-resolution PNG of the current layout for the bug-report menu.
   // Renders the shared scene (no pan/zoom/overlays) into an offscreen canvas sized to the
@@ -415,6 +537,34 @@ export default function VisualizerPanel() {
         best = it.guid;
         bestArea = area;
         bestDepth = it.depth;
+      }
+    }
+    return best;
+  };
+
+  // Same most-specific pick as `hitTest`, but across every visible layer — for click-through
+  // selection. Ties prefer the higher layer (later in the composite), then deeper nesting.
+  const hitTestAll = (wx: number, wy: number): { layerId: string; guid: string } | null => {
+    let best: { layerId: string; guid: string } | null = null;
+    let bestArea = Infinity;
+    let bestLayer = -1;
+    let bestDepth = -1;
+    for (let li = 0; li < renderLayers.length; li++) {
+      const L = renderLayers[li];
+      for (const it of L.layout.items) {
+        const r = it.rect;
+        if (r.w <= 0 || r.h <= 0) continue;
+        if (wx < r.x || wx > r.x + r.w || wy < r.y || wy > r.y + r.h) continue;
+        const area = r.w * r.h;
+        if (
+          area < bestArea ||
+          (area === bestArea && (li > bestLayer || (li === bestLayer && it.depth >= bestDepth)))
+        ) {
+          best = { layerId: L.id, guid: it.guid };
+          bestArea = area;
+          bestLayer = li;
+          bestDepth = it.depth;
+        }
       }
     }
     return best;
@@ -578,12 +728,36 @@ export default function VisualizerPanel() {
         const pRect = guid ? layout.items.find((i) => i.guid === guid)?.rect ?? layout.canvas : layout.canvas;
         createAt(guid, w.x - pRect.x, w.y - pRect.y);
       } else if (mode === "view" || mode === "align") {
-        // Shift+Click (configurable modifier) adds/removes from the multi-selection; a plain
-        // click selects just that component.
-        if (guid && mouseModifierHeld(e, multiSelectBinding(keybinds))) toggleSelect(guid);
-        else select(guid);
+        // Click-through: pick the most-specific component across every visible layer. If it
+        // belongs to a reference layer, make that file active first, then select it (a fresh
+        // single selection — multi-select doesn't carry across documents).
+        const hit = hitTestAll(w.x, w.y);
+        if (hit && hit.layerId !== activeTabId) {
+          switchTab(hit.layerId);
+          select(hit.guid);
+        } else if (hit && mouseModifierHeld(e, multiSelectBinding(keybinds))) {
+          // Shift+Click (configurable modifier) adds/removes from the multi-selection.
+          toggleSelect(hit.guid);
+        } else {
+          select(hit?.guid ?? null);
+        }
       }
     }
+  };
+
+  // Right-click a component on the canvas: pick it across all visible layers, make its file
+  // active + selected, then open the shared component menu (same as the Hierarchy).
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const w = toWorld(e.clientX, e.clientY);
+    const hit = hitTestAll(w.x, w.y);
+    if (!hit) return; // empty canvas — suppress the native menu, show nothing
+    if (hit.layerId !== activeTabId) switchTab(hit.layerId);
+    select(hit.guid);
+    const st = useStore.getState();
+    const comp = st.doc ? componentMap(st.doc).get(hit.guid) : undefined;
+    const hidden = !!comp && (getAttr(comp, "visible") === "false" || getAttr(comp, "is_visible") === "false");
+    menu.open(e, buildComponentMenu(hit.guid, { hidden }));
   };
 
   const fit = useCallback(() => {
@@ -665,6 +839,7 @@ export default function VisualizerPanel() {
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
+          onContextMenu={onContextMenu}
           onMouseLeave={() => {
             drag.current = null;
             setHover(null);
@@ -687,6 +862,7 @@ export default function VisualizerPanel() {
             );
           })()}
       </div>
+      {menu.element}
     </div>
   );
 }

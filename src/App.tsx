@@ -14,6 +14,7 @@ import DockLayout, { dockShowPanel, dockHidePanel } from "./panels/DockLayout";
 import ToolsPanel from "./panels/ToolsPanel";
 import SettingsPanel from "./panels/SettingsPanel";
 import PackFilesPanel from "./panels/PackFilesPanel";
+import LayersPanel from "./panels/LayersPanel";
 import LoadingScreen from "./panels/LoadingScreen";
 import UnsavedChangesDialog from "./panels/UnsavedChangesDialog";
 import SearchPalette from "./panels/SearchPalette";
@@ -29,6 +30,7 @@ const PANEL_TITLES: Record<PanelId, string> = {
   visualizer: "Visualizer",
   perspective: "Perspective",
   packfiles: "Pack Files",
+  layers: "Layers",
 };
 
 /** App mark (rider on horseback raising a scroll) shown top-left in place of a text title. */
@@ -202,6 +204,7 @@ function PanelWindow({ panel }: { panel: PanelId }) {
   if (panel === "inspector") return <div className="h-full flex flex-col bg-panel">{<InspectorPanel />}</div>;
   if (panel === "perspective") return <div className="h-full overflow-auto bg-panel">{<PerspectivePanel />}</div>;
   if (panel === "packfiles") return <div className="h-full flex flex-col bg-panel">{<PackFilesPanel />}</div>;
+  if (panel === "layers") return <div className="h-full overflow-auto bg-panel">{<LayersPanel />}</div>;
   return <div className="h-full bg-canvas">{<VisualizerPanel />}</div>;
 }
 
@@ -232,8 +235,8 @@ export default function App() {
     void getCurrentWindow()
       .onCloseRequested((event) => {
         const s = useStore.getState();
-        if (s.dirty && s.doc) {
-          // Hold the close on every attempt while dirty; raise the prompt once.
+        if (s.tabs.some((t) => t.dirty)) {
+          // Hold the close on every attempt while any open file is dirty; raise the prompt once.
           event.preventDefault();
           if (!s.pendingClose) useStore.setState({ pendingClose: true });
         }

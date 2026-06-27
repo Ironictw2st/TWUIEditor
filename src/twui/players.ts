@@ -3,8 +3,8 @@
 // portraits render. General: driven by the perspective faction + the user's
 // role->template assignments (see CharactersPanel), not any one panel.
 
-import { CharacterDb, CharacterTemplate, ContextDb, FactionContext, TwuiDocument } from "../types/twui";
-import { componentsSection, elementChildren, getAttr } from "./doc";
+import { CharacterDb, CharacterTemplate, ContextDb, FactionContext, RawElement, TwuiDocument } from "../types/twui";
+import { componentMap, componentsSection, elementChildren, getAttr, guidOf, hierarchyRoot } from "./doc";
 import { callbacks } from "./cco";
 import { LuaValue } from "./lua";
 
@@ -90,6 +90,32 @@ export function referencedCharacterRoles(doc: TwuiDocument): string[] {
         while ((m = re.exec(cb.funcId)) !== null) roles.add(m[1]);
       }
     }
+  }
+
+  // Faction-character portraits via a propagated context: a Character2DDisplayCreator gets its
+  // character from the nearest ancestor that propagates `PlayersFaction.<Role>Context` (e.g. the
+  // leader's mask propagates `FactionLeaderContext`; the child holds the creator). Walk the
+  // hierarchy so that role becomes assignable. Exclude `*RecordContext` (faction/culture, not a
+  // character) — only contexts feeding a creator are surfaced.
+  const root = hierarchyRoot(doc);
+  if (root) {
+    const cmap = componentMap(doc);
+    const walk = (node: RawElement, inherited: string | undefined) => {
+      for (const child of elementChildren(node)) {
+        const comp = cmap.get(guidOf(child) ?? "");
+        let role = inherited;
+        if (comp) {
+          for (const cb of callbacks(comp)) {
+            if (cb.id !== "ContextPropagator" || !cb.funcId) continue;
+            const m = /^PlayersFaction\.(\w+Context)$/.exec(cb.funcId);
+            if (m && !/RecordContext$/.test(m[1])) role = m[1];
+          }
+          if (role && callbacks(comp).some((c) => c.id === "Character2DDisplayCreator")) roles.add(role);
+        }
+        walk(child, role);
+      }
+    };
+    walk(root, undefined);
   }
   return [...roles];
 }

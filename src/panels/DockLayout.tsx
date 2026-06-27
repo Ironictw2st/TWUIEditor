@@ -15,6 +15,7 @@ import InspectorPanel from "./InspectorPanel";
 import VisualizerPanel from "./VisualizerPanel";
 import PerspectivePanel from "./PerspectivePanel";
 import PackFilesPanel from "./PackFilesPanel";
+import LayersPanel from "./LayersPanel";
 
 const TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -22,6 +23,7 @@ const TITLES: Record<PanelId, string> = {
   visualizer: "Visualizer",
   perspective: "Perspective",
   packfiles: "Pack Files",
+  layers: "Layers",
 };
 
 // --- panel content (the dockview panel body) -----------------------------------------------------
@@ -30,6 +32,7 @@ const InspectorView = (_p: IDockviewPanelProps) => <div className="h-full flex f
 const VisualizerView = (_p: IDockviewPanelProps) => <div className="h-full bg-canvas"><VisualizerPanel /></div>;
 const PerspectiveView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><PerspectivePanel /></div>;
 const PackFilesView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><PackFilesPanel /></div>;
+const LayersView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><LayersPanel /></div>;
 
 const components = {
   hierarchy: HierarchyView,
@@ -37,6 +40,7 @@ const components = {
   visualizer: VisualizerView,
   perspective: PerspectiveView,
   packfiles: PackFilesView,
+  layers: LayersView,
 };
 
 // --- pop-out tab ---------------------------------------------------------------------------------
@@ -117,8 +121,11 @@ export default function DockLayout() {
     if (!restored && api.panels.length === 0) {
       addPanelToDock(api, "visualizer");
       addPanelToDock(api, "hierarchy", { referencePanel: "visualizer", direction: "left" });
+      addPanelToDock(api, "layers", { referencePanel: "hierarchy", direction: "within" });
       addPanelToDock(api, "inspector", { referencePanel: "visualizer", direction: "right" });
       addPanelToDock(api, "perspective", { referencePanel: "visualizer", direction: "below" });
+      // Hierarchy shares a tab group with Layers; keep Hierarchy the active tab on first launch.
+      api.getPanel("hierarchy")?.api.setActive();
     }
     // Honour session pop-out state: a popped panel should not be in the dock.
     for (const id of PANEL_IDS) if (popped[id]) api.getPanel(id)?.api.close();

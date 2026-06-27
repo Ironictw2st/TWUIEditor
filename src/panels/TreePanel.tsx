@@ -13,6 +13,9 @@ import { hiddenGuids } from "../twui/visibility";
 import { useLayoutInputs } from "../state/useLayoutInputs";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { RawElement } from "../types/twui";
+import FileTabs from "./FileTabs";
+import { useContextMenu } from "../components/ContextMenu";
+import { buildComponentMenu } from "./componentMenu";
 
 function isHidden(comp: RawElement | undefined): boolean {
   return (
@@ -37,6 +40,7 @@ function Row({
   hidden,
   draggingGuid,
   setDraggingGuid,
+  openContext,
 }: {
   node: RawElement;
   parentGuid: string | null;
@@ -51,6 +55,7 @@ function Row({
   hidden: Set<string>;
   draggingGuid: string | null;
   setDraggingGuid: (g: string | null) => void;
+  openContext: (e: React.MouseEvent, guid: string, hidden: boolean) => void;
 }) {
   const guid = guidOf(node) ?? "";
   const kids = elementChildren(node);
@@ -137,6 +142,7 @@ function Row({
           if (mouseModifierHeld(e, multiSelectBinding(keybinds))) toggleSelect(guid);
           else select(guid);
         }}
+        onContextMenu={(e) => openContext(e, guid, ownHidden)}
       >
         {dropHint === "before" && (
           <div className="absolute -top-px left-0 right-0 h-0.5 bg-accent z-10" />
@@ -203,6 +209,7 @@ function Row({
             hidden={hidden}
             draggingGuid={draggingGuid}
             setDraggingGuid={setDraggingGuid}
+            openContext={openContext}
           />
         ))}
     </div>
@@ -285,8 +292,30 @@ export default function TreePanel() {
 
   const btn = "px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px] disabled:opacity-40";
 
+  // Right-click a component: select it first (unless it's already part of a multi-selection) so
+  // the menu's selection-based actions target it, then open the shared component menu.
+  const menu = useContextMenu();
+  const openContext = (e: React.MouseEvent, guid: string, hidden: boolean) => {
+    const s = useStore.getState();
+    if (!s.selectedGuids.includes(guid)) s.select(guid);
+    menu.open(e, buildComponentMenu(guid, { hidden }));
+  };
+
+  // Right-click empty tree space: document-level actions (paste needs a doc + a clipboard).
+  const openBgContext = (e: React.MouseEvent) => {
+    const s = useStore.getState();
+    menu.open(e, [
+      { label: "Paste", disabled: !s.doc || s.clipboard == null, onSelect: () => s.paste() },
+      { label: "Regenerate all GUIDs", disabled: !s.doc, onSelect: () => s.regenGuids() },
+      { label: "", separator: true },
+      { label: "Expand All", disabled: !s.doc, onSelect: expandAll },
+      { label: "Collapse All", disabled: !s.doc, onSelect: () => setExpanded(new Set()) },
+    ]);
+  };
+
   return (
     <>
+      <FileTabs />
       <div className="px-3 h-9 flex items-center gap-1.5 border-b border-edge shrink-0">
         <span className="font-semibold text-[12px] mr-auto">Hierarchy</span>
         <button className={btn} onClick={() => openSearch("find")} disabled={!doc} title="Go to component (Ctrl+P)">
@@ -314,7 +343,7 @@ export default function TreePanel() {
           Delete
         </button>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-auto py-1">
+      <div ref={scrollRef} className="flex-1 overflow-auto py-1" onContextMenu={openBgContext}>
         {root ? (
           <Row
             node={root}
@@ -330,11 +359,13 @@ export default function TreePanel() {
             hidden={hidden}
             draggingGuid={draggingGuid}
             setDraggingGuid={setDraggingGuid}
+            openContext={openContext}
           />
         ) : (
           <div className="text-gray-500 text-[12px] p-3">Open a .twui.xml file to begin.</div>
         )}
       </div>
+      {menu.element}
     </>
   );
 }

@@ -64,8 +64,8 @@ interface View {
 export type Mode = "view" | "move" | "create" | "align" | "sim" | "tooltip";
 
 /** Dockable panels that can be collapsed or popped out into their own OS window. */
-export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles";
-export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles"];
+export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles" | "layers";
+export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles", "layers"];
 
 /** Games the editor supports. The Settings table always offers these; the user
  *  points each at its own folders (no folder scanning / auto-detect). */
@@ -102,6 +102,10 @@ export interface Settings {
   gamePaths: Record<string, { outside: string | null; data: string | null }>;
   lastGame: string | null;
   lastFile: string | null;
+  /** Multi-file working set restored on launch (when `rememberLastFile` is on): every open
+   *  file and the active one. Falls back to `lastFile` for blobs persisted before tabs. */
+  openTabs: { path: string; fromPack: boolean; visible: boolean }[];
+  activeTab: string | null;
 }
 
 const DEFAULT_VIEW: View = { zoom: 0.5, panX: 40, panY: 40 };
@@ -123,6 +127,8 @@ const DEFAULT_SETTINGS: Settings = {
   gamePaths: {},
   lastGame: null,
   lastFile: null,
+  openTabs: [],
+  activeTab: null,
 };
 
 /** Deep-merge the persisted prefs subset over the freshly-created store so older or
@@ -163,6 +169,41 @@ interface ScriptConn {
   status: "none" | "connected" | "missing";
 }
 
+/** One open file in the Hierarchy tab strip. The active tab's full state lives in the
+ *  top-level store fields; inactive tabs' state is parked in `inactiveDocs`. */
+export interface TabMeta {
+  id: string;
+  fileName: string | null;
+  filePath: string | null;
+  packPath: string | null;
+  dirty: boolean;
+  /** Composited as a layer in the visualizer. The active tab always renders regardless; this
+   *  only governs non-active files (opt-in overlays). Tab order is the layer z-order. */
+  visible: boolean;
+}
+
+/** The per-file state swapped between the top-level store fields and `inactiveDocs` when the
+ *  active tab changes. Mirrors the exact set `openFile` resets on load (plus multi-select). */
+export interface PerDocSlice {
+  doc: TwuiDocument | null;
+  filePath: string | null;
+  fileName: string | null;
+  packPath: string | null;
+  dirty: boolean;
+  selectedGuid: string | null;
+  selectedGuids: string[];
+  revealed: Record<string, boolean>;
+  previewState: Record<string, string>;
+  undoStack: TwuiDocument[];
+  redoStack: TwuiDocument[];
+  templates: Record<string, TwuiDocument>;
+  createdLayouts: Record<string, TwuiDocument>;
+  scriptConn: ScriptConn;
+  dataPackOverride: unknown;
+  componentDataPacks: Record<string, unknown>;
+  scriptDraft: string | null;
+}
+
 export interface AppStore {
   doc: TwuiDocument | null;
   filePath: string | null;
@@ -175,8 +216,15 @@ export interface AppStore {
   /** Component currently hovered (hierarchy row or canvas) — drives the highlight.
    *  Session- and window-local (not persisted, not mirrored across windows). */
   hoveredGuid: string | null;
-  /** A file switch awaiting the unsaved-changes prompt (null = none). */
-  pendingOpen: { path: string; fromPack: boolean } | null;
+  /** Open files for the Hierarchy tab strip (ordered). The active file's live state is the
+   *  top-level fields; every other file's state is parked in `inactiveDocs`. */
+  tabs: TabMeta[];
+  /** Parked per-file state for every tab EXCEPT the active one, keyed by tab id. */
+  inactiveDocs: Record<string, PerDocSlice>;
+  /** Id of the active tab (one of `tabs`), or null when nothing is open. */
+  activeTabId: string | null;
+  /** A single dirty tab awaiting the unsaved-changes prompt before it closes (null = none). */
+  pendingCloseTab: string | null;
   /** True when a window-close is awaiting the unsaved-changes prompt. */
   pendingClose: boolean;
   dataRoot: string | null;
@@ -243,6 +291,12 @@ export interface AppStore {
   renderResolution: { w: number; h: number } | null;
   /** Whether the visualizer draws component bounds outlines (Perspective panel toggle). */
   showBounds: boolean;
+  /** Editor-preview affordance: render a data-bound list's template once (as a layout
+   *  skeleton) when no script pack is connected. Only affects non-simulation renders. */
+  previewEmptyLists: boolean;
+  /** User-set UI preference booleans (the game's `PrefAsBool`), e.g.
+   *  `ui_alternative_unit_cards`. Drives preference-gated state/visibility in the preview. */
+  uiPrefs: Record<string, boolean>;
   /** Panels currently popped out into their own OS window (session-only). */
   poppedPanels: Partial<Record<PanelId, boolean>>;
   /** Panel ids currently present in the dock (mirrored from dockview; drives the Panels menu). */
@@ -273,10 +327,23 @@ export interface AppStore {
   setFaction: (key: string) => void;
   setCulture: (key: string) => void;
   setSubculture: (key: string) => void;
-  openFile: (path: string, fromPack?: boolean, force?: boolean) => Promise<void>;
+  openFile: (path: string, fromPack?: boolean) => Promise<void>;
+  /** Open a file with a layer placement: "single" makes it the only composited file (active +
+   *  editable, all others hidden); "top"/"bottom" add it as a visible reference layer at that
+   *  z-order while keeping the file you were editing active. */
+  openFileAs: (path: string, fromPack: boolean, mode: "single" | "top" | "bottom") => Promise<void>;
   openFileDialog: () => Promise<void>;
-  /** Resolve the unsaved-changes prompt for a pending file switch. */
-  confirmDiscardOpen: (choice: "save" | "saveAs" | "discard" | "cancel") => Promise<void>;
+  /** Make `id` the active tab, parking the current one (lossless — no save prompt). */
+  switchTab: (id: string) => void;
+  /** Toggle whether a tab is composited as a layer in the visualizer (non-active files only;
+   *  the active file always renders). */
+  setLayerVisible: (id: string, visible: boolean) => void;
+  /** Move a tab to a new index in `tabs`, which is the layer z-order (0 = bottom). */
+  reorderLayer: (id: string, toIndex: number) => void;
+  /** Close a tab. A dirty tab raises the unsaved-changes prompt first. */
+  closeTab: (id: string) => void;
+  /** Resolve the unsaved-changes prompt for closing a single dirty tab. */
+  confirmCloseTab: (choice: "save" | "saveAs" | "discard" | "cancel") => Promise<void>;
   /** Resolve the unsaved-changes prompt for a window close; resolves true if the
    *  window should now actually close. */
   confirmClose: (choice: "save" | "saveAs" | "discard" | "cancel") => Promise<boolean>;
@@ -337,6 +404,8 @@ export interface AppStore {
   setDockedPanels: (ids: PanelId[]) => void;
   setPanelPopped: (id: PanelId, popped: boolean) => void;
   setShowBounds: (v: boolean) => void;
+  setPreviewEmptyLists: (v: boolean) => void;
+  setUiPref: (key: string, value: boolean) => void;
   setMode: (m: Mode) => void;
   setRenderResolution: (r: { w: number; h: number } | null) => void;
   copy: () => void;
@@ -355,6 +424,92 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/** The top-level store fields that belong to ONE open file. `snapshotActive`/`hydrate` move
+ *  them between the live state and a parked `PerDocSlice`; one list keeps them from drifting. */
+const PER_DOC_FIELDS = [
+  "doc", "filePath", "fileName", "packPath", "dirty",
+  "selectedGuid", "selectedGuids", "revealed", "previewState",
+  "undoStack", "redoStack", "templates", "createdLayouts",
+  "scriptConn", "dataPackOverride", "componentDataPacks", "scriptDraft",
+] as const;
+
+type Mutable = Record<string, unknown>;
+
+/** Copy the active file's per-doc fields into a parked slice (references — immer finalizes
+ *  them once they're reachable from `inactiveDocs`). */
+function snapshotActive(s: AppStore): PerDocSlice {
+  const out: Mutable = {};
+  for (const k of PER_DOC_FIELDS) out[k] = (s as unknown as Mutable)[k];
+  return out as unknown as PerDocSlice;
+}
+
+/** Write a parked slice back into the top-level (active) fields. */
+function hydrate(s: AppStore, slice: PerDocSlice): void {
+  const src = slice as unknown as Mutable;
+  const dst = s as unknown as Mutable;
+  for (const k of PER_DOC_FIELDS) dst[k] = src[k];
+}
+
+/** The empty-document state (no file open) — used when the last tab closes. */
+function emptySlice(): PerDocSlice {
+  return {
+    doc: null, filePath: null, fileName: null, packPath: null, dirty: false,
+    selectedGuid: null, selectedGuids: [], revealed: {}, previewState: {},
+    undoStack: [], redoStack: [], templates: {}, createdLayouts: {},
+    scriptConn: { id: null, path: null, text: null, status: "none" },
+    dataPackOverride: null, componentDataPacks: {}, scriptDraft: null,
+  };
+}
+
+/** Set the dirty flag on both the live state and the active tab's strip metadata. */
+function setActiveDirty(s: AppStore, v: boolean): void {
+  s.dirty = v;
+  const t = s.tabs.find((t) => t.id === s.activeTabId);
+  if (t) t.dirty = v;
+}
+
+/** Persist the working set (open files + active) when the user opted into restore-on-launch. */
+function rememberTabs(s: AppStore): void {
+  if (!s.settings.editor.rememberLastFile) return;
+  s.settings.openTabs = s.tabs
+    .map((t) =>
+      t.packPath
+        ? { path: t.packPath, fromPack: true, visible: t.visible }
+        : { path: t.filePath ?? "", fromPack: false, visible: t.visible }
+    )
+    .filter((t) => t.path);
+  s.settings.activeTab = s.activeTabId;
+}
+
+/** Remove a tab, activating a neighbour (prefer the right) when the active tab is closed, or
+ *  clearing to the empty state when it was the last one. */
+function removeTab(s: AppStore, id: string): void {
+  const idx = s.tabs.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  s.tabs.splice(idx, 1);
+  delete s.inactiveDocs[id];
+  if (s.activeTabId !== id) {
+    rememberTabs(s);
+    return;
+  }
+  const next = s.tabs[idx] ?? s.tabs[idx - 1];
+  if (next) {
+    const slice = s.inactiveDocs[next.id];
+    if (slice) {
+      hydrate(s, slice);
+      delete s.inactiveDocs[next.id];
+    }
+    s.activeTabId = next.id;
+    s.hoveredGuid = null;
+    s.status = `Switched to ${next.fileName ?? "(untitled)"}`;
+  } else {
+    hydrate(s, emptySlice());
+    s.activeTabId = null;
+    s.status = "Ready";
+  }
+  rememberTabs(s);
+}
+
 export const useStore = create<AppStore>()(
   persist(
     immer((set, get) => ({
@@ -365,7 +520,10 @@ export const useStore = create<AppStore>()(
     selectedGuid: null,
     selectedGuids: [],
     hoveredGuid: null,
-    pendingOpen: null,
+    tabs: [],
+    inactiveDocs: {},
+    activeTabId: null,
+    pendingCloseTab: null,
     pendingClose: false,
     poppedPanels: {},
     dockedPanels: [],
@@ -405,6 +563,8 @@ export const useStore = create<AppStore>()(
     background: null,
     mode: DEFAULT_SETTINGS.visualizer.defaultMode,
     showBounds: DEFAULT_SETTINGS.visualizer.showBounds,
+    previewEmptyLists: true,
+    uiPrefs: {},
     renderResolution: null,
     clipboard: null,
     settings: DEFAULT_SETTINGS,
@@ -584,10 +744,30 @@ export const useStore = create<AppStore>()(
         }
       }
 
-      // Reopen the last file on first launch, when opted in and nothing is open yet.
+      // Reopen the last working set on first launch, when opted in and nothing is open yet.
       const cur = get();
-      if (applyPrefs && cur.settings.editor.rememberLastFile && cur.settings.lastFile && !cur.doc) {
-        void cur.openFile(cur.settings.lastFile);
+      if (applyPrefs && cur.settings.editor.rememberLastFile && !cur.doc && cur.tabs.length === 0) {
+        // Prefer the saved multi-file set; fall back to the single `lastFile` for older blobs.
+        const saved =
+          cur.settings.openTabs.length > 0
+            ? cur.settings.openTabs
+            : cur.settings.lastFile
+              ? [{ path: cur.settings.lastFile, fromPack: false, visible: false }]
+              : [];
+        for (const t of saved) {
+          await get().openFile(t.path, t.fromPack); // sequential: each adds + activates a tab
+        }
+        // Restore which files were composited as layers (openFile creates tabs hidden).
+        set((s) => {
+          for (const t of saved) {
+            if (!t.visible) continue;
+            const id = `${t.fromPack ? "pack" : "file"}:${t.path}`;
+            const tab = s.tabs.find((x) => x.id === id);
+            if (tab) tab.visible = true;
+          }
+        });
+        const active = cur.settings.activeTab;
+        if (active && get().tabs.some((x) => x.id === active)) get().switchTab(active);
       }
     },
 
@@ -633,16 +813,28 @@ export const useStore = create<AppStore>()(
         if (sc?.culture) s.context.culture = sc.culture;
       }),
 
-    openFile: async (path, fromPack = false, force = false) => {
-      // Guard unsaved edits: stash the request and let the UI prompt Save/Discard.
-      if (!force && get().dirty && get().doc) {
-        set((s) => {
-          s.pendingOpen = { path, fromPack };
-        });
+    openFile: async (path, fromPack = false) => {
+      // Stable per-file identity (drive letter colons in `path` are preserved after the prefix).
+      const id = `${fromPack ? "pack" : "file"}:${path}`;
+      // Already open -> focus its tab; opening never reloads or discards another file.
+      if (get().tabs.some((t) => t.id === id)) {
+        get().switchTab(id);
         return;
       }
       set((s) => {
-        s.pendingOpen = null;
+        // Park the current active file (if any) before this one becomes active.
+        if (s.activeTabId) s.inactiveDocs[s.activeTabId] = snapshotActive(s);
+        s.tabs.push({
+          id,
+          fileName: baseName(path),
+          filePath: fromPack ? null : path,
+          packPath: fromPack ? path : null,
+          dirty: false,
+          // Opt-in overlay: a freshly opened file isn't composited until toggled on (it's drawn
+          // anyway while it's the active tab).
+          visible: false,
+        });
+        s.activeTabId = id;
         s.status = `Loading ${baseName(path)}…`;
       });
       try {
@@ -656,6 +848,7 @@ export const useStore = create<AppStore>()(
           s.fileName = baseName(path);
           s.dirty = false;
           s.selectedGuid = null;
+          s.selectedGuids = [];
           s.revealed = {};
           s.undoStack = [];
           s.redoStack = [];
@@ -668,6 +861,7 @@ export const useStore = create<AppStore>()(
           s.previewState = {};
           s.status = `Loaded ${baseName(path)}`;
           if (!fromPack && s.settings.editor.rememberLastFile) s.settings.lastFile = path;
+          rememberTabs(s);
         });
         // Auto-connect the page's backing Lua script (from its script_id).
         const scriptId = pageScriptId(doc);
@@ -747,7 +941,37 @@ export const useStore = create<AppStore>()(
       } catch (e) {
         set((s) => {
           s.status = `Error: ${e}`;
+          // The file failed to load -> drop the tab we optimistically added.
+          removeTab(s, id);
         });
+      }
+    },
+
+    openFileAs: async (path, fromPack, mode) => {
+      const prevActive = get().activeTabId;
+      const id = `${fromPack ? "pack" : "file"}:${path}`;
+      // openFile fully loads the doc + script/templates/sub-layouts before resolving, and leaves
+      // the new tab active — so it's safe to re-park / switch away afterwards.
+      await get().openFile(path, fromPack);
+      if (!get().tabs.some((t) => t.id === id)) return; // load failed (tab was dropped)
+      set((s) => {
+        if (mode === "single") {
+          // Only this file composites; keep it active/editable.
+          for (const t of s.tabs) if (t.id !== id) t.visible = false;
+        } else {
+          // Visible reference layer at the chosen z-order (tabs index 0 = bottom).
+          const from = s.tabs.findIndex((t) => t.id === id);
+          if (from >= 0) {
+            const [tab] = s.tabs.splice(from, 1);
+            tab.visible = true;
+            s.tabs.splice(mode === "top" ? s.tabs.length : 0, 0, tab);
+          }
+        }
+        rememberTabs(s);
+      });
+      // For layer placements, keep the file you were editing active (the new one is reference).
+      if (mode !== "single" && prevActive && prevActive !== id && get().tabs.some((t) => t.id === prevActive)) {
+        get().switchTab(prevActive);
       }
     },
 
@@ -762,7 +986,7 @@ export const useStore = create<AppStore>()(
       try {
         await ipc.saveLayout(filePath, doc);
         set((s) => {
-          s.dirty = false;
+          setActiveDirty(s, false);
           s.status = `Saved ${baseName(filePath)}`;
         });
       } catch (e) {
@@ -779,9 +1003,22 @@ export const useStore = create<AppStore>()(
         await ipc.saveLayout(path, doc);
         set((s) => {
           s.filePath = path;
+          s.packPath = null; // Save-As always writes a loose, on-disk file.
           s.fileName = baseName(path);
+          // The active tab now points at the saved-on-disk file: update its identity + metadata.
+          const newId = `file:${path}`;
+          const t = s.tabs.find((x) => x.id === s.activeTabId);
+          if (t) {
+            t.id = newId;
+            t.fileName = baseName(path);
+            t.filePath = path;
+            t.packPath = null;
+            t.dirty = false;
+          }
+          s.activeTabId = newId;
           s.dirty = false;
           s.status = `Saved ${baseName(path)}`;
+          rememberTabs(s);
         });
       } catch (e) {
         set((s) => {
@@ -800,24 +1037,84 @@ export const useStore = create<AppStore>()(
       if (typeof path === "string") await get().openFile(path);
     },
 
-    confirmDiscardOpen: async (choice) => {
-      const p = get().pendingOpen;
-      if (!p) return;
-      if (choice === "cancel") {
+    switchTab: (id) =>
+      set((s) => {
+        if (id === s.activeTabId) return;
+        const target = s.inactiveDocs[id];
+        if (!target) return; // unknown tab — ignore
+        // Park the current active file, then swap the target's parked state into the live fields.
+        if (s.activeTabId) s.inactiveDocs[s.activeTabId] = snapshotActive(s);
+        hydrate(s, target);
+        delete s.inactiveDocs[id];
+        s.activeTabId = id;
+        s.hoveredGuid = null;
+        s.status = `Switched to ${target.fileName ?? "(untitled)"}`;
+        rememberTabs(s);
+      }),
+
+    setLayerVisible: (id, visible) =>
+      set((s) => {
+        const tab = s.tabs.find((t) => t.id === id);
+        if (!tab) return;
+        tab.visible = visible;
+        rememberTabs(s);
+      }),
+
+    reorderLayer: (id, toIndex) =>
+      set((s) => {
+        const from = s.tabs.findIndex((t) => t.id === id);
+        if (from < 0) return;
+        const clamped = Math.max(0, Math.min(toIndex, s.tabs.length - 1));
+        if (from === clamped) return;
+        const [tab] = s.tabs.splice(from, 1);
+        s.tabs.splice(clamped, 0, tab);
+        rememberTabs(s);
+      }),
+
+    closeTab: (id) => {
+      const tab = get().tabs.find((t) => t.id === id);
+      if (!tab) return;
+      // A dirty tab prompts first (resolved by confirmCloseTab); a clean one closes immediately.
+      if (tab.dirty) {
         set((s) => {
-          s.pendingOpen = null;
+          s.pendingCloseTab = id;
         });
         return;
       }
+      set((s) => {
+        removeTab(s, id);
+      });
+    },
+
+    confirmCloseTab: async (choice) => {
+      const id = get().pendingCloseTab;
+      if (!id) return;
+      if (choice === "cancel") {
+        set((s) => {
+          s.pendingCloseTab = null;
+        });
+        return;
+      }
+      if (choice === "discard") {
+        set((s) => {
+          s.pendingCloseTab = null;
+          removeTab(s, id);
+        });
+        return;
+      }
+      // Save / Save-As act through the normal path, which targets the ACTIVE file — so make the
+      // tab being closed active first.
+      if (get().activeTabId !== id) get().switchTab(id);
       if (choice === "save") await get().save();
       else if (choice === "saveAs") await get().saveAsDialog();
-      // Proceed when discarding, or when the save actually cleared the dirty flag
-      // (a cancelled Save-As leaves it dirty -> keep the prompt up).
-      if (choice === "discard" || !get().dirty) {
+      // Close once the save actually cleared the dirty flag (a cancelled Save-As leaves it dirty
+      // -> keep the prompt up). Remove the now-active tab (its id is stable across save).
+      if (!get().dirty) {
         set((s) => {
-          s.pendingOpen = null;
+          const rid = s.activeTabId ?? id;
+          s.pendingCloseTab = null;
+          removeTab(s, rid);
         });
-        await get().openFile(p.path, p.fromPack, true);
       }
     },
 
@@ -828,16 +1125,25 @@ export const useStore = create<AppStore>()(
         });
         return false;
       }
-      if (choice === "save") await get().save();
-      else if (choice === "saveAs") await get().saveAsDialog();
-      // Close on discard, or when the save actually cleared the dirty flag.
-      if (choice === "discard" || !get().dirty) {
+      if (choice !== "discard") {
+        // Persist EVERY dirty tab (the window holds them all), each through the normal active
+        // path. Stop if any save is cancelled (e.g. a Save-As dialog dismissed) -> stay open.
+        const dirtyIds = get().tabs.filter((t) => t.dirty).map((t) => t.id);
+        for (const id of dirtyIds) {
+          if (get().activeTabId !== id) get().switchTab(id);
+          if (choice === "saveAs") await get().saveAsDialog();
+          else await get().save();
+          if (get().dirty) return false; // this tab's save was cancelled
+        }
+      }
+      // Close on discard, or once no tab is dirty any longer.
+      if (choice === "discard" || !get().tabs.some((t) => t.dirty)) {
         set((s) => {
           s.pendingClose = false;
         });
         return true;
       }
-      return false; // save/Save-As cancelled -> stay open
+      return false; // a save was cancelled -> stay open
     },
 
     saveAsDialog: async () => {
@@ -1079,7 +1385,7 @@ export const useStore = create<AppStore>()(
         while (s.undoStack.length > limit) s.undoStack.shift();
         s.redoStack = [];
         fn(s.doc);
-        s.dirty = true;
+        setActiveDirty(s, true);
       });
     },
 
@@ -1236,7 +1542,7 @@ export const useStore = create<AppStore>()(
         const comps = componentsSection(s.doc);
         const el = comps && elementChildren(comps).find((c) => guidOf(c) === guid);
         if (el) setAttr(el, "offset", fmtVec2(x, y));
-        s.dirty = true;
+        setActiveDirty(s, true);
       }),
 
     deleteSelected: () => {
@@ -1299,6 +1605,8 @@ export const useStore = create<AppStore>()(
         else delete s.poppedPanels[id];
       }),
     setShowBounds: (v) => set((s) => { s.showBounds = v; }),
+    setPreviewEmptyLists: (v) => set((s) => { s.previewEmptyLists = v; }),
+    setUiPref: (key, value) => set((s) => { s.uiPrefs[key] = value; }),
 
     setMode: (m) => set((s) => { s.mode = m; }),
     setRenderResolution: (r) => set((s) => { s.renderResolution = r; }),
@@ -1388,7 +1696,7 @@ export const useStore = create<AppStore>()(
         if (!prev || !s.doc) return;
         s.redoStack.push(JSON.parse(JSON.stringify(s.doc)));
         s.doc = prev;
-        s.dirty = true;
+        setActiveDirty(s, true);
       }),
 
     redo: () =>
@@ -1397,7 +1705,7 @@ export const useStore = create<AppStore>()(
         if (!next || !s.doc) return;
         s.undoStack.push(JSON.parse(JSON.stringify(s.doc)));
         s.doc = next;
-        s.dirty = true;
+        setActiveDirty(s, true);
       }),
     })),
     {

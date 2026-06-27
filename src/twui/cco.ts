@@ -32,6 +32,13 @@ export interface Scope {
   objectId?: string;
   /** Macro names currently being expanded — guards against self-reference loops. */
   expanding?: Set<string>;
+  /** Editor-preview affordance: when no data pack is connected, a data-bound list renders
+   *  its template once as a layout skeleton instead of collapsing to nothing. Off in
+   *  data/sim renders (where real entries drive repetition). */
+  previewEmptyLists?: boolean;
+  /** User-set UI preference booleans (the game's `PrefAsBool("name")`), e.g.
+   *  `ui_alternative_unit_cards`. Drives preference-gated state/visibility in the preview. */
+  uiPrefs?: Record<string, boolean>;
 }
 
 /** Find a shorthand macro by name: the current context object's table first,
@@ -144,7 +151,7 @@ export function callbacks(comp: RawElement): Callback[] {
   return out;
 }
 
-function asRecord(v: LuaValue | undefined): Record<string, LuaValue> | undefined {
+export function asRecord(v: LuaValue | undefined): Record<string, LuaValue> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, LuaValue>) : undefined;
 }
 
@@ -322,6 +329,10 @@ function evalRefChain(expr: string, scope: Scope, loc?: Record<string, string>):
       if (seg === "TableValue") cur = scope.dataPack ?? undefined;
       else if (seg === "this") cur = scope.thisEntry ?? scope.entry;
       else if (seg === "self") cur = { Id: scope.entryKey ?? scope.selfId ?? "" };
+      // `Internal` is a runtime node's (CcoRTTierNode/CcoRTNormal) underlying script node —
+      // i.e. the current bound entry. So `Internal.unit_card` / `Internal.item_list` /
+      // `Internal.Total` resolve their field off the row in scope.
+      else if (seg === "Internal") cur = scope.entry;
       else if (scope.vars[seg] !== undefined) cur = scope.vars[seg];
       else if (vfk) cur = asRecord(scope.entry)?.[vfk[1]];
       else cur = asRecord(scope.entry)?.[seg];
@@ -439,6 +450,12 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
       const km = /^\s*"([^"]+)"/.exec(call.arg);
       const rec = asRecord(scope.entry);
       return km ? !!rec && km[1] in rec : undefined;
+    }
+    if (call.name === "PrefAsBool") {
+      // A user-facing UI preference (`PrefAsBool("ui_alternative_unit_cards")`). Resolves
+      // from the viewer's uiPrefs map; unset → false (the game default for these flags).
+      const km = /^\s*"([^"]+)"/.exec(call.arg);
+      return km ? scope.uiPrefs?.[km[1]] ?? false : false;
     }
     if (KNOWN_FUNCS.has(call.name)) {
       const a = evalExpr(call.arg, scope, loc);
@@ -604,6 +621,7 @@ export function propagate(comp: RawElement, scope: Scope): Scope {
   // their row key (entryKey wins in evalRefChain), so this only fills the non-row case.
   const selfId = getAttr(comp, "id");
   let vars = scope.vars;
+  let entry = scope.entry;
   for (const cb of callbacks(comp)) {
     if (cb.id !== "ContextPropagator" || !cb.funcId) continue;
     // Court office post: `GovermentPostForKey(self.Id)` → bind the post key (self.Id =
@@ -611,6 +629,15 @@ export function propagate(comp: RawElement, scope: Scope): Scope {
     if (/GovermentPostForKey\(\s*self\.Id\s*\)/.test(cb.funcId)) {
       const id = getAttr(comp, "id");
       if (id) vars = { ...vars, __postKey: id };
+      continue;
+    }
+    // Faction-character context (e.g. `PlayersFaction.FactionLeaderContext`, propagated onto a
+    // portrait's mask/holder): bind the assigned character record as the entry so a descendant
+    // Character2DDisplayCreator resolves its `ArtContext` portrait. Only when it resolves to an
+    // assigned character (a record carrying ArtContext); otherwise leave the entry untouched.
+    if (/^PlayersFaction\.\w+Context$/.test(cb.funcId)) {
+      const rec = asRecord(evalExpr(cb.funcId, scope));
+      if (rec && rec.ArtContext !== undefined) entry = rec;
       continue;
     }
     const m =
@@ -625,8 +652,8 @@ export function propagate(comp: RawElement, scope: Scope): Scope {
     );
     if (found) vars = { ...vars, [varName]: found.value };
   }
-  if (vars === scope.vars && scope.selfId === selfId) return scope;
-  return { ...scope, vars, selfId: selfId ?? scope.selfId };
+  if (vars === scope.vars && scope.selfId === selfId && entry === scope.entry) return scope;
+  return { ...scope, vars, selfId: selfId ?? scope.selfId, entry };
 }
 
 /**

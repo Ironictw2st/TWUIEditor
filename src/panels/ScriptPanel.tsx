@@ -15,6 +15,8 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
   const draft = useStore((s) => s.scriptDraft);
   const setDataPackOverride = useStore((s) => s.setDataPackOverride);
   const setScriptDraft = useStore((s) => s.setScriptDraft);
+  const altUnitCards = useStore((s) => s.uiPrefs.ui_alternative_unit_cards === true);
+  const setUiPref = useStore((s) => s.setUiPref);
 
   const [tab, setTab] = useState<Tab>("clean");
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +104,15 @@ export default function ScriptPanel({ onClose, embedded }: { onClose: () => void
           <span className="text-gray-500 truncate">{conn.id ?? "(no script_id)"}</span>
           {override != null && <span className="text-amber-300/80 text-[10px]">· tweaked</span>}
           <div className="flex-1" />
+          <button
+            className={`px-1.5 py-0.5 rounded text-[10px] border ${
+              altUnitCards ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
+            }`}
+            title="PrefAsBool(&quot;ui_alternative_unit_cards&quot;): render unit-card components in their `alternative` state (shows Internal.unit_card_alternative instead of Internal.unit_card)."
+            onClick={() => setUiPref("ui_alternative_unit_cards", !altUnitCards)}
+          >
+            Alt cards
+          </button>
           {tabBtn("clean", "Clean (JSON)")}
           {tabBtn("raw", "Raw (Lua)")}
           {!embedded && (

@@ -4,24 +4,30 @@ import { useStore } from "../state/store";
 
 type Choice = "save" | "saveAs" | "discard" | "cancel";
 
-/** Modal shown when unsaved edits would be lost — by switching files (`pendingOpen`)
+/** Modal shown when unsaved edits would be lost — by closing a dirty tab (`pendingCloseTab`)
  *  or closing the window (`pendingClose`). Save / Save As… / Don't Save / Cancel. */
 export default function UnsavedChangesDialog() {
-  const pendingOpen = useStore((s) => s.pendingOpen);
   const pendingClose = useStore((s) => s.pendingClose);
+  const pendingCloseTab = useStore((s) => s.pendingCloseTab);
+  const tabs = useStore((s) => s.tabs);
   const fileName = useStore((s) => s.fileName);
-  const confirmDiscardOpen = useStore((s) => s.confirmDiscardOpen);
   const confirmClose = useStore((s) => s.confirmClose);
+  const confirmCloseTab = useStore((s) => s.confirmCloseTab);
 
   const closing = pendingClose;
-  const active = closing || pendingOpen != null;
+  const active = closing || pendingCloseTab != null;
+
+  // Name shown in the prompt: the tab being closed, else the active file (window close).
+  const tabName = pendingCloseTab ? tabs.find((t) => t.id === pendingCloseTab)?.fileName : null;
+  const name = tabName ?? fileName;
+  const dirtyCount = tabs.filter((t) => t.dirty).length;
 
   const choose = async (choice: Choice) => {
     if (closing) {
       const shouldClose = await confirmClose(choice);
       if (shouldClose) await getCurrentWindow().destroy();
     } else {
-      await confirmDiscardOpen(choice);
+      await confirmCloseTab(choice);
     }
   };
 
@@ -37,6 +43,14 @@ export default function UnsavedChangesDialog() {
 
   if (!active) return null;
 
+  // On window close with several dirty files, name the count rather than one file.
+  const message =
+    closing && dirtyCount > 1
+      ? `${dirtyCount} open files have unsaved changes.`
+      : name
+        ? `"${name}" has unsaved changes.`
+        : "You have unsaved changes.";
+
   const btn = "px-3 py-1.5 rounded border border-edge text-[12px]";
   return (
     <div
@@ -49,8 +63,7 @@ export default function UnsavedChangesDialog() {
       >
         <div className="text-[13px] font-medium text-text mb-1">Unsaved changes</div>
         <div className="text-[12px] text-textMuted mb-4">
-          {fileName ? `"${fileName}" has unsaved changes.` : "You have unsaved changes."}{" "}
-          {closing ? "Save before closing?" : "Save before switching files?"}
+          {message} {closing ? "Save before closing?" : "Save before closing this tab?"}
         </div>
         <div className="flex justify-end gap-2">
           <button className={`${btn} text-textMuted hover:bg-button`} onClick={() => void choose("cancel")}>

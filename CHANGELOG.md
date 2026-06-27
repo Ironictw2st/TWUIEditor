@@ -5,6 +5,46 @@ shown in the app's update prompt (Settings -> About / Updates and the startup ba
 
 ## [Unreleased]
 
+### Added
+- **Open multiple files at once** — a tab strip at the top of the Hierarchy panel holds every
+  open `.twui.xml`; click a tab to switch the active file (all panels follow it), `x` to close,
+  `+` to open another. Opening a file (toolbar or Pack Files) now adds a tab instead of
+  replacing the current one. Switching is lossless — each file keeps its own selection,
+  undo/redo, and unsaved edits in memory; a `*` marks unsaved tabs. Drag a tab to reorder it
+  (which also reorders the layer stack). With "Reopen last file on launch" enabled, the whole
+  working set restores next launch.
+- **Right-click context menus** — components (in the Hierarchy tree and on the canvas) offer
+  Duplicate, Delete, Show/Hide, Copy, Paste, and a Regenerate GUIDs submenu (this component /
+  including children); empty Hierarchy space offers Paste, Regenerate all GUIDs, and Expand /
+  Collapse all; file tabs offer Save, Save As, show/hide as layer, and Close / Close Others /
+  Close All; the Layers panel offers Make Active, Show/Hide, Move to Top/Bottom, and Close; and
+  Pack Files entries can be opened as a single layout or onto the top/bottom layer (added as a
+  reference layer while the file you're editing stays active).
+- **Composite layouts as layers** — a new **Layers** panel stacks open files in one visualizer
+  like image layers (top entry draws on top), so you can view e.g. a campaign HUD with a schemes
+  panel together and align them in a shared screen space. Toggle each file's eye to show/hide it
+  as an overlay (the file you're editing always renders); drag to reorder the z-order. Clicking a
+  component on any visible layer makes that file active and selects it. Overlays draw at full
+  opacity; selection/hover/bounds show only for the active file. The visible set and order
+  restore on launch with the working set.
+
+- **Character portraits render masked and aspect-correct** — a `maskimage` stencil now alpha-clips
+  the portrait it covers (e.g. a faction leader) and the portrait is fitted to its holder instead of
+  stretched, matching the in-game shape rather than showing an opaque block.
+- **Alternative unit cards** — a "Alt cards" toggle in the Script panel mirrors the game's
+  `ui_alternative_unit_cards` preference, flipping unit-card components to their `alternative` art.
+- **List skeletons for unbound panels** — when no script pack is connected, a data-bound list now
+  shows its template once as a layout skeleton (a "Skeleton" toggle in Perspective); suppressed in
+  Simulation/Tooltip, which still mirror the game exactly.
+- Faction-leader / heir portraits resolve through a propagated `PlayersFaction.<Role>Context`, so
+  those roles are assignable and render without a connected script.
+
+### Changed
+- Multiple `ContextImageSetter`s on one component now each override their own image slot (via
+  `image_index`), so e.g. a card's base and alternative art swap independently.
+- Pooled-resource tier lists (`RangedTierList`) and a tier's filtered `item_list` now resolve their
+  rows for preview; hairline textureless quads (divider lines) draw as solid colour fills.
+
 ## [0.0.5] - 2026-06-25
 
 ### Added

@@ -17,6 +17,8 @@ export default function PerspectivePanel() {
   const setBackground = useStore((s) => s.setBackground);
   const showBounds = useStore((s) => s.showBounds);
   const setShowBounds = useStore((s) => s.setShowBounds);
+  const previewEmptyLists = useStore((s) => s.previewEmptyLists);
+  const setPreviewEmptyLists = useStore((s) => s.setPreviewEmptyLists);
   const renderResolution = useStore((s) => s.renderResolution);
   const setRenderResolution = useStore((s) => s.setRenderResolution);
 
@@ -94,6 +96,18 @@ export default function PerspectivePanel() {
           onClick={() => setShowBounds(!showBounds)}
         >
           {showBounds ? "On" : "Off"}
+        </button>
+      )}
+      {cell(
+        "Skeleton",
+        <button
+          className={`w-full px-1.5 py-0.5 rounded border text-[11px] ${
+            previewEmptyLists ? "bg-accent/30 border-accent" : "bg-bg border-edge hover:bg-panelHeader"
+          }`}
+          title="Show data-bound lists' template once as a layout skeleton when no script is connected (not in Simulation)."
+          onClick={() => setPreviewEmptyLists(!previewEmptyLists)}
+        >
+          {previewEmptyLists ? "On" : "Off"}
         </button>
       )}
       {cell(

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../state/store";
+import { useContextMenu, MenuItem } from "../components/ContextMenu";
 
 /** A folder node in the virtual pack tree; files are leaves with `path` set. */
 interface TreeNode {
@@ -41,11 +42,13 @@ function Folder({
   depth,
   current,
   onOpen,
+  onContext,
 }: {
   node: TreeNode;
   depth: number;
   current: string | null;
   onOpen: (rel: string) => void;
+  onContext: (e: React.MouseEvent, rel: string) => void;
 }) {
   const [open, setOpen] = useState(depth < 1);
   const isFolder = node.children.size > 0;
@@ -61,6 +64,7 @@ function Folder({
         style={pad}
         title={node.path}
         onClick={() => node.path && onOpen(node.path)}
+        onContextMenu={(e) => node.path && onContext(e, node.path)}
       >
         {node.name}
       </button>
@@ -78,7 +82,7 @@ function Folder({
       </button>
       {open &&
         sortedChildren(node).map((c) => (
-          <Folder key={c.name} node={c} depth={depth + 1} current={current} onOpen={onOpen} />
+          <Folder key={c.name} node={c} depth={depth + 1} current={current} onOpen={onOpen} onContext={onContext} />
         ))}
     </div>
   );
@@ -92,8 +96,10 @@ export default function PackFilesPanel() {
   const packPath = useStore((s) => s.packPath);
   const overlayPack = useStore((s) => s.overlayPack);
   const openFile = useStore((s) => s.openFile);
+  const openFileAs = useStore((s) => s.openFileAs);
   const setOverlayPack = useStore((s) => s.setOverlayPack);
   const clearOverlayPack = useStore((s) => s.clearOverlayPack);
+  const menu = useContextMenu();
 
   const [query, setQuery] = useState("");
 
@@ -105,6 +111,15 @@ export default function PackFilesPanel() {
   }, [query, layouts]);
 
   const openLayout = (rel: string) => void openFile(rel, true);
+  const openContext = (e: React.MouseEvent, rel: string) => {
+    const items: MenuItem[] = [
+      { label: "Open as single TWUI", onSelect: () => void openFileAs(rel, true, "single") },
+      { label: "", separator: true },
+      { label: "Open on top layer", onSelect: () => void openFileAs(rel, true, "top") },
+      { label: "Open on bottom layer", onSelect: () => void openFileAs(rel, true, "bottom") },
+    ];
+    menu.open(e, items);
+  };
 
   const pickOverlay = async () => {
     const f = await openDialog({ multiple: false, filters: [{ name: "Pack", extensions: ["pack"] }] });
@@ -162,6 +177,7 @@ export default function PackFilesPanel() {
                 }`}
                 title={p}
                 onClick={() => openLayout(p)}
+                onContextMenu={(e) => openContext(e, p)}
               >
                 {p}
               </button>
@@ -171,10 +187,11 @@ export default function PackFilesPanel() {
           )
         ) : (
           sortedChildren(tree).map((c) => (
-            <Folder key={c.name} node={c} depth={0} current={packPath} onOpen={openLayout} />
+            <Folder key={c.name} node={c} depth={0} current={packPath} onOpen={openLayout} onContext={openContext} />
           ))
         )}
       </div>
+      {menu.element}
     </div>
   );
 }
