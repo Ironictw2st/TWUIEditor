@@ -1,14 +1,61 @@
 name: Release
 
-# Push a version tag (e.g. v0.0.3) to build and publish the portable Windows exe.
-# Installed copies self-update from this repo's latest release (no installer, no signing key).
+# Publishes a portable Windows exe as a GitHub Release. Two ways to trigger:
+#   * bump the "version" in package.json and push to master  -> a v<version> release is created
+#     automatically (the matching tag is created for you); or
+#   * push a v* tag manually (the old flow still works).
+# Each run first checks whether a release for that version already exists, so ordinary master
+# pushes that don't change the version are no-ops. Installed copies self-update from this repo's
+# latest release (no installer, no signing key).
 on:
   push:
+    branches: [master]
     tags:
       - "v*"
 
+# Never publish two releases at once.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  # Decide the version + whether there's anything to publish (cheap; runs on every master push).
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and look for an existing release
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            ver="${GITHUB_REF_NAME#v}"
+          else
+            ver="$(grep -m1 '"version"' package.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+          fi
+          tag="v$ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists - nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will build and publish $tag."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     permissions:
       contents: write
     runs-on: windows-latest
@@ -39,17 +86,19 @@ jobs:
       - name: Extract release notes
         shell: bash
         run: |
-          ver="${GITHUB_REF_NAME#v}"
+          ver="${{ needs.gate.outputs.version }}"
           awk -v v="## [$ver]" '
             index($0, v)==1 {f=1; next}
             /^## \[/ {if(f) exit}
             f {print}
           ' CHANGELOG.md > RELEASE_NOTES.md
-          if [ ! -s RELEASE_NOTES.md ]; then echo "TWUI Editor ${GITHUB_REF_NAME}." > RELEASE_NOTES.md; fi
+          if [ ! -s RELEASE_NOTES.md ]; then echo "TWUI Editor ${{ needs.gate.outputs.tag }}." > RELEASE_NOTES.md; fi
           echo "----- release notes -----"; cat RELEASE_NOTES.md
 
+      # Creates the tag (at this commit) if it doesn't exist yet, then the release.
       - uses: softprops/action-gh-release@v2
         with:
-          name: "TWUI Editor ${{ github.ref_name }}"
+          tag_name: ${{ needs.gate.outputs.tag }}
+          name: "TWUI Editor ${{ needs.gate.outputs.tag }}"
           body_path: RELEASE_NOTES.md
           files: TWUI-Editor-x64.exe
