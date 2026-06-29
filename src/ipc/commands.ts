@@ -179,11 +179,14 @@ export function submitBugReport(report: BugReport): Promise<void> {
 // `http://<scheme>.localhost/...`; on macOS/Linux as `<scheme>://localhost/...`.
 const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
 
-/** Build a webview URL for a TWUI imagepath served by the twuiimg:// protocol. */
-export function imageUrl(relPath: string): string {
+/** Build a webview URL for a TWUI imagepath served by the twuiimg:// protocol. `bust` (an image
+ *  epoch) is appended as a `?v=` query so a source change defeats the webview's HTTP cache; the
+ *  backend resolves images from the URI path only and ignores the query. */
+export function imageUrl(relPath: string, bust?: string | number): string {
   // encodeURI keeps '/' but encodes spaces etc.; backend percent-decodes.
   const enc = encodeURI(relPath);
+  const q = bust !== undefined ? `?v=${encodeURIComponent(String(bust))}` : "";
   return IS_WINDOWS
-    ? `http://twuiimg.localhost/${enc}`
-    : `twuiimg://localhost/${enc}`;
+    ? `http://twuiimg.localhost/${enc}${q}`
+    : `twuiimg://localhost/${enc}${q}`;
 }

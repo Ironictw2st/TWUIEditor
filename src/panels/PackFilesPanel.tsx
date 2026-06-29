@@ -97,6 +97,9 @@ export default function PackFilesPanel() {
   const overlayPack = useStore((s) => s.overlayPack);
   const openFile = useStore((s) => s.openFile);
   const openFileAs = useStore((s) => s.openFileAs);
+  const newFromFile = useStore((s) => s.newFromFile);
+  const openInsertDialog = useStore((s) => s.openInsertDialog);
+  const hasDoc = useStore((s) => s.doc != null);
   const setOverlayPack = useStore((s) => s.setOverlayPack);
   const clearOverlayPack = useStore((s) => s.clearOverlayPack);
   const menu = useContextMenu();
@@ -117,6 +120,9 @@ export default function PackFilesPanel() {
       { label: "", separator: true },
       { label: "Open on top layer", onSelect: () => void openFileAs(rel, true, "top") },
       { label: "Open on bottom layer", onSelect: () => void openFileAs(rel, true, "bottom") },
+      { label: "", separator: true },
+      { label: "New from this file", onSelect: () => void newFromFile(rel, true) },
+      { label: "Insert into current layout…", disabled: !hasDoc, onSelect: () => openInsertDialog(rel) },
     ];
     menu.open(e, items);
   };

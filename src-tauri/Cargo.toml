@@ -1,6 +1,6 @@
 [package]
 name = "twui-editor"
-version = "0.0.5"
+version = "0.0.6"
 description = "TWUI XML Viewer & Editor"
 authors = ["you"]
 edition = "2021"

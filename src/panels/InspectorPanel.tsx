@@ -107,18 +107,30 @@ function SchemaField({
   value,
   kind,
   label,
+  editFn,
 }: {
   guid: string;
   attrKey: string;
   value: string | undefined;
   kind: AttrKind;
   label?: string;
+  /** Override the commit target — used for guid-less container children (image-metrics) edited
+   *  by index rather than guid. */
+  editFn?: (key: string, value: string) => void;
 }) {
   const editAttr = useStore((s) => s.editAttr);
   const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
   const version = useStore((s) => (s.doc ? layoutVersion(s.doc) : 0));
   // The LayoutEngine child has no guid; its edits route through the component's guid.
   const edit = kind === "layoutEngine" ? editLayoutEngineAttr : editAttr;
+  const rename = useStore((s) => s.rename);
+  // Editing a component's `id` also renames its element tags (keeps `<id>…</id>` in sync in both the
+  // hierarchy and components sections), so it routes through `rename`, not the generic attr editor.
+  const applyEdit = (g: string, k: string, v: string) => {
+    if (editFn) editFn(k, v);
+    else if (kind === "component" && k === "id") rename(g, v);
+    else edit(g, k, v);
+  };
   const schema = schemaFor(attrKey, kind, version);
   const [local, setLocal] = useState(value ?? "");
   useEffect(() => setLocal(value ?? ""), [value, guid]);
@@ -126,7 +138,7 @@ function SchemaField({
   if (!schema) return <Field guid={guid} attrKey={attrKey} value={value} label={label ?? attrKey} />;
 
   const commit = () => {
-    if (local !== (value ?? "")) edit(guid, attrKey, local);
+    if (local !== (value ?? "")) applyEdit(guid, attrKey, local);
   };
   const title = schema.description + (schema.default ? `  (default: ${schema.default})` : "");
   const labelEl = (
@@ -161,7 +173,7 @@ function SchemaField({
             value={local}
             onChange={(e) => {
               setLocal(e.target.value);
-              edit(guid, attrKey, e.target.value);
+              applyEdit(guid, attrKey, e.target.value);
             }}
           >
             {!local && <option value="" />}
@@ -206,7 +218,17 @@ function SchemaField({
 
 /** `Add…` dropdown: lists known schema attributes for `kind` that aren't already on the
  *  element; choosing one writes its default so the new field appears. */
-function AddAttr({ guid, kind, present }: { guid: string; kind: AttrKind; present: string[] }) {
+function AddAttr({
+  guid,
+  kind,
+  present,
+  editFn,
+}: {
+  guid: string;
+  kind: AttrKind;
+  present: string[];
+  editFn?: (key: string, value: string) => void;
+}) {
   const editAttr = useStore((s) => s.editAttr);
   const editLayoutEngineAttr = useStore((s) => s.editLayoutEngineAttr);
   const version = useStore((s) => (s.doc ? layoutVersion(s.doc) : 0));
@@ -223,7 +245,10 @@ function AddAttr({ guid, kind, present }: { guid: string; kind: AttrKind; presen
         value=""
         onChange={(e) => {
           const name = e.target.value;
-          if (name) edit(guid, name, schemaFor(name, kind)?.default ?? "");
+          if (!name) return;
+          const def = schemaFor(name, kind)?.default ?? "";
+          if (editFn) editFn(name, def);
+          else edit(guid, name, def);
         }}
       >
         <option value="">Add…</option>
@@ -342,12 +367,15 @@ function AttrFields({
   kind,
   preferred,
   skip,
+  editFn,
 }: {
   guid: string;
   el: RawElement;
   kind: AttrKind;
   preferred: string[];
   skip?: string[];
+  /** Commit override for guid-less container children (e.g. image-metrics), edited by index. */
+  editFn?: (key: string, value: string) => void;
 }) {
   const order = presentAttrs(el, kind, preferred, skip);
   const orderSet = new Set(order);
@@ -364,12 +392,12 @@ function AttrFields({
         out.push(<LinkedField key={`link:${group.label}`} guid={guid} keys={members} value={vals[0]} label={group.label} />);
       } else {
         for (const k of members) {
-          out.push(<SchemaField key={k} guid={guid} attrKey={k} value={getAttr(el, k)} kind={kind} />);
+          out.push(<SchemaField key={k} guid={guid} attrKey={k} value={getAttr(el, k)} kind={kind} editFn={editFn} />);
         }
       }
       continue;
     }
-    out.push(<SchemaField key={key} guid={guid} attrKey={key} value={getAttr(el, key)} kind={kind} />);
+    out.push(<SchemaField key={key} guid={guid} attrKey={key} value={getAttr(el, key)} kind={kind} editFn={editFn} />);
   }
   return <>{out}</>;
 }
@@ -534,12 +562,16 @@ function ComponentImagePicker({
   imgGuid,
   value,
   options,
+  editFn,
 }: {
   imgGuid: string;
   value: string | undefined;
   options: CiOption[];
+  editFn?: (key: string, value: string) => void;
 }) {
   const editAttr = useStore((s) => s.editAttr);
+  const setComponentImage = (v: string) =>
+    editFn ? editFn("componentimage", v) : editAttr(imgGuid, "componentimage", v);
   const cur = value ?? "";
   const known = options.some((o) => o.guid === cur);
   const label = (o: CiOption) => o.imagepath || `(no path) ${o.guid.slice(0, 8)}`;
@@ -548,7 +580,7 @@ function ComponentImagePicker({
       <span className={LABEL_CLS} title="The component image this layer draws (componentimage).">
         image
       </span>
-      <select className="flex-1" value={cur} onChange={(e) => editAttr(imgGuid, "componentimage", e.target.value)}>
+      <select className="flex-1" value={cur} onChange={(e) => setComponentImage(e.target.value)}>
         {!cur && <option value="" />}
         {!known && cur && <option value={cur}>{`(external) ${cur.slice(0, 8)}`}</option>}
         {options.map((o) => (
@@ -657,14 +689,19 @@ function ImageMetricBlock({
   const guid = guidOf(img) ?? "";
   const moveChild = useStore((s) => s.moveChild);
   const removeChild = useStore((s) => s.removeChild);
+  const editChildAttr = useStore((s) => s.editChildAttr);
+  const imageEpoch = useStore((s) => s.imageEpoch);
   const path = ci?.imagepath;
   const ciGuid = getAttr(img, "componentimage");
+  // Image-metric <image> entries usually carry no guid, so they can't be edited via the guid-based
+  // editAttr — address them by their position within the state's <imagemetrics> instead.
+  const editMetric = (k: string, v: string) => editChildAttr(stateGuid, "imagemetrics", index, k, v);
   return (
     <div className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
       <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
         {path && dataRoot ? (
           <img
-            src={imageUrl(path)}
+            src={imageUrl(path, imageEpoch)}
             alt=""
             className="max-w-full max-h-full object-contain"
             style={{ imageRendering: "auto" }}
@@ -684,15 +721,16 @@ function ImageMetricBlock({
             onDelete={() => removeChild(stateGuid, "imagemetrics", index)}
           />
         </div>
-        <ComponentImagePicker imgGuid={guid} value={getAttr(img, "componentimage")} options={ciOptions} />
+        <ComponentImagePicker imgGuid={guid} value={getAttr(img, "componentimage")} options={ciOptions} editFn={editMetric} />
         <AttrFields
           guid={guid}
           el={img}
           kind="image"
           preferred={["dockpoint", "offset", "width", "height", "colour", "margin", "shader_name"]}
           skip={["componentimage"]}
+          editFn={editMetric}
         />
-        <AddAttr guid={guid} kind="image" present={img.attrs.map((x) => x[0])} />
+        <AddAttr guid={guid} kind="image" present={img.attrs.map((x) => x[0])} editFn={editMetric} />
       </div>
     </div>
   );
@@ -829,12 +867,13 @@ function LayoutEngineSection({ guid, comp }: { guid: string; comp: RawElement })
  *  (edit them via the Raw tab to keep the file byte-identical). */
 function EffectiveImageBlock({ img, dataRoot }: { img: EffectiveImage; dataRoot: string | null }) {
   const { imagepath: path, width, height } = img;
+  const imageEpoch = useStore((s) => s.imageEpoch);
   return (
     <div className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
       <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
         {path && dataRoot ? (
           <img
-            src={imageUrl(path)}
+            src={imageUrl(path, imageEpoch)}
             alt=""
             className="max-w-full max-h-full object-contain"
             style={{ imageRendering: "auto" }}
@@ -864,6 +903,7 @@ function ComponentImagesSection({ guid, comp, dataRoot }: { guid: string; comp: 
   const addComponentImage = useStore((s) => s.addComponentImage);
   const deleteComponentImage = useStore((s) => s.deleteComponentImage);
   const moveChild = useStore((s) => s.moveChild);
+  const imageEpoch = useStore((s) => s.imageEpoch);
   return (
     <Section title={`Component images (${cis.length})`} defaultOpen={cis.length <= 4}>
       <div className="flex items-center gap-2 mb-2">
@@ -879,7 +919,7 @@ function ComponentImagesSection({ guid, comp, dataRoot }: { guid: string; comp: 
             <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
               {path && dataRoot ? (
                 <img
-                  src={imageUrl(path)}
+                  src={imageUrl(path, imageEpoch)}
                   alt=""
                   className="max-w-full max-h-full object-contain"
                   style={{ imageRendering: "auto" }}

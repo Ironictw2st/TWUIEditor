@@ -161,6 +161,14 @@ export function locateHier(doc: TwuiDocument, guid: string): HierLoc | undefined
   return result;
 }
 
+/** True when two distinct guids are direct siblings (share the same hierarchy parent). */
+export function sameHierarchyParent(doc: TwuiDocument, a: string, b: string): boolean {
+  if (a === b) return false;
+  const la = locateHier(doc, a);
+  const lb = locateHier(doc, b);
+  return !!la && !!lb && la.parent !== null && la.parent === lb.parent;
+}
+
 /** All GUIDs referenced as `this` within a hierarchy subtree. */
 function subtreeGuids(node: RawElement): string[] {
   const out: string[] = [];
@@ -409,13 +417,34 @@ export function replaceHierarchyNode(doc: TwuiDocument, guid: string, el: RawEle
   if (i >= 0) loc.parent.children[i] = el;
 }
 
-/** Rename a node's id (updates both hierarchy tag and component id/tag). */
+/** A token usable as an XML element name (so renaming the tag can't emit `<bad tag>`). */
+function isValidTagName(s: string): boolean {
+  return /^[A-Za-z_][\w.\-]*$/.test(s);
+}
+
+/** A valid XML element name for a component id, or null if one can't be derived. An already-valid
+ *  id is used as-is; an id that's only invalid because it starts with a digit (XML tags can't) gets
+ *  a leading `_`, so `id="3k_panel"` yields the tag `_3k_panel`; anything else still invalid (e.g.
+ *  containing a space) yields null. */
+function tagNameForId(id: string): string | null {
+  if (!id) return null;
+  if (isValidTagName(id)) return id;
+  if (isValidTagName("_" + id)) return "_" + id;
+  return null;
+}
+
+/** Rename a node: the `id` attribute is always set verbatim (the user's value, kept original). The
+ *  hierarchy node tag and component definition tag are set to a valid element name derived from the
+ *  id — equal to the id when it's already valid, or `_`-prefixed when the id starts with a digit so
+ *  `<_id>…</_id>` stays valid XML. An id that can't yield a valid tag (e.g. with a space) updates
+ *  only the attribute. */
 export function renameNode(doc: TwuiDocument, guid: string, newId: string): void {
+  const tag = tagNameForId(newId);
   const loc = locateHier(doc, guid);
-  if (loc) loc.node.tag = newId;
+  if (loc && tag) loc.node.tag = tag;
   const comp = componentByGuid(doc, guid);
   if (comp) {
-    comp.tag = newId;
+    if (tag) comp.tag = tag;
     setAttr(comp, "id", newId);
   }
 }
@@ -483,6 +512,24 @@ export function removeChild(
   const parent = findComponentElement(doc, parentGuid);
   const cont = parent && childByTag(parent, containerTag);
   if (cont) removeChildAt(cont, index);
+}
+
+/** Set an attribute on a child element addressed by container + element index (the child may carry
+ *  no guid of its own — e.g. an `<imagemetrics><image>` draw entry, which can't be reached via the
+ *  guid-based editAttr). Mirrors moveChild/removeChild's parent+container resolution. */
+export function editChildAttr(
+  doc: TwuiDocument,
+  parentGuid: string,
+  containerTag: string,
+  index: number,
+  key: string,
+  value: string
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  const cont = parent && childByTag(parent, containerTag);
+  if (!cont) return;
+  const el = elementChildren(cont)[index];
+  if (el) setAttr(el, key, value);
 }
 
 // --- States ---

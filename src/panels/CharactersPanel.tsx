@@ -61,6 +61,7 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
   const characters = useStore((s) => s.characters);
   const setCharacter = useStore((s) => s.setCharacter);
   const loc = useStore((s) => s.loc);
+  const imageEpoch = useStore((s) => s.imageEpoch);
 
   const roles = useMemo(() => (doc ? referencedCharacterRoles(doc) : []), [doc]);
   const templates = characterDb?.templates ?? [];
@@ -75,7 +76,7 @@ export default function CharactersPanel({ onClose, embedded }: { onClose: () => 
     const key = characters[role];
     if (!key) return null;
     const t = templates.find((tt) => tt.key === key);
-    return t?.portrait ? imageUrl(portraitImagePath(t.portrait, "large_panel")) : null;
+    return t?.portrait ? imageUrl(portraitImagePath(t.portrait, "large_panel"), imageEpoch) : null;
   };
 
   const body = (
