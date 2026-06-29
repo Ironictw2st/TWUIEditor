@@ -3,9 +3,19 @@
 Notable changes per release. The section for a tagged version becomes that release's notes,
 shown in the app's update prompt (Settings -> About / Updates and the startup banner).
 
-## [Unreleased]
+## [0.0.6] - 2026-06-28
 
 ### Added
+- **Create new TWUI files** — a **New** menu (toolbar, or `Ctrl+N`) makes a blank, valid layout in
+  an untitled tab: an empty root sized to the render resolution, with a selectable layout version.
+  **New from file** clones an existing file into a fresh untitled doc to modify. Untitled files are
+  kept in memory until you Save As.
+- **Insert parts from another file** — an **Insert from file** picker (Hierarchy right-click empty
+  space, the New menu, or a Pack Files entry's menu) lets you choose any `.twui.xml` (pack browser or
+  disk; templates included), browse its component tree, and drop a component — with its whole subtree
+  and component definitions — into the file you're editing, under the selected component (or the
+  root). All GUIDs are regenerated on insert so nothing collides, and the part's images, templates,
+  and script bindings come along and resolve.
 - **Open multiple files at once** — a tab strip at the top of the Hierarchy panel holds every
   open `.twui.xml`; click a tab to switch the active file (all panels follow it), `x` to close,
   `+` to open another. Opening a file (toolbar or Pack Files) now adds a tab instead of
@@ -20,6 +30,9 @@ shown in the app's update prompt (Settings -> About / Updates and the startup ba
   Close All; the Layers panel offers Make Active, Show/Hide, Move to Top/Bottom, and Close; and
   Pack Files entries can be opened as a single layout or onto the top/bottom layer (added as a
   reference layer while the file you're editing stays active).
+- **Swap two siblings' positions** — with exactly two components that share a parent selected,
+  right-click (Hierarchy tree or canvas) -> **Swap positions** exchanges their full position set
+  (`offset`, `docking`, `dock_offset`, and `component_anchor_point`) in one undo step.
 - **Composite layouts as layers** — a new **Layers** panel stacks open files in one visualizer
   like image layers (top entry draws on top), so you can view e.g. a campaign HUD with a schemes
   panel together and align them in a shared screen space. Toggle each file's eye to show/hide it
@@ -44,6 +57,23 @@ shown in the app's update prompt (Settings -> About / Updates and the startup ba
   `image_index`), so e.g. a card's base and alternative art swap independently.
 - Pooled-resource tier lists (`RangedTierList`) and a tier's filtered `item_list` now resolve their
   rows for preview; hairline textureless quads (divider lines) draw as solid colour fills.
+
+### Fixed
+- **Editing an image-metric (size, colour, offset, image) now takes effect** — the draw entries
+  under a state's Images carry no GUID of their own, so the Inspector's edits silently went nowhere
+  and the Visualizer never changed. They're now edited by position, so changing a State image's
+  width/height (the size that actually drives the on-screen draw), colour, offset, or which component
+  image it uses updates live. (The "Component images" size is the source texture size; the State
+  image size wins for drawing.)
+- **Renaming a component's id now renames its element tags too** — changing `id` in the Inspector
+  updates the `<id>…</id>` open/close tags in both the hierarchy and components sections (not just the
+  attribute), so the tree label and saved XML stay in sync. If the id starts with a digit (invalid for
+  an XML tag) the tag is `_`-prefixed — `id="3k_panel"` keeps that id but uses the tag `<_3k_panel>` —
+  while an id that still can't form a valid tag (e.g. with a space) updates only the attribute.
+- **Images from an overlay pack now render** — the Visualizer cached images for the whole session and
+  never refreshed them when the image source changed, so an overlaid `.pack`'s images (and switching
+  game / data folder / vanilla↔mods) showed stale or missing art. Changing the source now drops the
+  image cache and re-fetches.
 
 ## [0.0.5] - 2026-06-25
 

@@ -21,7 +21,10 @@ import SearchPalette from "./panels/SearchPalette";
 import BugReportPanel from "./panels/BugReportPanel";
 import UpdateBanner from "./panels/UpdateBanner";
 import DocsPanel from "./panels/DocsPanel";
+import NewFileDialog from "./panels/NewFileDialog";
+import InsertFromFileDialog from "./panels/InsertFromFileDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { captureAppWindow } from "./ipc/commands";
 
 const PANEL_TITLES: Record<PanelId, string> = {
@@ -89,6 +92,7 @@ function Toolbar() {
       <button className={btn} onClick={() => openFileDialog()}>
         Open…
       </button>
+      <NewMenu />
       {packMode && (
         <button className={btn} onClick={() => dockShowPanel("packfiles")} title="Show the Pack Files panel">
           Pack Files
@@ -198,6 +202,57 @@ function PanelsMenu() {
   );
 }
 
+/** Toolbar dropdown: create a new file (blank or cloned) or insert a part from another file. */
+function NewMenu() {
+  const [open, setOpen] = useState(false);
+  const openNewFileDialog = useStore((s) => s.openNewFileDialog);
+  const openInsertDialog = useStore((s) => s.openInsertDialog);
+  const newFromFile = useStore((s) => s.newFromFile);
+  const hasDoc = useStore((s) => s.doc != null);
+  const btn = "px-2.5 py-1 rounded bg-button hover:bg-buttonHover border border-edge text-[12px]";
+  const item =
+    "w-full text-left px-2 py-1 rounded text-[11px] text-text hover:bg-panelHeader disabled:opacity-40";
+
+  const pick = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
+  const newFromDisk = async () => {
+    const path = await openDialog({ multiple: false, filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
+    if (typeof path === "string") await newFromFile(path, false);
+  };
+
+  return (
+    <div className="relative">
+      <button className={btn} onClick={() => setOpen((o) => !o)} title="Create or compose a file">
+        New ▾
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute z-40 mt-1 left-0 w-52 rounded-md bg-sunken border border-edge shadow-xl p-1">
+            <button className={item} onClick={() => pick(() => openNewFileDialog())}>
+              New blank file…
+            </button>
+            <button className={item} onClick={() => pick(() => void newFromDisk())}>
+              New from file…
+            </button>
+            <div className="my-1 h-px bg-edge" />
+            <button
+              className={item}
+              disabled={!hasDoc}
+              title={hasDoc ? undefined : "Open or create a layout first"}
+              onClick={() => pick(() => openInsertDialog())}
+            >
+              Insert from file…
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** A single panel rendered to fill a popped-out OS window (no toolbar / other panels). */
 function PanelWindow({ panel }: { panel: PanelId }) {
   if (panel === "hierarchy") return <div className="h-full flex flex-col bg-panel">{<TreePanel />}</div>;
@@ -211,6 +266,8 @@ function PanelWindow({ panel }: { panel: PanelId }) {
 export default function App() {
   const searchOpen = useStore((s) => s.searchOpen);
   const closeSearch = useStore((s) => s.closeSearch);
+  const newFileOpen = useStore((s) => s.newFileOpen);
+  const insertOpen = useStore((s) => s.insertOpen);
   const loading = useStore((s) => s.loading);
 
   // Global shortcuts run through the central keybinding registry (src/keybinds.ts),
@@ -260,6 +317,8 @@ export default function App() {
         <DockLayout />
       </div>
       {searchOpen && <SearchPalette onClose={closeSearch} />}
+      {newFileOpen && <NewFileDialog />}
+      {insertOpen && <InsertFromFileDialog />}
       {import.meta.env.PROD && <UpdateBanner />}
       <UnsavedChangesDialog />
       {loading && <LoadingScreen />}

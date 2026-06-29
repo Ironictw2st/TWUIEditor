@@ -45,6 +45,7 @@ export const ACTIONS: KeyAction[] = [
     id: "redo", label: "Redo", category: "Editor", defaultBinding: "Mod+Y",
     aliases: ["Mod+Shift+Z"], allowInInput: true, run: (s) => s.redo(),
   },
+  { id: "new-file", label: "New file", category: "File", defaultBinding: "Mod+N", allowInInput: true, run: (s) => s.openNewFileDialog() },
   { id: "open", label: "Open file", category: "File", defaultBinding: "Mod+O", allowInInput: true, run: (s) => s.openFileDialog() },
   { id: "save", label: "Save", category: "File", defaultBinding: "Mod+S", allowInInput: true, run: (s) => s.save() },
   { id: "save-as", label: "Save As", category: "File", defaultBinding: "Mod+Shift+S", allowInInput: true, run: (s) => s.saveAsDialog() },

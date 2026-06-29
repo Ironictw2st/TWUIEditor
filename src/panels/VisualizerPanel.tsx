@@ -231,6 +231,7 @@ export default function VisualizerPanel() {
   const doc = useStore((s) => s.doc);
   const filePath = useStore((s) => s.filePath);
   const dataRoot = useStore((s) => s.dataRoot);
+  const imageEpoch = useStore((s) => s.imageEpoch);
   const selectedGuid = useStore((s) => s.selectedGuid);
   const selectedGuids = useStore((s) => s.selectedGuids);
   const select = useStore((s) => s.select);
@@ -382,6 +383,13 @@ export default function VisualizerPanel() {
     [renderLayers]
   );
 
+  // Drop cached images when the image source changes (overlay set/clear, game, data root, mods) so
+  // newly-resolvable images aren't stuck on a stale/failed entry; the URL is also cache-busted below.
+  useEffect(() => {
+    imgCache.current.clear();
+    forceTick((t) => t + 1);
+  }, [imageEpoch]);
+
   const getImage = useCallback((path: string): HTMLImageElement | null => {
     if (!dataRoot) return null;
     const cache = imgCache.current;
@@ -393,11 +401,11 @@ export default function VisualizerPanel() {
       img.crossOrigin = "anonymous";
       img.onload = () => forceTick((t) => t + 1);
       img.onerror = () => forceTick((t) => t + 1);
-      img.src = imageUrl(path);
+      img.src = imageUrl(path, imageEpoch);
       cache.set(path, img);
     }
     return img;
-  }, [dataRoot]);
+  }, [dataRoot, imageEpoch]);
 
   // Resize canvas to container.
   useEffect(() => {

@@ -26,6 +26,7 @@ import { defaultContext } from "../twui/context";
 import { collectCreatorPaths } from "../twui/creator";
 import { migrateLayout, MigrationResult } from "../twui/migrate";
 import { collectScriptComponents, pageScriptId } from "../twui/script";
+import { buildBlankDocument } from "../twui/skeleton";
 import {
   addCallback,
   addComponentImage,
@@ -37,7 +38,9 @@ import {
   deleteNode,
   deleteState,
   duplicateNode,
+  editChildAttr,
   extractSubtree,
+  genGuid,
   moveChild,
   moveNode,
   pasteSubtree,
@@ -47,6 +50,7 @@ import {
   renameNode,
   replaceComponent,
   replaceHierarchyNode,
+  sameHierarchyParent,
   setCallbackAttr,
   subtreeGuidSet,
   SubtreeClip,
@@ -238,6 +242,9 @@ export interface AppStore {
   packIncludeMods: boolean;
   /** Absolute path of a single `.pack` overlaid on the base source, or null. */
   overlayPack: string | null;
+  /** Bumped whenever the image source changes (overlay/game/data-root/mods) so the Visualizer and
+   *  thumbnails drop cached images and re-fetch them (cache-busts the twuiimg:// URL too). */
+  imageEpoch: number;
   /** Path to the user's RPFM `.ron` schema (decodes binary db tables), or null. */
   schemaPath: string | null;
   /** True until the initial boot `init()` (all game data) has fully loaded — drives
@@ -282,6 +289,11 @@ export interface AppStore {
   /** Quick-find palette: open state + mode ("find" by query, "refs" to selected guid). */
   searchOpen: boolean;
   searchMode: "find" | "refs";
+  /** "New file" dialog open state. */
+  newFileOpen: boolean;
+  /** "Insert from file" picker: open state + an optional pre-seeded source (pack-relative path). */
+  insertOpen: boolean;
+  insertSource: string | null;
   backgrounds: string[];
   background: string | null;
   /** Active visualizer tool (left tool palette). */
@@ -322,6 +334,23 @@ export interface AppStore {
   setRevealed: (guid: string, on: boolean) => void;
   openSearch: (mode?: "find" | "refs") => void;
   closeSearch: () => void;
+  /** Create a blank, minimal-but-valid layout in a new untitled tab (saved via Save As). */
+  newBlankFile: (opts: { version: number | string; name?: string }) => Promise<void>;
+  /** Clone an existing file into a new untitled tab to modify (kept off-disk until Save As). */
+  newFromFile: (path: string, fromPack: boolean) => Promise<void>;
+  /** Insert a component subtree (with its component definitions) from another loaded document into
+   *  the active doc under `parentGuid` (defaults to the hierarchy root). GUIDs are remapped. */
+  insertSubtreeFrom: (foreignDoc: TwuiDocument, sourceGuid: string, parentGuid?: string) => Promise<void>;
+  openNewFileDialog: () => void;
+  closeNewFileDialog: () => void;
+  /** Open the insert picker, optionally pre-seeded with a source (pack-relative path). */
+  openInsertDialog: (source?: string) => void;
+  closeInsertDialog: () => void;
+  /** Internal: (re)load the active doc's scripts/templates/ComponentCreator sub-layouts. Shared by
+   *  openFile and the new-file/insert flows so they all resolve referenced resources identically. */
+  hydrateDocResources: (doc: TwuiDocument, label: string) => Promise<void>;
+  /** Internal: adopt an in-memory doc as a new untitled tab (no on-disk path; dirty). */
+  adoptUntitledDoc: (doc: TwuiDocument, fileName: string) => void;
   setBackground: (path: string | null) => void;
   setCampaign: (key: string) => void;
   setFaction: (key: string) => void;
@@ -369,6 +398,7 @@ export interface AppStore {
   centerBetween: (midGuid: string) => void;
   distributeSelected: (axis: "x" | "y") => void;
   nudgeSelected: (dx: number, dy: number) => void;
+  swapSelectedOffsets: () => void;
   setStatus: (s: string) => void;
   setView: (v: Partial<View>) => void;
 
@@ -378,6 +408,9 @@ export interface AppStore {
   migrateVersion: (target: number) => MigrationResult | null;
   editAttr: (guid: string, key: string, value: string) => void;
   editAttrs: (guid: string, updates: Record<string, string>) => void;
+  /** Edit an attribute on a guid-less container child (e.g. an `<imagemetrics><image>`) by
+   *  container + element index — the guid-based `editAttr` can't reach these. */
+  editChildAttr: (parentGuid: string, containerTag: string, index: number, key: string, value: string) => void;
   editLayoutEngineAttr: (guid: string, key: string, value: string) => void;
   addLayoutEngine: (guid: string) => void;
   setCallbackFunc: (guid: string, index: number, value: string) => void;
@@ -531,6 +564,7 @@ export const useStore = create<AppStore>()(
     packMode: false,
     packPath: null,
     packLayouts: [],
+    imageEpoch: 0,
     packIncludeMods: false,
     overlayPack: null,
     schemaPath: null,
@@ -559,6 +593,9 @@ export const useStore = create<AppStore>()(
     revealed: {},
     searchOpen: false,
     searchMode: "find",
+    newFileOpen: false,
+    insertOpen: false,
+    insertSource: null,
     backgrounds: [],
     background: null,
     mode: DEFAULT_SETTINGS.visualizer.defaultMode,
@@ -863,81 +900,7 @@ export const useStore = create<AppStore>()(
           if (!fromPack && s.settings.editor.rememberLastFile) s.settings.lastFile = path;
           rememberTabs(s);
         });
-        // Auto-connect the page's backing Lua script (from its script_id).
-        const scriptId = pageScriptId(doc);
-        if (scriptId) {
-          try {
-            const hit = await ipc.findScript(scriptId);
-            set((s) => {
-              s.scriptConn = hit
-                ? { id: scriptId, path: hit.path, text: hit.text, status: "connected" }
-                : { id: scriptId, path: null, text: null, status: "missing" };
-            });
-          } catch {
-            set((s) => {
-              s.scriptConn = { id: scriptId, path: null, text: null, status: "missing" };
-            });
-          }
-        }
-        // Per-component scripts (a sub-component with its own ContextInitScriptObject,
-        // e.g. the schemes list_box): find + parse each published table so the list
-        // resolves against its own pack. Best-effort; keyed by component guid.
-        const scriptComps = collectScriptComponents(doc);
-        if (scriptComps.length) {
-          const packs: Record<string, unknown> = {};
-          await Promise.all(
-            scriptComps.map(async ({ guid, scriptId: sid }) => {
-              try {
-                const hit = await ipc.findScript(sid);
-                const pack = hit?.text ? extractDataPack(hit.text, sid) : null;
-                if (pack != null) packs[guid] = pack;
-              } catch {
-                /* per-component scripts are optional */
-              }
-            })
-          );
-          if (Object.keys(packs).length) set((s) => { s.componentDataPacks = packs; });
-        }
-        // Resolve referenced templates for the visualizer (best-effort).
-        const ids = collectTemplateIds(doc);
-        if (ids.length) {
-          try {
-            const templates = await ipc.loadTemplates(ids);
-            set((s) => {
-              s.templates = templates;
-              const n = Object.keys(templates).length;
-              s.status = `Loaded ${baseName(path)} (${n}/${ids.length} templates)`;
-            });
-          } catch {
-            /* templates are optional; ignore */
-          }
-        }
-        // Resolve ComponentCreator sub-layouts, recursively (sub-layouts may embed
-        // more). Depth-capped; a `visited` set prevents reloading/cycles.
-        try {
-          const created: Record<string, TwuiDocument> = {};
-          let frontier = collectCreatorPaths(doc);
-          for (let depth = 0; depth < 4 && frontier.length; depth++) {
-            const want = frontier.filter((p) => !(p in created));
-            if (!want.length) break;
-            const loaded = await ipc.loadLayouts(want);
-            Object.assign(created, loaded);
-            frontier = Object.values(loaded).flatMap((sub) => collectCreatorPaths(sub));
-          }
-          if (Object.keys(created).length) set((s) => { s.createdLayouts = created; });
-          // Sub-layouts reference their own templates (e.g. the court slot's `frame` is a
-          // `part_of_template` child of the `character_slot` template). Load those too so
-          // templated children resolve their visuals.
-          const subIds = [...new Set(Object.values(created).flatMap(collectTemplateIds))];
-          const have = get().templates;
-          const missing = subIds.filter((id) => !(id in have));
-          if (missing.length) {
-            const extra = await ipc.loadTemplates(missing);
-            set((s) => { s.templates = { ...s.templates, ...extra }; });
-          }
-        } catch {
-          /* ComponentCreator layouts are optional; ignore */
-        }
+        await get().hydrateDocResources(doc, baseName(path));
       } catch (e) {
         set((s) => {
           s.status = `Error: ${e}`;
@@ -1036,6 +999,188 @@ export const useStore = create<AppStore>()(
       });
       if (typeof path === "string") await get().openFile(path);
     },
+
+    hydrateDocResources: async (doc, label) => {
+      // Auto-connect the page's backing Lua script (from its script_id).
+      const scriptId = pageScriptId(doc);
+      if (scriptId) {
+        try {
+          const hit = await ipc.findScript(scriptId);
+          set((s) => {
+            s.scriptConn = hit
+              ? { id: scriptId, path: hit.path, text: hit.text, status: "connected" }
+              : { id: scriptId, path: null, text: null, status: "missing" };
+          });
+        } catch {
+          set((s) => {
+            s.scriptConn = { id: scriptId, path: null, text: null, status: "missing" };
+          });
+        }
+      }
+      // Per-component scripts (a sub-component with its own ContextInitScriptObject,
+      // e.g. the schemes list_box): find + parse each published table so the list
+      // resolves against its own pack. Best-effort; keyed by component guid.
+      const scriptComps = collectScriptComponents(doc);
+      if (scriptComps.length) {
+        const packs: Record<string, unknown> = {};
+        await Promise.all(
+          scriptComps.map(async ({ guid, scriptId: sid }) => {
+            try {
+              const hit = await ipc.findScript(sid);
+              const pack = hit?.text ? extractDataPack(hit.text, sid) : null;
+              if (pack != null) packs[guid] = pack;
+            } catch {
+              /* per-component scripts are optional */
+            }
+          })
+        );
+        if (Object.keys(packs).length) set((s) => { s.componentDataPacks = packs; });
+      }
+      // Resolve referenced templates for the visualizer (best-effort).
+      const ids = collectTemplateIds(doc);
+      if (ids.length) {
+        try {
+          const templates = await ipc.loadTemplates(ids);
+          set((s) => {
+            s.templates = templates;
+            const n = Object.keys(templates).length;
+            s.status = `Loaded ${label} (${n}/${ids.length} templates)`;
+          });
+        } catch {
+          /* templates are optional; ignore */
+        }
+      }
+      // Resolve ComponentCreator sub-layouts, recursively (sub-layouts may embed
+      // more). Depth-capped; a `visited` set prevents reloading/cycles.
+      try {
+        const created: Record<string, TwuiDocument> = {};
+        let frontier = collectCreatorPaths(doc);
+        for (let depth = 0; depth < 4 && frontier.length; depth++) {
+          const want = frontier.filter((p) => !(p in created));
+          if (!want.length) break;
+          const loaded = await ipc.loadLayouts(want);
+          Object.assign(created, loaded);
+          frontier = Object.values(loaded).flatMap((sub) => collectCreatorPaths(sub));
+        }
+        if (Object.keys(created).length) set((s) => { s.createdLayouts = created; });
+        // Sub-layouts reference their own templates (e.g. the court slot's `frame` is a
+        // `part_of_template` child of the `character_slot` template). Load those too so
+        // templated children resolve their visuals.
+        const subIds = [...new Set(Object.values(created).flatMap(collectTemplateIds))];
+        const have = get().templates;
+        const missing = subIds.filter((id) => !(id in have));
+        if (missing.length) {
+          const extra = await ipc.loadTemplates(missing);
+          set((s) => { s.templates = { ...s.templates, ...extra }; });
+        }
+      } catch {
+        /* ComponentCreator layouts are optional; ignore */
+      }
+    },
+
+    adoptUntitledDoc: (doc, fileName) =>
+      set((s) => {
+        // Park the current active file (if any) before the new one becomes active.
+        if (s.activeTabId) s.inactiveDocs[s.activeTabId] = snapshotActive(s);
+        const id = `new:${genGuid()}`;
+        // Untitled: no filePath/packPath -> Save routes to Save-As; rememberTabs skips it.
+        s.tabs.push({ id, fileName, filePath: null, packPath: null, dirty: true, visible: false });
+        s.activeTabId = id;
+        s.doc = doc;
+        s.filePath = null;
+        s.packPath = null;
+        s.fileName = fileName;
+        s.dirty = true;
+        s.selectedGuid = null;
+        s.selectedGuids = [];
+        s.revealed = {};
+        s.undoStack = [];
+        s.redoStack = [];
+        s.templates = {};
+        s.createdLayouts = {};
+        s.scriptConn = { id: null, path: null, text: null, status: "none" };
+        s.dataPackOverride = null;
+        s.componentDataPacks = {};
+        s.scriptDraft = null;
+        s.previewState = {};
+        s.status = `New: ${fileName}`;
+        rememberTabs(s);
+      }),
+
+    newBlankFile: async (opts) => {
+      const res = get().renderResolution;
+      const width = res?.w ?? 1920;
+      const height = res?.h ?? 1080;
+      const raw = (opts.name ?? "").trim() || "untitled";
+      const fileName = /\.xml$/i.test(raw) ? raw : `${raw}.twui.xml`;
+      let doc: TwuiDocument;
+      try {
+        doc = await buildBlankDocument({ version: opts.version, width, height });
+      } catch (e) {
+        set((s) => {
+          s.status = `New file error: ${e}`;
+          s.newFileOpen = false;
+        });
+        return;
+      }
+      get().adoptUntitledDoc(doc, fileName);
+      set((s) => { s.newFileOpen = false; });
+    },
+
+    newFromFile: async (path, fromPack) => {
+      try {
+        const doc = fromPack ? await ipc.readLayoutRel(path) : await ipc.readLayout(path);
+        const fileName = `(copy) ${baseName(path)}`;
+        get().adoptUntitledDoc(doc, fileName);
+        await get().hydrateDocResources(doc, fileName);
+      } catch (e) {
+        set((s) => { s.status = `New from file error: ${e}`; });
+      }
+    },
+
+    insertSubtreeFrom: async (foreignDoc, sourceGuid, parentGuid) => {
+      const cur = get().doc;
+      if (!cur) return;
+      const clip = extractSubtree(foreignDoc, sourceGuid);
+      if (!clip) {
+        set((s) => { s.status = "Insert: component not found in source"; });
+        return;
+      }
+      const rootEl = hierarchyRoot(cur);
+      const target = parentGuid ?? (rootEl ? guidOf(rootEl) : undefined);
+      if (!target) {
+        set((s) => { s.status = "Insert: no target parent in the current layout"; });
+        return;
+      }
+      // pasteSubtree clones + regenerates every GUID, so cross-file inserts can't collide.
+      let newGuid: string | undefined;
+      get().mutate((doc) => {
+        newGuid = pasteSubtree(doc, target, clip);
+      });
+      if (!newGuid) {
+        set((s) => { s.status = "Insert failed"; });
+        return;
+      }
+      get().select(newGuid);
+      // The inserted part may reference templates / ComponentCreator layouts the active doc didn't
+      // use yet — reload resources from the merged doc so they render.
+      const after = get().doc;
+      if (after) await get().hydrateDocResources(after, get().fileName ?? "layout");
+      set((s) => { s.status = "Inserted component"; });
+    },
+
+    openNewFileDialog: () => set((s) => { s.newFileOpen = true; }),
+    closeNewFileDialog: () => set((s) => { s.newFileOpen = false; }),
+    openInsertDialog: (source) =>
+      set((s) => {
+        s.insertOpen = true;
+        s.insertSource = source ?? null;
+      }),
+    closeInsertDialog: () =>
+      set((s) => {
+        s.insertOpen = false;
+        s.insertSource = null;
+      }),
 
     switchTab: (id) =>
       set((s) => {
@@ -1165,6 +1310,7 @@ export const useStore = create<AppStore>()(
           s.packMode = false;
           s.packLayouts = [];
           s.overlayPack = null;
+          s.imageEpoch++;
           s.settings.readMode = "folder";
           s.status = `Data root: ${path}`;
         });
@@ -1197,6 +1343,7 @@ export const useStore = create<AppStore>()(
         const layouts = await ipc.listLayouts();
         set((s) => {
           s.packLayouts = layouts;
+          s.imageEpoch++;
           s.status = `Pack mode (${withMods ? "with mods" : "vanilla"}): ${layouts.length} layouts`;
         });
         return true;
@@ -1221,6 +1368,7 @@ export const useStore = create<AppStore>()(
         set((s) => {
           s.overlayPack = path;
           s.packLayouts = layouts;
+          s.imageEpoch++;
           s.status = `Overlay: ${baseName(path)} (${layouts.length} layouts)`;
         });
       } catch (e) {
@@ -1237,6 +1385,7 @@ export const useStore = create<AppStore>()(
         set((s) => {
           s.overlayPack = null;
           s.packLayouts = layouts;
+          s.imageEpoch++;
           s.status = `Overlay cleared (${layouts.length} layouts)`;
         });
       } catch (e) {
@@ -1360,6 +1509,28 @@ export const useStore = create<AppStore>()(
           if (!el) continue;
           const [x, y] = parseVec2(getAttr(el, "offset"), [0, 0]);
           setAttr(el, "offset", fmtVec2(x + dx, y + dy));
+        }
+      });
+    },
+
+    // With exactly two selected siblings (same parent), exchange their full position set
+    // (offset/docking/dock_offset/component_anchor_point). Raw strings are swapped verbatim
+    // (no reformat) so a re-save stays byte-identical. One undo step.
+    swapSelectedOffsets: () => {
+      const guids = get().selectedGuids;
+      const cur = get().doc;
+      if (guids.length !== 2 || !cur || !sameHierarchyParent(cur, guids[0], guids[1])) return;
+      get().mutate((doc) => {
+        const elA = findComponentElement(doc, guids[0]);
+        const elB = findComponentElement(doc, guids[1]);
+        if (!elA || !elB) return;
+        for (const key of ["offset", "docking", "dock_offset", "component_anchor_point"]) {
+          const va = getAttr(elA, key);
+          const vb = getAttr(elB, key);
+          if (vb !== undefined) setAttr(elA, key, vb);
+          else removeAttr(elA, key);
+          if (va !== undefined) setAttr(elB, key, va);
+          else removeAttr(elB, key);
         }
       });
     },
@@ -1502,6 +1673,9 @@ export const useStore = create<AppStore>()(
     },
     removeChild: (parentGuid, containerTag, index) => {
       get().mutate((doc) => removeChild(doc, parentGuid, containerTag, index));
+    },
+    editChildAttr: (parentGuid, containerTag, index, key, value) => {
+      get().mutate((doc) => editChildAttr(doc, parentGuid, containerTag, index, key, value));
     },
 
     // Hide/show a component by toggling visible="false" on its <components>

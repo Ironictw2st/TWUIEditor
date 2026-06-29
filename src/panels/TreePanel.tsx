@@ -305,6 +305,7 @@ export default function TreePanel() {
   const openBgContext = (e: React.MouseEvent) => {
     const s = useStore.getState();
     menu.open(e, [
+      { label: "Insert from file…", disabled: !s.doc, onSelect: () => s.openInsertDialog() },
       { label: "Paste", disabled: !s.doc || s.clipboard == null, onSelect: () => s.paste() },
       { label: "Regenerate all GUIDs", disabled: !s.doc, onSelect: () => s.regenGuids() },
       { label: "", separator: true },
