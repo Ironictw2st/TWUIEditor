@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { pickOpenFile } from "../ipc/dialog";
 import { useStore } from "../state/store";
 import { readLayout, readLayoutRel } from "../ipc/commands";
 import { componentMap, elementChildren, getAttr, guidOf, hierarchyRoot } from "../twui/doc";
@@ -111,8 +111,8 @@ export default function InsertFromFileDialog() {
   }, [activeDoc, selectedGuid]);
 
   const browse = async () => {
-    const f = await openDialog({ multiple: false, filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
-    if (typeof f === "string") void loadSource(f, false);
+    const f = await pickOpenFile({ filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
+    if (f) void loadSource(f, false);
   };
 
   const doInsert = () => {

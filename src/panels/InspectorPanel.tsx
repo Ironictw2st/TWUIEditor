@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { pickOpenFile } from "../ipc/dialog";
 import { useStore } from "../state/store";
 import {
   ancestorGuids,
@@ -625,11 +625,11 @@ function ImagePathField({
     if (local !== (value ?? "")) editAttr(guid, "imagepath", local);
   };
   const browse = async () => {
-    const f = await open({
+    const f = await pickOpenFile({
       filters: [{ name: "Images", extensions: ["png", "dds", "tga", "jpg", "jpeg"] }],
       defaultPath: dataRoot ? `${dataRoot}/ui` : undefined,
     });
-    if (typeof f !== "string") return;
+    if (!f) return;
     const rel = dataRoot ? dataRootRelative(f, dataRoot) : null;
     if (rel) {
       setLocal(rel);
@@ -1421,29 +1421,28 @@ function BindingsSection({ doc, comp, guid }: { doc: TwuiDocument; comp: RawElem
 /** One editable attribute of a callback (callback_id / context_object_id / context_function_id),
  *  addressed by (container tag, element index). Function ids are entity-decoded for display and
  *  re-encoded on write by the store. */
-function CallbackField({
-  guid,
-  tag,
-  index,
-  attr,
+/** A controlled text field that commits on blur/Enter (no-op when unchanged). Shared by the
+ *  callback attribute rows and their child_m_user_properties property rows. `resetKey` re-seeds
+ *  the local draft when the underlying row identity changes (so it doesn't stick across rows
+ *  that happen to share the same text). `decode` shows entity-escaped values un-escaped. */
+function CommitField({
   label,
   value,
   decode,
+  resetKey,
+  onCommit,
 }: {
-  guid: string;
-  tag: string;
-  index: number;
-  attr: string;
   label: string;
   value: string | undefined;
   decode?: boolean;
+  resetKey: string;
+  onCommit: (value: string) => void;
 }) {
-  const setCallbackAttr = useStore((s) => s.setCallbackAttr);
   const shown = decode && value !== undefined ? decodeEntities(value) : value ?? "";
   const [local, setLocal] = useState(shown);
-  useEffect(() => setLocal(shown), [shown, guid, tag, index]);
+  useEffect(() => setLocal(shown), [shown, resetKey]);
   const commit = () => {
-    if (local !== shown) setCallbackAttr(guid, tag, index, attr, local);
+    if (local !== shown) onCommit(local);
   };
   return (
     <label className="flex items-center gap-2 mb-1">
@@ -1461,10 +1460,68 @@ function CallbackField({
   );
 }
 
+/** Editable list of a callback's <child_m_user_properties> params (name/value rows with
+ *  add / delete / reorder). The first "+ Add property" creates the container; deleting the
+ *  last property drops it. Shown for every callback so any callback can gain params. */
+function CallbackProps({
+  guid,
+  tag,
+  cbIndex,
+  el,
+}: {
+  guid: string;
+  tag: string;
+  cbIndex: number;
+  el: RawElement;
+}) {
+  const addCallbackProp = useStore((s) => s.addCallbackProp);
+  const setCallbackPropAttr = useStore((s) => s.setCallbackPropAttr);
+  const moveCallbackProp = useStore((s) => s.moveCallbackProp);
+  const removeCallbackProp = useStore((s) => s.removeCallbackProp);
+  const props = childByTag(el, "child_m_user_properties");
+  const propEls = props ? elementChildren(props) : [];
+  return (
+    <div className="mt-2 pl-2 border-l border-edge">
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-[10px] text-gray-500 uppercase tracking-wide flex-1">
+          Properties ({propEls.length})
+        </span>
+        <AddButton label="+ Add property" onClick={() => addCallbackProp(guid, tag, cbIndex)} />
+      </div>
+      {propEls.map((p, pi) => (
+        <div key={pi} className="flex items-start gap-2 mb-1.5">
+          <div className="flex-1 min-w-0">
+            <CommitField
+              label="name"
+              resetKey={`${guid}:${tag}:${cbIndex}:${pi}:name`}
+              value={getAttr(p, "name")}
+              onCommit={(v) => setCallbackPropAttr(guid, tag, cbIndex, pi, "name", v)}
+            />
+            <CommitField
+              label="value"
+              decode
+              resetKey={`${guid}:${tag}:${cbIndex}:${pi}:value`}
+              value={getAttr(p, "value")}
+              onCommit={(v) => setCallbackPropAttr(guid, tag, cbIndex, pi, "value", v)}
+            />
+          </div>
+          <RowControls
+            index={pi}
+            count={propEls.length}
+            onMove={(dir) => moveCallbackProp(guid, tag, cbIndex, pi, dir)}
+            onDelete={() => removeCallbackProp(guid, tag, cbIndex, pi)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Raw editable list of the component's <callback_with_context> entries (add/delete/reorder + the
  *  three callback attributes). Complements the resolved BindingsSection above. */
 function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
   const addCallback = useStore((s) => s.addCallback);
+  const setCallbackAttr = useStore((s) => s.setCallbackAttr);
   const moveChild = useStore((s) => s.moveChild);
   const removeChild = useStore((s) => s.removeChild);
   // Rows carry their owning container tag + element-child index (what moveChild/removeChild use).
@@ -1497,9 +1554,26 @@ function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
               onDelete={() => removeChild(guid, r.tag, r.index)}
             />
           </div>
-          <CallbackField guid={guid} tag={r.tag} index={r.index} attr="callback_id" label="callback" value={getAttr(r.el, "callback_id")} />
-          <CallbackField guid={guid} tag={r.tag} index={r.index} attr="context_object_id" label="object" value={getAttr(r.el, "context_object_id")} />
-          <CallbackField guid={guid} tag={r.tag} index={r.index} attr="context_function_id" label="function" value={getAttr(r.el, "context_function_id")} decode />
+          <CommitField
+            label="callback"
+            resetKey={`${guid}:${r.tag}:${r.index}:callback_id`}
+            value={getAttr(r.el, "callback_id")}
+            onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "callback_id", v)}
+          />
+          <CommitField
+            label="object"
+            resetKey={`${guid}:${r.tag}:${r.index}:context_object_id`}
+            value={getAttr(r.el, "context_object_id")}
+            onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "context_object_id", v)}
+          />
+          <CommitField
+            label="function"
+            decode
+            resetKey={`${guid}:${r.tag}:${r.index}:context_function_id`}
+            value={getAttr(r.el, "context_function_id")}
+            onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "context_function_id", v)}
+          />
+          <CallbackProps guid={guid} tag={r.tag} cbIndex={r.index} el={r.el} />
         </div>
       ))}
     </Section>
@@ -1583,11 +1657,11 @@ function ScriptSection({ scriptId }: { scriptId: string }) {
   const fileName = matches && conn.path ? conn.path.split(/[\\/]/).pop() : null;
 
   const pick = async () => {
-    const file = await open({
+    const file = await pickOpenFile({
       filters: [{ name: "Lua", extensions: ["lua"] }],
       defaultPath: dataRoot ? `${dataRoot}/script` : undefined,
     });
-    if (typeof file === "string") connectScript(file);
+    if (file) connectScript(file);
   };
 
   const btn =

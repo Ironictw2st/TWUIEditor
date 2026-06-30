@@ -16,7 +16,10 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      # recurse: the Rust build embeds the RPFM schemas from the vendor/rpfm-schemas submodule.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:

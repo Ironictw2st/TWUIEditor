@@ -10,6 +10,7 @@ import { useStore } from "../state/store";
 import type { PanelId } from "../state/store";
 import { PANEL_IDS } from "../state/store";
 import { popOutPanel } from "../windows";
+import { IS_BROWSER } from "../ipc/invoke";
 import TreePanel from "./TreePanel";
 import InspectorPanel from "./InspectorPanel";
 import VisualizerPanel from "./VisualizerPanel";
@@ -69,14 +70,17 @@ function PanelTab(props: IDockviewPanelHeaderProps) {
   return (
     <div className="flex items-center gap-2 px-2 h-full text-[12px]">
       <span className="truncate">{props.api.title ?? TITLES[id]}</span>
-      <button
-        className="text-textMuted hover:text-accent"
-        title="Pop out into its own window"
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={pop}
-      >
-        <PopOutIcon />
-      </button>
+      {/* Pop-out needs OS multi-window; hide it in the web client. */}
+      {!IS_BROWSER && (
+        <button
+          className="text-textMuted hover:text-accent"
+          title="Pop out into its own window"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={pop}
+        >
+          <PopOutIcon />
+        </button>
+      )}
     </div>
   );
 }

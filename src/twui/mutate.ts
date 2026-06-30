@@ -691,6 +691,95 @@ export function setCallbackAttr(
   if (el) setAttr(el, key, value);
 }
 
+// --- Callback properties (<callback_with_context><child_m_user_properties><property>) ---
+// A callback's extra params live two levels deep, so these address a property by
+// (container tag, callback element index, property element index).
+
+/** Resolve a callback element by (container tag, element index). */
+function findCallbackEl(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  cbIndex: number
+): RawElement | undefined {
+  const comp = findComponentElement(doc, compGuid);
+  const cont = comp && childByTag(comp, containerTag);
+  return cont ? elementChildren(cont)[cbIndex] : undefined;
+}
+
+/** Add an empty `<property name="" value=""/>` to a callback's child_m_user_properties
+ *  (creating the container if needed). */
+export function addCallbackProp(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  cbIndex: number
+): void {
+  const cb = findCallbackEl(doc, compGuid, containerTag, cbIndex);
+  if (!cb) return;
+  const props = ensureContainer(cb, "child_m_user_properties");
+  appendChild(props, {
+    kind: "element",
+    tag: "property",
+    attrs: [
+      ["name", ""],
+      ["value", ""],
+    ],
+    children: [],
+    self_closing: true,
+  });
+}
+
+/** Set one attribute (name|value) of a callback property addressed by its element index. */
+export function setCallbackPropAttr(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  cbIndex: number,
+  propIndex: number,
+  key: string,
+  value: string
+): void {
+  const cb = findCallbackEl(doc, compGuid, containerTag, cbIndex);
+  const props = cb && childByTag(cb, "child_m_user_properties");
+  if (!props) return;
+  const p = elementChildren(props)[propIndex];
+  if (p) setAttr(p, key, value);
+}
+
+/** Reorder a callback property within its child_m_user_properties (dir -1 up / +1 down). */
+export function moveCallbackProp(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  cbIndex: number,
+  propIndex: number,
+  dir: -1 | 1
+): void {
+  const cb = findCallbackEl(doc, compGuid, containerTag, cbIndex);
+  const props = cb && childByTag(cb, "child_m_user_properties");
+  if (props) moveChildAt(props, propIndex, dir);
+}
+
+/** Delete a callback property by element index; drops the now-empty child_m_user_properties
+ *  container so it never serializes as an empty `<child_m_user_properties></child_m_user_properties>`. */
+export function removeCallbackProp(
+  doc: TwuiDocument,
+  compGuid: string,
+  containerTag: string,
+  cbIndex: number,
+  propIndex: number
+): void {
+  const cb = findCallbackEl(doc, compGuid, containerTag, cbIndex);
+  const props = cb && childByTag(cb, "child_m_user_properties");
+  if (!cb || !props) return;
+  removeChildAt(props, propIndex);
+  if (elementChildren(props).length === 0) {
+    const i = cb.children.indexOf(props);
+    if (i >= 0) cb.children.splice(i, 1);
+  }
+}
+
 export function isElementNode(n: TwuiNode): n is RawElement {
   return isElement(n);
 }

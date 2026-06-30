@@ -1,3 +1,4 @@
+mod api;
 mod bin;
 mod bug_report;
 mod cco_docs;
@@ -8,11 +9,12 @@ mod db;
 mod image;
 mod loc;
 mod model;
-mod schema;
+mod schema_embed;
 mod script;
 mod source;
 mod state;
 mod update;
+mod web;
 
 use state::AppState;
 use std::borrow::Cow;
@@ -32,6 +34,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .manage(web::WebServer::default())
         .register_uri_scheme_protocol("twuiimg", |ctx, request| {
             let app = ctx.app_handle();
             let state = app.state::<AppState>();
@@ -96,6 +99,11 @@ pub fn run() {
             commands::serialize_element,
             commands::parse_element,
             commands::list_backgrounds,
+            commands::host_list_dir,
+            commands::host_default_paths,
+            web::start_web_server,
+            web::stop_web_server,
+            web::web_server_status,
             update::check_update,
             update::install_update,
             bug_report::capture_app_window,

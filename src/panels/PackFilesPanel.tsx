@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { pickOpenFile } from "../ipc/dialog";
 import { useStore } from "../state/store";
 import { useContextMenu, MenuItem } from "../components/ContextMenu";
 
@@ -128,8 +128,8 @@ export default function PackFilesPanel() {
   };
 
   const pickOverlay = async () => {
-    const f = await openDialog({ multiple: false, filters: [{ name: "Pack", extensions: ["pack"] }] });
-    if (typeof f === "string") void setOverlayPack(f);
+    const f = await pickOpenFile({ filters: [{ name: "Pack", extensions: ["pack"] }] });
+    if (f) void setOverlayPack(f);
   };
 
   return (

@@ -1,11 +1,12 @@
 //! Shared application state: the active data source (loose folder or `.pack`
 //! archives) + a decoded-image cache.
 
-use crate::schema::Schema;
 use crate::source::{
-    build_index, ordered_packs, DataSource, FolderSource, OverlaySource, PackCache,
+    build_pack_source, ordered_packs, rpfm_game_key, DataSource, FolderSource, OverlaySource,
+    PackSource,
 };
 use lru::LruCache;
+use rpfm_lib::schema::Schema;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -26,11 +27,15 @@ pub struct Inner {
     pub base: Option<Arc<dyn DataSource>>,
     /// The pack a single-pack overlay is reading from, if any.
     pub overlay_pack: Option<PathBuf>,
-    /// Parsed pack indexes, reused across source switches (vanilla/mod, overlay).
-    pub pack_cache: PackCache,
-    /// Path to the user's RPFM `.ron` schema (decodes binary db tables in packs).
+    /// The current rpfm game key (`three_kingdoms` / `warhammer_3`) — selects the GameInfo for pack
+    /// reading and the bundled schema. Set via the game switch.
+    pub game_key: String,
+    /// Cached merged base pack, keyed by `(game_key, include_mods)`, so the vanilla/mods and overlay
+    /// toggles don't re-read the index.
+    pub base_pack: Option<(String, bool, Arc<PackSource>)>,
+    /// Path to a user-chosen RPFM `.ron` schema override (else the bundled schema is used).
     pub schema_path: Option<PathBuf>,
-    /// Parsed schema cache (rebuilt when `schema_path` changes).
+    /// Parsed schema cache (rebuilt when the schema source or game changes).
     pub schema: Option<Arc<Schema>>,
     /// Full-key localised-string map for the active source (binary `.loc` + TSV),
     /// cached so the db + loc consumers don't each re-scan. Cleared on source change.
@@ -44,6 +49,7 @@ impl AppState {
         let base: Option<Arc<dyn DataSource>> = root
             .clone()
             .map(|r| Arc::new(FolderSource::new(r)) as Arc<dyn DataSource>);
+        let game_key = "three_kingdoms".to_string();
         AppState {
             inner: Mutex::new(Inner {
                 data_root: root,
@@ -51,8 +57,9 @@ impl AppState {
                 source: base.clone(),
                 base,
                 overlay_pack: None,
-                pack_cache: PackCache::new(),
-                schema_path: default_schema_path(),
+                schema_path: None,
+                game_key,
+                base_pack: None,
                 schema: None,
                 loc_cache: None,
                 image_cache: LruCache::new(NonZeroUsize::new(512).unwrap()),
@@ -95,23 +102,34 @@ impl AppState {
     /// `include_mods` is false, only vanilla (non-Mod-type) packs are loaded.
     /// Clears any overlay; reuses cached pack indexes.
     pub fn set_pack_source(&self, game_dir: PathBuf, include_mods: bool) -> Result<(), String> {
-        let paths = ordered_packs(&game_dir, include_mods)?;
-        // Parse the pack indexes OUTSIDE the lock (cold-cache is ~1.3 s for a full
-        // install) so the image handler / reads aren't blocked. Borrow the cache
-        // out, build, then put it back warmed.
-        let mut cache = std::mem::take(&mut self.inner.lock().unwrap().pack_cache);
-        let src = build_index(&paths, &mut cache);
-        let empty = src.is_empty();
-        let arc = Arc::new(src) as Arc<dyn DataSource>;
+        // Reuse a cached base pack for the same (game, include_mods); else build it OUTSIDE the lock
+        // (a cold full-install merge takes ~1 s) so the image handler / reads aren't blocked.
+        let (game_key, cached) = {
+            let g = self.inner.lock().unwrap();
+            let hit = match &g.base_pack {
+                Some((gk, im, arc)) if *gk == g.game_key && *im == include_mods => Some(arc.clone()),
+                _ => None,
+            };
+            (g.game_key.clone(), hit)
+        };
+        let pack: Arc<PackSource> = match cached {
+            Some(a) => a,
+            None => {
+                let paths = ordered_packs(&game_dir, include_mods)?;
+                let src = build_pack_source(&paths, &game_key)?;
+                if src.is_empty() {
+                    return Err("no readable .pack files (all unsupported)".into());
+                }
+                Arc::new(src)
+            }
+        };
+        let base = pack.clone() as Arc<dyn DataSource>;
         let mut g = self.inner.lock().unwrap();
-        g.pack_cache = cache;
-        if empty {
-            return Err("no readable .pack files (all unsupported/encrypted)".into());
-        }
+        g.base_pack = Some((game_key, include_mods, pack));
         g.data_root = Some(game_dir);
         g.pack_mode = true;
-        g.base = Some(arc.clone());
-        g.source = Some(arc);
+        g.base = Some(base.clone());
+        g.source = Some(base);
         g.overlay_pack = None;
         g.loc_cache = None;
         g.image_cache.clear();
@@ -121,24 +139,42 @@ impl AppState {
     /// Overlay a single `.pack` over the current base: reads resolve from it
     /// first, then fall back to the base. Requires a base source already set.
     pub fn set_overlay_pack(&self, pack: PathBuf) -> Result<(), String> {
-        let Some(base) = self.inner.lock().unwrap().base.clone() else {
+        let (base, game_key) = {
+            let g = self.inner.lock().unwrap();
+            (g.base.clone(), g.game_key.clone())
+        };
+        let Some(base) = base else {
             return Err("no base source to overlay onto".into());
         };
-        // Parse outside the lock (see set_pack_source).
-        let mut cache = std::mem::take(&mut self.inner.lock().unwrap().pack_cache);
-        let top = build_index(std::slice::from_ref(&pack), &mut cache);
-        let empty = top.is_empty();
-        let mut g = self.inner.lock().unwrap();
-        g.pack_cache = cache;
-        if empty {
+        // Build outside the lock (see set_pack_source).
+        let top = build_pack_source(std::slice::from_ref(&pack), &game_key)?;
+        if top.is_empty() {
             return Err(format!("'{}' is not a readable pack", pack.display()));
         }
         let overlay = Arc::new(OverlaySource::new(Arc::new(top), base)) as Arc<dyn DataSource>;
+        let mut g = self.inner.lock().unwrap();
         g.source = Some(overlay);
         g.overlay_pack = Some(pack);
         g.loc_cache = None;
         g.image_cache.clear();
         Ok(())
+    }
+
+    /// Set the active game (by our folder name, e.g. `3K`/`WH3`): updates the rpfm game key, drops
+    /// the cached base pack + parsed schema (both game-specific), and re-points the schema override
+    /// at the new game's local RPFM schema if one is installed (else the bundled schema is used).
+    pub fn set_game_key(&self, name: &str) {
+        let key = rpfm_game_key(name).to_string();
+        let mut g = self.inner.lock().unwrap();
+        if g.game_key == key {
+            return;
+        }
+        // The cached pack, parsed schema, and any override are all game-specific; drop them so the
+        // new game's bundled schema + packs are used.
+        g.schema_path = None;
+        g.game_key = key;
+        g.base_pack = None;
+        g.schema = None;
     }
 
     /// Remove the single-pack overlay, restoring the base source.
@@ -163,7 +199,8 @@ impl AppState {
         g.schema = None;
     }
 
-    /// The parsed schema (lazily read + cached). `None` if unset or unparseable.
+    /// The parsed schema (lazily read + cached). Prefers the user's `schema_path` override; otherwise
+    /// uses the bundled schema for the active game. `None` if neither is available or it won't parse.
     pub fn schema(&self) -> Option<Arc<Schema>> {
         {
             let g = self.inner.lock().unwrap();
@@ -171,15 +208,16 @@ impl AppState {
                 return Some(s.clone());
             }
         }
-        let path = self.inner.lock().unwrap().schema_path.clone()?;
-        let text = std::fs::read_to_string(&path).ok()?;
-        let parsed = match Schema::parse(&text) {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                eprintln!("schema: {e}");
-                return None;
-            }
+        let (path_override, game_key) = {
+            let g = self.inner.lock().unwrap();
+            (g.schema_path.clone(), g.game_key.clone())
         };
+        // Prefer the user's explicit override, then the bundled schema. The bundled one is guaranteed
+        // to match the linked rpfm_lib version; an old-format local schema (RPFM pre-v5 `.ron`) would
+        // fail to parse, so we fall back to the bundle instead of giving up.
+        let parsed = path_override
+            .and_then(|p| load_schema(&p))
+            .or_else(|| crate::schema_embed::embedded_schema_path(&game_key).and_then(|p| load_schema(&p)))?;
         let mut g = self.inner.lock().unwrap();
         g.schema = Some(parsed.clone());
         Some(parsed)
@@ -291,18 +329,14 @@ fn is_data_root(p: &Path) -> bool {
     p.join("ui").is_dir()
 }
 
-/// Auto-detect the user's RPFM 3K schema in the standard config location so db
-/// decode "just works" when RPFM is installed; overridable in Settings.
-fn default_schema_path() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let p = PathBuf::from(appdata)
-        .join("rpfm")
-        .join("config")
-        .join("schemas")
-        .join("schema_3k.ron");
-    if p.is_file() {
-        Some(p)
-    } else {
-        None
+/// Parse an RPFM `.ron` schema file into the cache shape. `None` (with a logged reason) if it can't
+/// be read or is an incompatible format for the linked rpfm_lib version.
+fn load_schema(path: &Path) -> Option<Arc<Schema>> {
+    match Schema::load(path, None) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            eprintln!("schema {}: {e}", path.display());
+            None
+        }
     }
 }

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isBrowserMode } from "./invoke";
 import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, ImageStatus, RawElement, RoundtripReport, TwuiDocument } from "../types/twui";
 
 export function loadContextDb(): Promise<ContextDb> {
@@ -179,14 +179,81 @@ export function submitBugReport(report: BugReport): Promise<void> {
 // `http://<scheme>.localhost/...`; on macOS/Linux as `<scheme>://localhost/...`.
 const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
 
-/** Build a webview URL for a TWUI imagepath served by the twuiimg:// protocol. `bust` (an image
- *  epoch) is appended as a `?v=` query so a source change defeats the webview's HTTP cache; the
- *  backend resolves images from the URI path only and ignores the query. */
+/** Build a URL for a TWUI imagepath. In the Tauri webview this uses the twuiimg:// protocol;
+ *  in the web client it uses the same-origin `/img/{rel}` HTTP route. `bust` (an image epoch) is
+ *  appended as a `?v=` query so a source change defeats the HTTP cache; the backend resolves
+ *  images from the URI path only and ignores the query. */
 export function imageUrl(relPath: string, bust?: string | number): string {
   // encodeURI keeps '/' but encodes spaces etc.; backend percent-decodes.
   const enc = encodeURI(relPath);
   const q = bust !== undefined ? `?v=${encodeURIComponent(String(bust))}` : "";
+  if (isBrowserMode()) {
+    return `/img/${enc}${q}`;
+  }
   return IS_WINDOWS
     ? `http://twuiimg.localhost/${enc}${q}`
     : `twuiimg://localhost/${enc}${q}`;
+}
+
+// --- Host file browser (web client uses this in place of native OS dialogs) ---
+
+/** One entry in a host directory listing. Field names mirror the Rust `DirEntry`. */
+export interface HostDirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+/** A host directory listing (or the drive/root list when `path` is null). */
+export interface HostDirListing {
+  path: string | null;
+  parent: string | null;
+  entries: HostDirEntry[];
+}
+
+/** Suggested starting directories for the host file browser. */
+export interface HostPaths {
+  data_root: string | null;
+  games_dir: string | null;
+}
+
+/** List a host directory; pass null/undefined to list filesystem roots (drives). */
+export function hostListDir(path?: string | null): Promise<HostDirListing> {
+  return invoke("host_list_dir", { path: path ?? null });
+}
+
+export function hostDefaultPaths(): Promise<HostPaths> {
+  return invoke("host_default_paths");
+}
+
+// --- Web access point control (desktop only; experimental) ---
+
+export type WebBind = "loopback" | "lan" | "custom";
+
+export interface WebOpts {
+  bind: WebBind;
+  port: number;
+  customIp?: string | null;
+  password: string;
+}
+
+export interface WebInfo {
+  url: string;
+  bind: WebBind;
+  host: string;
+  port: number;
+}
+
+/** Start the web access server; returns a share URL. Errors (e.g. port in use) reject. */
+export function startWebServer(opts: WebOpts): Promise<WebInfo> {
+  return invoke("start_web_server", { opts });
+}
+
+export function stopWebServer(): Promise<void> {
+  return invoke("stop_web_server");
+}
+
+/** Current web server info, or null when stopped. */
+export function webServerStatus(): Promise<WebInfo | null> {
+  return invoke("web_server_status");
 }

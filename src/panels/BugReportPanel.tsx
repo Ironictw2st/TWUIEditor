@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { pickOpenFiles } from "../ipc/dialog";
 import { useStore } from "../state/store";
 import { captureAppWindow, submitBugReport, InlineImage } from "../ipc/commands";
 import { captureVisualizer } from "./visualizerCapture";
@@ -106,12 +106,10 @@ export default function BugReportPanel({
   };
 
   const addUploads = async () => {
-    const picked = await openDialog({
-      multiple: true,
+    const paths = await pickOpenFiles({
       filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
     });
-    if (!picked) return;
-    const paths = Array.isArray(picked) ? picked : [picked];
+    if (!paths) return;
     setUploads((u) => [...u, ...paths.filter((p) => !u.includes(p))]);
   };
 

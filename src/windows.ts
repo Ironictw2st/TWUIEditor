@@ -4,6 +4,7 @@
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { PanelId } from "./state/store";
+import { IS_BROWSER } from "./ipc/invoke";
 
 const TITLE: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -24,6 +25,11 @@ const SIZE: Record<PanelId, { width: number; height: number }> = {
 
 /** Open (or focus) the OS window for a panel. `onClosed` fires when the user closes that window. */
 export async function popOutPanel(id: PanelId, onClosed: (id: PanelId) => void): Promise<void> {
+  // No OS multi-window in the web client: revert the optimistic pop-out (redock).
+  if (IS_BROWSER) {
+    onClosed(id);
+    return;
+  }
   const label = `panel-${id}`;
   try {
     const existing = await WebviewWindow.getByLabel(label);

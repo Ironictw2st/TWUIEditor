@@ -50,6 +50,16 @@ mod roundtrip_tests {
             .unwrap_or_else(|e| panic!("read {path}: {e}"));
         let doc = parse::parse(&original).expect("parse");
         let out = serialize::serialize(&doc);
+        // Web-transport fidelity: the web access point deserializes `doc` from a
+        // serde_json payload (not Tauri's IPC serializer), so prove that a
+        // Value round-trip can't perturb the bytes we write back out.
+        let value = serde_json::to_value(&doc).expect("to_value");
+        let doc_json: super::Document = serde_json::from_value(value).expect("from_value");
+        assert_eq!(
+            out,
+            serialize::serialize(&doc_json),
+            "serde_json transport diverged for {rel}"
+        );
         if original != out {
             let ab = original.as_bytes();
             let bb = out.as_bytes();
@@ -81,5 +91,22 @@ mod roundtrip_tests {
     #[test]
     fn roundtrip_faction_header_primary_fixture() {
         check("ui/campaign ui/campaign_hud_faction_header.twui.xml");
+    }
+
+    /// Self-contained guard (no game corpus needed): a serde_json Value round-trip
+    /// of the parsed document must produce byte-identical serialization. This is
+    /// exactly what the experimental web access point relies on for save fidelity.
+    #[test]
+    fn json_transport_preserves_document() {
+        let xml = "<layout>\r\n\t<!-- note -->\r\n\t<hierarchy>\r\n\t\t<component\r\n\t\t\tid=\"root\"\r\n\t\t\tw=\"10\" />\r\n\t</hierarchy>\r\n</layout>";
+        let doc = parse::parse(xml).expect("parse");
+        let direct = serialize::serialize(&doc);
+        let value = serde_json::to_value(&doc).expect("to_value");
+        let doc_json: super::Document = serde_json::from_value(value).expect("from_value");
+        assert_eq!(
+            direct,
+            serialize::serialize(&doc_json),
+            "serde_json round-trip perturbed the document"
+        );
     }
 }
