@@ -24,8 +24,10 @@ import DocsPanel from "./panels/DocsPanel";
 import NewFileDialog from "./panels/NewFileDialog";
 import InsertFromFileDialog from "./panels/InsertFromFileDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { pickOpenFile } from "./ipc/dialog";
 import { captureAppWindow } from "./ipc/commands";
+import { IS_BROWSER } from "./ipc/invoke";
+import HostFileBrowser from "./panels/HostFileBrowser";
 
 const PANEL_TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -133,9 +135,12 @@ function Toolbar() {
       <button className={btn} onClick={() => setShowDocs(true)} title="Reference docs (TWUI version differences, etc.)">
         Docs
       </button>
-      <button className={btn} onClick={openBugReport} title="Report a bug to the author">
-        Report a Bug
-      </button>
+      {/* Bug reporting captures the host window and posts to a webhook — desktop only. */}
+      {!IS_BROWSER && (
+        <button className={btn} onClick={openBugReport} title="Report a bug to the author">
+          Report a Bug
+        </button>
+      )}
       <PanelsMenu />
       {showTools && <ToolsPanel onClose={() => setShowTools(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
@@ -218,8 +223,8 @@ function NewMenu() {
     fn();
   };
   const newFromDisk = async () => {
-    const path = await openDialog({ multiple: false, filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
-    if (typeof path === "string") await newFromFile(path, false);
+    const path = await pickOpenFile({ filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
+    if (path) await newFromFile(path, false);
   };
 
   return (
@@ -285,9 +290,20 @@ export default function App() {
   }, []);
 
   // Intercept window close (main window only): if there are unsaved edits, hold the
-  // close and raise the unsaved-changes prompt instead of losing them.
+  // close and raise the unsaved-changes prompt instead of losing them. In the web
+  // client there is no Tauri window — fall back to a native beforeunload guard.
   useEffect(() => {
     if (panelParam()) return; // popped-out panel windows close freely
+    if (IS_BROWSER) {
+      const onBeforeUnload = (e: BeforeUnloadEvent) => {
+        if (useStore.getState().tabs.some((t) => t.dirty)) {
+          e.preventDefault();
+          e.returnValue = "";
+        }
+      };
+      window.addEventListener("beforeunload", onBeforeUnload);
+      return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    }
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested((event) => {
@@ -319,8 +335,9 @@ export default function App() {
       {searchOpen && <SearchPalette onClose={closeSearch} />}
       {newFileOpen && <NewFileDialog />}
       {insertOpen && <InsertFromFileDialog />}
-      {import.meta.env.PROD && <UpdateBanner />}
+      {import.meta.env.PROD && !IS_BROWSER && <UpdateBanner />}
       <UnsavedChangesDialog />
+      <HostFileBrowser />
       {loading && <LoadingScreen />}
     </div>
   );

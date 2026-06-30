@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { pickOpenDirectory, pickOpenFile } from "../ipc/dialog";
 import { useStore } from "../state/store";
 import { Mode } from "../state/store";
 import {
@@ -13,6 +13,8 @@ import {
 import { checkForUpdateVerbose, installAndRelaunch, type CheckResult } from "../updater";
 import Markdown from "../components/Markdown";
 import { dockShowPanel } from "./DockLayout";
+import { IS_BROWSER } from "../ipc/invoke";
+import { startWebServer, stopWebServer, webServerStatus, type WebInfo } from "../ipc/commands";
 
 type Category =
   | "game"
@@ -21,6 +23,7 @@ type Category =
   | "visualizer"
   | "editor"
   | "experimental"
+  | "webaccess"
   | "theme"
   | "about";
 
@@ -31,6 +34,7 @@ const CATEGORIES: { id: Category; label: string }[] = [
   { id: "visualizer", label: "Visualizer" },
   { id: "editor", label: "Editor" },
   { id: "experimental", label: "Experimental" },
+  { id: "webaccess", label: "Web Access" },
   { id: "theme", label: "Theme" },
   { id: "about", label: "About / Updates" },
 ];
@@ -123,8 +127,7 @@ function GameSection() {
   const setSchemaPath = useStore((s) => s.setSchemaPath);
 
   const pickDir = async (def?: string | null): Promise<string | null> => {
-    const d = await open({ directory: true, defaultPath: def ?? undefined });
-    return typeof d === "string" ? d : null;
+    return pickOpenDirectory({ defaultPath: def ?? undefined });
   };
 
   // Row pickers: persist the path, and when it's the active game in the matching
@@ -172,8 +175,8 @@ function GameSection() {
   };
 
   const pickSchema = async () => {
-    const f = await open({ filters: [{ name: "RPFM schema", extensions: ["ron"] }] });
-    if (typeof f === "string") setSchemaPath(f);
+    const f = await pickOpenFile({ filters: [{ name: "RPFM schema", extensions: ["ron"] }] });
+    if (f) setSchemaPath(f);
   };
   const schemaName = schemaPath ? schemaPath.split(/[\\/]/).pop() : null;
 
@@ -524,6 +527,182 @@ function ExperimentalSection() {
   );
 }
 
+function WebAccessSection() {
+  const settings = useStore((s) => s.settings);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const ex = settings.experimental;
+  const wa = ex.webAccess;
+  const patch = (p: Partial<typeof wa>) =>
+    updateSettings({ experimental: { ...ex, webAccess: { ...wa, ...p } } });
+
+  const [status, setStatus] = useState<WebInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Reflect the actual server state (it is not auto-started on launch).
+  useEffect(() => {
+    void webServerStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  const running = status != null;
+  const locked = running || busy;
+  const canStart = wa.password.trim().length > 0 && (wa.bind !== "custom" || wa.customIp.trim().length > 0);
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const info = await startWebServer({
+        bind: wa.bind,
+        port: wa.port,
+        customIp: wa.customIp || null,
+        password: wa.password,
+      });
+      setStatus(info);
+      patch({ enabled: true });
+    } catch (e) {
+      setError(`${e}`);
+      patch({ enabled: false });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stop = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await stopWebServer();
+      setStatus(null);
+      patch({ enabled: false });
+    } catch (e) {
+      setError(`${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (on: boolean) => {
+    if (on) void start();
+    else void stop();
+  };
+
+  const copyUrl = async () => {
+    if (!status) return;
+    try {
+      await navigator.clipboard.writeText(status.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked; user can copy manually */
+    }
+  };
+
+  return (
+    <div>
+      <SectionTitle>Web Access (experimental)</SectionTitle>
+      <p className="text-[11px] text-gray-500 mb-3">
+        Serve this editor over HTTP so you can open it from a browser on another device (LAN or
+        Tailscale). The remote browser edits the pack files on THIS computer. It has the same
+        read/write access to this machine as the desktop app — only enable it on networks you trust.
+      </p>
+
+      <Row label="Enable web access" hint={running ? "server is running" : "off"}>
+        <Toggle
+          checked={running}
+          onChange={(on) => {
+            if (busy || (on && !canStart)) return;
+            toggle(on);
+          }}
+        />
+      </Row>
+
+      <Row label="Password" hint="required; sent over plaintext HTTP — pair with Tailscale/VPN">
+        <input
+          type="password"
+          className={`${sel} w-56`}
+          value={wa.password}
+          disabled={locked}
+          placeholder="Set an access password"
+          onChange={(e) => patch({ password: e.target.value })}
+          autoComplete="new-password"
+        />
+      </Row>
+
+      <Row label="Network" hint="loopback is this machine only">
+        <select
+          className={sel}
+          value={wa.bind}
+          disabled={locked}
+          onChange={(e) => patch({ bind: e.target.value as typeof wa.bind })}
+        >
+          <option value="loopback">Loopback (127.0.0.1)</option>
+          <option value="lan">All interfaces (LAN / Tailscale)</option>
+          <option value="custom">Specific IP…</option>
+        </select>
+      </Row>
+
+      {wa.bind === "custom" && (
+        <Row label="Bind IP" hint="e.g. your Tailscale 100.x address">
+          <input
+            className={`${sel} w-56`}
+            value={wa.customIp}
+            disabled={locked}
+            placeholder="100.x.y.z"
+            onChange={(e) => patch({ customIp: e.target.value })}
+          />
+        </Row>
+      )}
+
+      <Row label="Port">
+        <input
+          type="number"
+          className={`${sel} w-28`}
+          value={wa.port}
+          disabled={locked}
+          min={1}
+          max={65535}
+          onChange={(e) => patch({ port: Number(e.target.value) || 8787 })}
+        />
+      </Row>
+
+      {!canStart && !running && (
+        <p className="text-[11px] text-amber-300/80 mb-2">
+          Set a password{wa.bind === "custom" ? " and a bind IP" : ""} before enabling.
+        </p>
+      )}
+      {error && <p className="text-[11px] text-red-400 mb-2">{error}</p>}
+
+      {running && status && (
+        <div className="mt-1 rounded border border-edge bg-bg p-3">
+          <div className="text-[11px] text-textMuted mb-1">Open this URL on the remote device:</div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 truncate rounded bg-codebg px-2 py-1 text-[12px] text-accent">{status.url}</code>
+            <button className={btn} onClick={copyUrl}>
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          {status.bind === "lan" && (
+            <p className="text-[11px] text-gray-500 mt-2">
+              Bound to all interfaces. If the shown IP isn't reachable, use this machine's LAN or
+              Tailscale address with port {status.port}.
+            </p>
+          )}
+          <p className="text-[11px] text-gray-500 mt-2">
+            No HTTPS: traffic is unencrypted. Prefer Tailscale (WireGuard) or an SSH tunnel for
+            remote use. Stop the server when you're done.
+          </p>
+          <p className="text-[11px] text-gray-500 mt-2">
+            The browser is a separate client: it does not live-sync with this window. Avoid editing
+            the same file in both at once — saves are last-writer-wins.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ThemeSection() {
   const settings = useStore((s) => s.settings);
   const updateSettings = useStore((s) => s.updateSettings);
@@ -654,7 +833,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex-1 min-h-0 flex">
           <div className="w-44 shrink-0 border-r border-edge py-2">
-            {CATEGORIES.map((c) => (
+            {CATEGORIES.filter((c) => c.id !== "webaccess" || !IS_BROWSER).map((c) => (
               <button
                 key={c.id}
                 className={`w-full text-left px-3 py-1.5 text-[12px] ${
@@ -673,6 +852,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             {cat === "visualizer" && <VisualizerSection />}
             {cat === "editor" && <EditorSection />}
             {cat === "experimental" && <ExperimentalSection />}
+            {cat === "webaccess" && !IS_BROWSER && <WebAccessSection />}
             {cat === "theme" && <ThemeSection />}
             {cat === "about" && <UpdatesSection />}
           </div>

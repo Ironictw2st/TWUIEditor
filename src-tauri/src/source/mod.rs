@@ -10,7 +10,7 @@ mod pack;
 
 pub use folder::FolderSource;
 pub use overlay::OverlaySource;
-pub use pack::{build_index, ordered_packs, PackCache};
+pub use pack::{build_pack_source, ordered_packs, rpfm_game_key, PackSource};
 
 pub trait DataSource: Send + Sync {
     /// Raw bytes for a relative path, or `None` if absent.

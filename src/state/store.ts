@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
 import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, TwuiDocument } from "../types/twui";
 import * as ipc from "../ipc/commands";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { pickOpenFile, pickSaveFile } from "../ipc/dialog";
 import {
   childByTag,
   componentMap,
@@ -29,6 +29,7 @@ import { collectScriptComponents, pageScriptId } from "../twui/script";
 import { buildBlankDocument } from "../twui/skeleton";
 import {
   addCallback,
+  addCallbackProp,
   addComponentImage,
   addImageMetric,
   addNode,
@@ -41,17 +42,20 @@ import {
   editChildAttr,
   extractSubtree,
   genGuid,
+  moveCallbackProp,
   moveChild,
   moveNode,
   pasteSubtree,
   regenAllGuids,
   regenGuidSet,
+  removeCallbackProp,
   removeChild,
   renameNode,
   replaceComponent,
   replaceHierarchyNode,
   sameHierarchyParent,
   setCallbackAttr,
+  setCallbackPropAttr,
   subtreeGuidSet,
   SubtreeClip,
 } from "../twui/mutate";
@@ -91,8 +95,20 @@ export interface Settings {
   };
   editor: { undoLimit: number; rememberLastFile: boolean };
   /** Opt-in experimental features, off by default. `versionConversion` reveals the
-   *  layout-version converter (root component only) in the Inspector. */
-  experimental: { versionConversion: boolean };
+   *  layout-version converter (root component only) in the Inspector. `webAccess`
+   *  configures the experimental HTTP server that serves the editor to a remote
+   *  browser (bind/port/password are persisted for convenience; the server is not
+   *  auto-started on launch). */
+  experimental: {
+    versionConversion: boolean;
+    webAccess: {
+      enabled: boolean;
+      bind: "loopback" | "lan" | "custom";
+      customIp: string;
+      port: number;
+      password: string;
+    };
+  };
   /** Appearance: colour scheme (system follows the OS), accent colour, and UI density.
    *  Applied by src/theme.ts. */
   theme: { mode: "system" | "light" | "dark"; accent: string; density: "comfortable" | "compact" };
@@ -124,7 +140,10 @@ const DEFAULT_SETTINGS: Settings = {
     palette: { x: null, y: null, hidden: false },
   },
   editor: { undoLimit: 100, rememberLastFile: false },
-  experimental: { versionConversion: false },
+  experimental: {
+    versionConversion: false,
+    webAccess: { enabled: false, bind: "loopback", customIp: "", port: 8787, password: "" },
+  },
   theme: { mode: "system", accent: "#c9a227", density: "comfortable" },
   dockLayout: null,
   readMode: "folder",
@@ -145,7 +164,14 @@ function mergePersisted(current: AppStore, persisted: unknown): AppStore {
     ...ps,
     visualizer: { ...current.settings.visualizer, ...(ps.visualizer ?? {}) },
     editor: { ...current.settings.editor, ...(ps.editor ?? {}) },
-    experimental: { ...current.settings.experimental, ...(ps.experimental ?? {}) },
+    experimental: {
+      ...current.settings.experimental,
+      ...(ps.experimental ?? {}),
+      webAccess: {
+        ...current.settings.experimental.webAccess,
+        ...((ps.experimental as Partial<Settings["experimental"]> | undefined)?.webAccess ?? {}),
+      },
+    },
     theme: { ...current.settings.theme, ...(ps.theme ?? {}) },
     dockLayout: ps.dockLayout ?? current.settings.dockLayout,
     readMode: ps.readMode ?? current.settings.readMode,
@@ -423,6 +449,11 @@ export interface AppStore {
   addImageMetric: (stateGuid: string, ciGuid: string | undefined) => void;
   addCallback: (compGuid: string) => void;
   setCallbackAttr: (compGuid: string, containerTag: string, index: number, key: string, value: string) => void;
+  // Callback params (<child_m_user_properties><property>), addressed by callback + property index.
+  addCallbackProp: (compGuid: string, containerTag: string, cbIndex: number) => void;
+  setCallbackPropAttr: (compGuid: string, containerTag: string, cbIndex: number, propIndex: number, key: string, value: string) => void;
+  moveCallbackProp: (compGuid: string, containerTag: string, cbIndex: number, propIndex: number, dir: -1 | 1) => void;
+  removeCallbackProp: (compGuid: string, containerTag: string, cbIndex: number, propIndex: number) => void;
   moveChild: (parentGuid: string, containerTag: string, index: number, dir: -1 | 1) => void;
   removeChild: (parentGuid: string, containerTag: string, index: number) => void;
   toggleVisible: (guid: string) => void;
@@ -992,12 +1023,11 @@ export const useStore = create<AppStore>()(
 
     // Open/Save-As dialogs live here so the toolbar and keybinds share one path.
     openFileDialog: async () => {
-      const path = await openDialog({
-        multiple: false,
+      const path = await pickOpenFile({
         filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
         defaultPath: get().dataRoot ?? undefined,
       });
-      if (typeof path === "string") await get().openFile(path);
+      if (path) await get().openFile(path);
     },
 
     hydrateDocResources: async (doc, label) => {
@@ -1295,9 +1325,10 @@ export const useStore = create<AppStore>()(
       if (!get().doc) return;
       // Suggest the pack file's own name when saving a pack-opened file.
       const suggested = get().packPath ? baseName(get().packPath!) : undefined;
-      const path = await saveDialog({
+      const path = await pickSaveFile({
         filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
-        defaultPath: suggested ?? get().dataRoot ?? undefined,
+        defaultPath: get().dataRoot ?? undefined,
+        defaultFileName: suggested,
       });
       if (path) await get().saveAs(path);
     },
@@ -1667,6 +1698,21 @@ export const useStore = create<AppStore>()(
     setCallbackAttr: (compGuid, containerTag, index, key, value) => {
       const v = key === "context_function_id" ? encodeEntities(value) : value;
       get().mutate((doc) => setCallbackAttr(doc, compGuid, containerTag, index, key, v));
+    },
+    addCallbackProp: (compGuid, containerTag, cbIndex) => {
+      get().mutate((doc) => addCallbackProp(doc, compGuid, containerTag, cbIndex));
+    },
+    setCallbackPropAttr: (compGuid, containerTag, cbIndex, propIndex, key, value) => {
+      // Property values can carry expressions with entities (e.g. ContextStateSetterConditional
+      // conditions); names are plain identifiers stored verbatim.
+      const v = key === "value" ? encodeEntities(value) : value;
+      get().mutate((doc) => setCallbackPropAttr(doc, compGuid, containerTag, cbIndex, propIndex, key, v));
+    },
+    moveCallbackProp: (compGuid, containerTag, cbIndex, propIndex, dir) => {
+      get().mutate((doc) => moveCallbackProp(doc, compGuid, containerTag, cbIndex, propIndex, dir));
+    },
+    removeCallbackProp: (compGuid, containerTag, cbIndex, propIndex) => {
+      get().mutate((doc) => removeCallbackProp(doc, compGuid, containerTag, cbIndex, propIndex));
     },
     moveChild: (parentGuid, containerTag, index, dir) => {
       get().mutate((doc) => moveChild(doc, parentGuid, containerTag, index, dir));

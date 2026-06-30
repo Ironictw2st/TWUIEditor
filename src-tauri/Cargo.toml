@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Compress the bundled RPFM `.ron` schemas at build time (they are ~20 MB of RON text;
+# zstd shrinks them ~10x so the auto-updated binary stays small). Decompressed at runtime.
+zstd = "0.13"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -21,10 +24,23 @@ serde_json = "1"
 quick-xml = "0.36"
 thiserror = "1"
 lru = "0.12"
-# Parse the user's local RPFM `.ron` schema (to decode binary db tables from packs).
+# Read Total War `.pack` archives and decode binary db/loc tables + RPFM `.ron` schemas.
+# MIT-licensed, headless (no Qt). Default features (only `integration_assembly_kit`, which the
+# `uic` module requires) are kept; the heavy `integration_git`/`integration_sqlite` are off.
+rpfm_lib = "4.7"
+# Decompress the build-time-zstd'd RPFM schemas (see build.rs + schema_embed.rs).
+zstd = "0.13"
 ron = "0.8"
 rand = "0.8"
 percent-encoding = "2"
+
+# Experimental web access point: serve the editor over HTTP so it can be reached from a
+# browser on the LAN / Tailscale. The desktop app itself hosts the server (see web/).
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+tower-http = { version = "0.6", features = ["catch-panic"] }
+rust-embed = "8"
+mime_guess = "2"
 
 # Portable self-replacing updater: fetch the latest GitHub release, download the portable
 # exe, and swap the running binary in place. `multipart` is also used to upload bug-report

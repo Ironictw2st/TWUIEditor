@@ -295,8 +295,8 @@ mod tests {
             "C:/Program Files (x86)/Steam/steamapps/common/Total War THREE KINGDOMS/data",
         );
         let state = AppState::new();
-        if !dir.exists() || state.schema_path().is_none() {
-            eprintln!("install or RPFM schema missing; skipping");
+        if !dir.exists() {
+            eprintln!("install missing; skipping");
             return;
         }
         if state.set_pack_source(dir, false).is_err() {
