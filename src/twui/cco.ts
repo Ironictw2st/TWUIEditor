@@ -4,7 +4,7 @@
 // panel's own List/ContextList, ContextImageSetter, ContextTextLabel,
 // ContextPropagator and Context(Visibility|Trash) callbacks, not any one panel.
 
-import { CcoShorthand, ShorthandDef } from "../types/twui";
+import { CcoShorthand, PreviewBinding, ShorthandDef } from "../types/twui";
 import { RawElement } from "../types/twui";
 import { childByTag, elementChildren, getAttr } from "./doc";
 import { LuaValue } from "./lua";
@@ -39,6 +39,10 @@ export interface Scope {
   /** User-set UI preference booleans (the game's `PrefAsBool("name")`), e.g.
    *  `ui_alternative_unit_cards`. Drives preference-gated state/visibility in the preview. */
   uiPrefs?: Record<string, boolean>;
+  /** Editor-only DB-table preview binding in effect for this subtree: the container repeats
+   *  its template child per row and mapped descendants draw column values. Set on each
+   *  repeated row's scope by the layout walk; preserved down the subtree by `propagate`. */
+  previewBinding?: PreviewBinding;
 }
 
 /** Find a shorthand macro by name: the current context object's table first,

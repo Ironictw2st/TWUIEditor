@@ -16,15 +16,19 @@ import InspectorPanel from "./InspectorPanel";
 import VisualizerPanel from "./VisualizerPanel";
 import PerspectivePanel from "./PerspectivePanel";
 import PackFilesPanel from "./PackFilesPanel";
+import PackEditorPanel from "./PackEditorPanel";
 import LayersPanel from "./LayersPanel";
+import DiagnosisPanel from "./DiagnosisPanel";
 
 const TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
   inspector: "Inspector",
   visualizer: "Visualizer",
   perspective: "Perspective",
-  packfiles: "Pack Files",
+  packfiles: "Dependencies",
+  packeditor: "Pack Editor",
   layers: "Layers",
+  diagnosis: "Diagnosis",
 };
 
 // --- panel content (the dockview panel body) -----------------------------------------------------
@@ -33,7 +37,9 @@ const InspectorView = (_p: IDockviewPanelProps) => <div className="h-full flex f
 const VisualizerView = (_p: IDockviewPanelProps) => <div className="h-full bg-canvas"><VisualizerPanel /></div>;
 const PerspectiveView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><PerspectivePanel /></div>;
 const PackFilesView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><PackFilesPanel /></div>;
+const PackEditorView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><PackEditorPanel /></div>;
 const LayersView = (_p: IDockviewPanelProps) => <div className="h-full overflow-auto bg-panel"><LayersPanel /></div>;
+const DiagnosisView = (_p: IDockviewPanelProps) => <div className="h-full flex flex-col bg-panel"><DiagnosisPanel /></div>;
 
 const components = {
   hierarchy: HierarchyView,
@@ -41,7 +47,9 @@ const components = {
   visualizer: VisualizerView,
   perspective: PerspectiveView,
   packfiles: PackFilesView,
+  packeditor: PackEditorView,
   layers: LayersView,
+  diagnosis: DiagnosisView,
 };
 
 // --- pop-out tab ---------------------------------------------------------------------------------
@@ -128,8 +136,11 @@ export default function DockLayout() {
       addPanelToDock(api, "layers", { referencePanel: "hierarchy", direction: "within" });
       addPanelToDock(api, "inspector", { referencePanel: "visualizer", direction: "right" });
       addPanelToDock(api, "perspective", { referencePanel: "visualizer", direction: "below" });
+      addPanelToDock(api, "diagnosis", { referencePanel: "perspective", direction: "within" });
       // Hierarchy shares a tab group with Layers; keep Hierarchy the active tab on first launch.
       api.getPanel("hierarchy")?.api.setActive();
+      // Perspective shares a tab group with Diagnosis; default to Perspective on first launch.
+      api.getPanel("perspective")?.api.setActive();
     }
     // Honour session pop-out state: a popped panel should not be in the dock.
     for (const id of PANEL_IDS) if (popped[id]) api.getPanel(id)?.api.close();

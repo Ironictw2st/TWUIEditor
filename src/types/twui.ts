@@ -127,3 +127,48 @@ export interface ShorthandDef {
 export interface CcoShorthand {
   objects: Record<string, Record<string, ShorthandDef>>;
 }
+
+// --- DB-table preview binding (editor-only; never written to the .twui.xml) ---
+//
+// Lets the user attach a DB table to a container so the editor repeats the container's
+// template child once per row and fills mapped descendant components from row columns.
+// This previews runtime-populated panels (e.g. book_of_grudges) without simulating the
+// game's bespoke panel callback. The config lives in persisted settings; resolved rows
+// are session-only.
+
+/** Maps a DB column onto one descendant component's text or image. */
+export interface PreviewMapping {
+  /** Target descendant component guid (the component's `this`/hierarchy guid). */
+  target: string;
+  /** Optional component `id` fallback (readability; guid wins when both are set). */
+  targetId?: string;
+  /** Which aspect of the target the column drives. */
+  aspect: "text" | "image";
+  /** DB column (header) name supplying the value. */
+  column: string;
+  /** Text only: "auto" (loc[value] else literal), "literal", or "loc". Default "auto". */
+  resolve?: "auto" | "literal" | "loc";
+  /** Optional "...{{value}}..." substitution (e.g. an image path prefix). */
+  template?: string;
+}
+
+/** A user-defined preview binding (persisted in settings; no rows). */
+export interface PreviewBindingConfig {
+  /** Container component guid the table is attached to. */
+  target: string;
+  /** DB table name, e.g. "missions_tables". */
+  table: string;
+  /** Which child of the container is the repeated template (default 0). */
+  templateIndex?: number;
+  /** Preview row cap (default 50; hard-clamped at load). */
+  limit?: number;
+  /** Optional simple row filter. */
+  filter?: { column: string; contains: string };
+  /** Column -> component mappings. */
+  mappings: PreviewMapping[];
+}
+
+/** A binding with its resolved rows attached (runtime; not persisted). */
+export interface PreviewBinding extends PreviewBindingConfig {
+  rows: { key: string; value: Record<string, string> }[];
+}

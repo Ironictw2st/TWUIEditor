@@ -3,7 +3,7 @@
 
 use crate::source::{
     build_pack_source, ordered_packs, rpfm_game_key, DataSource, FolderSource, OverlaySource,
-    PackSource,
+    PackSource, WorkspacePack,
 };
 use lru::LruCache;
 use rpfm_lib::schema::Schema;
@@ -21,12 +21,18 @@ pub struct Inner {
     pub data_root: Option<PathBuf>,
     /// True when reading from `.pack` archives rather than a loose folder.
     pub pack_mode: bool,
-    /// The active reader (the overlay when one is set, else the base).
+    /// The active reader, computed by `recompute_source` as: base (dependencies) -> read-only overlay
+    /// pack -> editable workspace, highest priority last.
     pub source: Option<Arc<dyn DataSource>>,
-    /// The base reader (folder or merged packs), kept so an overlay can be cleared.
+    /// The base reader (folder or merged dependency packs).
     pub base: Option<Arc<dyn DataSource>>,
+    /// The read-only overlay pack reader (browsed under "Dependencies"), if one is set.
+    pub overlay_src: Option<Arc<dyn DataSource>>,
     /// The pack a single-pack overlay is reading from, if any.
     pub overlay_pack: Option<PathBuf>,
+    /// The editable workspace pack (the "Pack Editor"), if one is open. Layered on top of the
+    /// dependencies so its files render with full context; also the target for edits/saves.
+    pub workspace: Option<Arc<WorkspacePack>>,
     /// The current rpfm game key (`three_kingdoms` / `warhammer_3`) — selects the GameInfo for pack
     /// reading and the bundled schema. Set via the game switch.
     pub game_key: String,
@@ -43,6 +49,31 @@ pub struct Inner {
     pub image_cache: LruCache<String, Vec<u8>>,
 }
 
+impl Inner {
+    /// Rebuild `source` by stacking the read layers, highest priority last: dependency `base`, then
+    /// the read-only overlay pack, then the editable `workspace`. Invalidates the loc + image caches
+    /// since the effective bytes changed.
+    fn recompute_source(&mut self) {
+        let mut src = self.base.clone();
+        if let Some(top) = &self.overlay_src {
+            src = Some(match src {
+                Some(base) => Arc::new(OverlaySource::new(top.clone(), base)) as Arc<dyn DataSource>,
+                None => top.clone(),
+            });
+        }
+        if let Some(ws) = &self.workspace {
+            let ws_ds: Arc<dyn DataSource> = ws.clone();
+            src = Some(match src {
+                Some(base) => Arc::new(OverlaySource::new(ws_ds, base)) as Arc<dyn DataSource>,
+                None => ws_ds,
+            });
+        }
+        self.source = src;
+        self.loc_cache = None;
+        self.image_cache.clear();
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         let root = guess_data_root();
@@ -56,7 +87,9 @@ impl AppState {
                 pack_mode: false,
                 source: base.clone(),
                 base,
+                overlay_src: None,
                 overlay_pack: None,
+                workspace: None,
                 schema_path: None,
                 game_key,
                 base_pack: None,
@@ -91,11 +124,10 @@ impl AppState {
         let mut g = self.inner.lock().unwrap();
         g.data_root = Some(p);
         g.pack_mode = false;
-        g.base = Some(src.clone());
-        g.source = Some(src);
+        g.base = Some(src);
+        g.overlay_src = None;
         g.overlay_pack = None;
-        g.loc_cache = None;
-        g.image_cache.clear();
+        g.recompute_source();
     }
 
     /// Switch to pack mode, reading the `.pack` files under `game_dir`. When
@@ -128,11 +160,10 @@ impl AppState {
         g.base_pack = Some((game_key, include_mods, pack));
         g.data_root = Some(game_dir);
         g.pack_mode = true;
-        g.base = Some(base.clone());
-        g.source = Some(base);
+        g.base = Some(base);
+        g.overlay_src = None;
         g.overlay_pack = None;
-        g.loc_cache = None;
-        g.image_cache.clear();
+        g.recompute_source();
         Ok(())
     }
 
@@ -151,12 +182,13 @@ impl AppState {
         if top.is_empty() {
             return Err(format!("'{}' is not a readable pack", pack.display()));
         }
-        let overlay = Arc::new(OverlaySource::new(Arc::new(top), base)) as Arc<dyn DataSource>;
+        // `base` is read above only to require a dependency stack to overlay onto; recompute_source
+        // rebuilds the active source (base -> overlay -> workspace) from the stored layers.
+        let _ = base;
         let mut g = self.inner.lock().unwrap();
-        g.source = Some(overlay);
+        g.overlay_src = Some(Arc::new(top));
         g.overlay_pack = Some(pack);
-        g.loc_cache = None;
-        g.image_cache.clear();
+        g.recompute_source();
         Ok(())
     }
 
@@ -169,19 +201,65 @@ impl AppState {
         if g.game_key == key {
             return;
         }
-        // The cached pack, parsed schema, and any override are all game-specific; drop them so the
-        // new game's bundled schema + packs are used.
+        // The cached pack, parsed schema, override, overlay, and editable workspace are all
+        // game-specific; drop them so the new game's bundled schema + packs are used. The following
+        // set_data_root/set_pack_source recomputes the source.
         g.schema_path = None;
         g.game_key = key;
         g.base_pack = None;
         g.schema = None;
+        g.overlay_src = None;
+        g.overlay_pack = None;
+        g.workspace = None;
     }
 
-    /// Remove the single-pack overlay, restoring the base source.
+    /// Remove the single-pack overlay, restoring the base (+ any workspace).
     pub fn clear_overlay_pack(&self) {
         let mut g = self.inner.lock().unwrap();
-        g.source = g.base.clone();
+        g.overlay_src = None;
         g.overlay_pack = None;
+        g.recompute_source();
+    }
+
+    // --- Editable pack workspace (the "Pack Editor") ---
+
+    /// Open an existing `.pack` for editing; layer it on top of the dependencies and return its
+    /// `.twui.xml` paths.
+    pub fn open_workspace(&self, path: PathBuf) -> Result<Vec<String>, String> {
+        let game_key = self.inner.lock().unwrap().game_key.clone();
+        let ws = Arc::new(WorkspacePack::open(&path, &game_key)?);
+        let layouts = ws.list(&|p| p.ends_with(".twui.xml"));
+        let mut g = self.inner.lock().unwrap();
+        g.workspace = Some(ws);
+        g.recompute_source();
+        Ok(layouts)
+    }
+
+    /// Create a brand-new empty Mod pack on disk and open it as the workspace.
+    pub fn new_workspace(&self, path: PathBuf) -> Result<(), String> {
+        let game_key = self.inner.lock().unwrap().game_key.clone();
+        let ws = Arc::new(WorkspacePack::create(&path, &game_key)?);
+        let mut g = self.inner.lock().unwrap();
+        g.workspace = Some(ws);
+        g.recompute_source();
+        Ok(())
+    }
+
+    /// Close the editable workspace (restoring the plain dependency stack).
+    pub fn close_workspace(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.workspace = None;
+        g.recompute_source();
+    }
+
+    /// The open editable workspace, if any.
+    pub fn workspace(&self) -> Option<Arc<WorkspacePack>> {
+        self.inner.lock().unwrap().workspace.clone()
+    }
+
+    /// Drop the loc + image caches so re-reads pick up workspace edits.
+    pub fn invalidate_caches(&self) {
+        let mut g = self.inner.lock().unwrap();
         g.loc_cache = None;
         g.image_cache.clear();
     }

@@ -3,18 +3,20 @@ import { useStore } from "./store";
 import { ContextTokens, deriveTokens } from "../twui/context";
 import { extractDataPack, LuaValue } from "../twui/lua";
 import { buildPlayersContext } from "../twui/players";
-import { CcoShorthand, FactionContext } from "../types/twui";
+import { CcoShorthand, FactionContext, PreviewBinding } from "../types/twui";
 
 /** The derived inputs the layout/visibility engine needs from the store: the connected
  *  script's data pack, the DB-record contexts (PlayersFaction etc.), perspective tokens,
- *  and the CCO shorthand table. Shared by the Visualizer (canvas) and the Tree (hierarchy
- *  visibility) so the two never disagree about what's visible. */
+ *  the CCO shorthand table, and any DB-table preview bindings (config + resolved rows).
+ *  Shared by the Visualizer (canvas) and the Tree (hierarchy visibility) so the two never
+ *  disagree about what's visible. */
 export interface LayoutInputs {
   dataPack: LuaValue | null;
   staticVars: Record<string, LuaValue>;
   tokens: ContextTokens;
   context: FactionContext;
   ccoShorthand: CcoShorthand | null;
+  previewBindings: PreviewBinding[];
 }
 
 export function useLayoutInputs(): LayoutInputs {
@@ -27,6 +29,11 @@ export function useLayoutInputs(): LayoutInputs {
   const scriptId = useStore((s) => s.scriptConn.id);
   const dataPackOverride = useStore((s) => s.dataPackOverride);
   const ccoShorthand = useStore((s) => s.ccoShorthand);
+  const previewBindingCfgs = useStore((s) => s.settings.previewBindings);
+  const previewRows = useStore((s) => s.previewRows);
+  const filePath = useStore((s) => s.filePath);
+  const packPath = useStore((s) => s.packPath);
+  const workspacePath = useStore((s) => s.workspacePath);
 
   const tokens = useMemo(() => deriveTokens(contextDb), [contextDb]);
   const dataPack = useMemo(
@@ -40,5 +47,13 @@ export function useLayoutInputs(): LayoutInputs {
     [context, contextDb, loc, characters, characterDb]
   );
 
-  return { dataPack, staticVars, tokens, context, ccoShorthand };
+  // Join the active document's persisted binding configs with their session-resolved rows.
+  const previewBindings = useMemo<PreviewBinding[]>(() => {
+    const docKey = filePath ?? packPath ?? workspacePath;
+    if (!docKey) return [];
+    const cfgs = previewBindingCfgs[docKey] ?? [];
+    return cfgs.map((cfg) => ({ ...cfg, rows: previewRows[`${docKey}::${cfg.target}`] ?? [] }));
+  }, [previewBindingCfgs, previewRows, filePath, packPath, workspacePath]);
+
+  return { dataPack, staticVars, tokens, context, ccoShorthand, previewBindings };
 }

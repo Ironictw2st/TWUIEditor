@@ -3,6 +3,30 @@
 Notable changes per release. The section for a tagged version becomes that release's notes,
 shown in the app's update prompt (Settings -> About / Updates and the startup banner).
 
+## [0.0.7] - 2026-07-01
+
+### Added
+- **Pack workspace editor** — open or create a `.pack`, edit its `.twui.xml` layouts in place, and
+  save back (`Ctrl+S`); create/delete layouts from the tree. Edits preview live through a
+  dependencies -> overlay -> workspace layer stack.
+- **Diagnosis panel** — an integrity linter that flags broken hierarchy/state/image references,
+  duplicate or missing GUIDs, and invalid attribute values/versions, with a live error badge in the
+  toolbar; click a result to select the affected component.
+- **Preview data (DB table)** — bind a component to a DB table to repeat a template row-per-row and
+  fill descendant text/images from columns. Preview only; never written to the `.twui.xml`.
+- **More structural editors** in the Inspector — localised texts, transitions, material overrides,
+  animations, and per-state component text.
+- **Take screenshot** — save the visualizer at native resolution from the canvas right-click menu.
+
+### Changed
+- Toolbar reorganised into **Pack**, **Game**, and **Settings** menus; the "Pack Files" panel is now
+  **Dependencies**. Switching game no longer re-points the data root.
+- New application icon.
+
+### Fixed
+- `textxoffset` / `textyoffset` are now handled as `vec2` (x,y) pairs.
+- Zooming with the mouse wheel over the canvas no longer scrolls the page.
+
 ## [0.0.6] - 2026-06-28
 
 ### Added

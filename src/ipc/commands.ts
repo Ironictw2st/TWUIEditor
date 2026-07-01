@@ -50,6 +50,18 @@ export function readScript(path: string): Promise<string> {
   return invoke("read_script", { path });
 }
 
+/** A decoded DB table: column header + stringified rows (RPFM export shape). */
+export interface DbTable {
+  header: string[];
+  rows: string[][];
+}
+
+/** Read a DB table from the active source (binary via schema, or TSV export) for the
+ *  preview-binding feature. A missing/undecodable table returns empty header+rows. */
+export function readDbTable(table: string): Promise<DbTable> {
+  return invoke("read_db_table", { table });
+}
+
 export function serializeElement(element: RawElement): Promise<string> {
   return invoke("serialize_element", { element });
 }
@@ -83,6 +95,11 @@ export function currentGame(): Promise<string | null> {
 /** Switch the active game by name (a subfolder of `games/`). */
 export function setGame(name: string): Promise<void> {
   return invoke("set_game", { name });
+}
+
+/** Update the active rpfm game key + drop game-specific caches, without re-pointing the source. */
+export function setGameKey(name: string): Promise<void> {
+  return invoke("set_game_key", { name });
 }
 
 /** Switch to pack mode: read `.pack` files under `gameDir` (read-only).
@@ -137,6 +154,58 @@ export function readLayout(path: string): Promise<TwuiDocument> {
 
 export function saveLayout(path: string, doc: TwuiDocument): Promise<void> {
   return invoke("save_layout", { path, doc });
+}
+
+/** Write a PNG (base64 or `data:image/png;base64,...`) to a host path (e.g. a visualizer screenshot). */
+export function savePng(path: string, b64: string): Promise<void> {
+  return invoke("save_png", { path, b64 });
+}
+
+// --- Editable pack workspace (the "Pack Editor") ---
+
+export interface WorkspaceStatus {
+  path: string | null;
+  dirty: boolean;
+}
+
+/** Create a new empty Mod pack at `path` and open it as the editable workspace. */
+export function newPackWorkspace(path: string): Promise<void> {
+  return invoke("new_pack_workspace", { path });
+}
+
+/** Open an existing `.pack` as the editable workspace; returns its `.twui.xml` paths. */
+export function openPackWorkspace(path: string): Promise<string[]> {
+  return invoke("open_pack_workspace", { path });
+}
+
+/** The `.twui.xml` paths in the open workspace pack. */
+export function listWorkspaceLayouts(): Promise<string[]> {
+  return invoke("list_workspace_layouts");
+}
+
+/** Read+parse a layout from the workspace pack. */
+export function readWorkspaceLayout(rel: string): Promise<TwuiDocument> {
+  return invoke("read_workspace_layout", { rel });
+}
+
+/** Write `doc` into the workspace pack (create/replace `rel`) and persist the pack to disk. */
+export function saveWorkspaceLayout(rel: string, doc: TwuiDocument): Promise<void> {
+  return invoke("save_workspace_layout", { rel, doc });
+}
+
+/** Delete a layout from the workspace pack and persist. */
+export function deleteWorkspaceLayout(rel: string): Promise<void> {
+  return invoke("delete_workspace_layout", { rel });
+}
+
+/** Close the editable workspace. */
+export function closePackWorkspace(): Promise<void> {
+  return invoke("close_pack_workspace");
+}
+
+/** The open workspace's path + dirty flag. */
+export function packWorkspaceStatus(): Promise<WorkspaceStatus> {
+  return invoke("pack_workspace_status");
 }
 
 export function roundtripCheck(path: string): Promise<RoundtripReport> {
