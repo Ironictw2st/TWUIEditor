@@ -22,6 +22,14 @@ export function guidOf(el: RawElement): string | undefined {
   return getAttr(el, "this") ?? getAttr(el, "uniqueguid");
 }
 
+/** The all-zero GUID (`00000000-0000-0000-0000000000000000`) is the engine's
+ *  "unset" sentinel — e.g. a component sets `defaultstate` to it when only a
+ *  `currentstate` is meaningful. Reference checks treat it like an absent value.
+ *  Also true for empty/missing input. */
+export function isNullGuid(g: string | undefined | null): boolean {
+  return !g || /^[-0]+$/.test(g);
+}
+
 export function elementChildren(el: RawElement): RawElement[] {
   return el.children.filter(isElement);
 }

@@ -8,13 +8,14 @@ import { fontSpec } from "../twui/fonts";
 import { extractDataPack, LuaValue } from "../twui/lua";
 import { useLayoutInputs } from "../state/useLayoutInputs";
 import { componentMap, getAttr, guidOf } from "../twui/doc";
-import { useContextMenu } from "../components/ContextMenu";
+import { useContextMenu, type MenuItem } from "../components/ContextMenu";
 import { buildComponentMenu } from "./componentMenu";
 import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
 import { locateHier } from "../twui/mutate";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
-import { imageUrl } from "../ipc/commands";
-import { setCaptureFn } from "./visualizerCapture";
+import { imageUrl, savePng } from "../ipc/commands";
+import { pickSaveFile } from "../ipc/dialog";
+import { captureVisualizer, setCaptureFn } from "./visualizerCapture";
 
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
 const EMPTY_LAYOUT: LayoutResult = { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] };
@@ -296,7 +297,7 @@ export default function VisualizerPanel() {
 
   // Script data pack, DB-record contexts (PlayersFaction etc.) and perspective tokens —
   // shared with the hierarchy tree so visibility decisions agree.
-  const { dataPack, staticVars, tokens } = useLayoutInputs();
+  const { dataPack, staticVars, tokens, previewBindings } = useLayoutInputs();
   // The Inspector's state preview rides in sim.state (preview wins per component); the
   // hierarchy's force-show overrides ride in sim.show so a script-hidden component the user
   // revealed renders on the canvas too.
@@ -334,7 +335,7 @@ export default function VisualizerPanel() {
             measureText, contextDb?.ministerial_positions, renderResolution,
             // Skeleton placeholders are an editor aid — never in Simulation/Tooltip, which
             // faithfully mirror the game (an unbound list there shows nothing).
-            previewEmptyLists && !simLike, uiPrefs
+            previewEmptyLists && !simLike, uiPrefs, previewBindings
           )
         : EMPTY_LAYOUT;
 
@@ -350,7 +351,8 @@ export default function VisualizerPanel() {
           slice.doc, context, tokens, slice.templates, loc, dp, EMPTY_SIM, staticVars,
           false, slice.createdLayouts, ccoShorthand, slice.componentDataPacks as Record<string, LuaValue>,
           measureText, contextDb?.ministerial_positions, renderResolution,
-          previewEmptyLists && !simLike, uiPrefs
+          // Overlay (reference) layers don't carry the active doc's preview bindings.
+          previewEmptyLists && !simLike, uiPrefs, []
         );
         refLayoutCache.current.set(slice.doc, l);
         return l;
@@ -373,7 +375,7 @@ export default function VisualizerPanel() {
     },
     // `fontsReady` is a dep so layouts re-measure once the bundled fonts load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [doc, tabs, activeTabId, inactiveDocs, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb, renderResolution, previewEmptyLists, simLike, uiPrefs]
+    [doc, tabs, activeTabId, inactiveDocs, context, tokens, templates, loc, dataPack, effectiveSim, staticVars, mode, createdLayouts, ccoShorthand, componentDataPacks, fontsReady, contextDb, renderResolution, previewEmptyLists, simLike, uiPrefs, previewBindings]
   );
 
   // The active layer's layout drives all existing interaction (hit-test, move, scrollbars,
@@ -400,7 +402,14 @@ export default function VisualizerPanel() {
       // canvas stays untainted and the bug-report capture can call toDataURL() on it.
       img.crossOrigin = "anonymous";
       img.onload = () => forceTick((t) => t + 1);
-      img.onerror = () => forceTick((t) => t + 1);
+      // Surface genuinely-unresolved assets (a declared imagepath that 404s in the active data
+      // source) instead of failing silently — the canvas only shows a red-X placeholder, with no
+      // hint of which path is missing. Fires once per path per imageEpoch (the cache clears above
+      // on data-source change, so it re-warns after a switch).
+      img.onerror = () => {
+        console.warn(`[twui] unresolved image: ${path}`);
+        forceTick((t) => t + 1);
+      };
       img.src = imageUrl(path, imageEpoch);
       cache.set(path, img);
     }
@@ -600,7 +609,7 @@ export default function VisualizerPanel() {
     setSim((s) => ({ ...s, scroll: { ...s.scroll, [guid]: Math.min(max, Math.max(0, v)) } }));
   };
 
-  const onWheel = (e: React.WheelEvent) => {
+  const onWheel = (e: WheelEvent) => {
     e.preventDefault();
     const w = toWorld(e.clientX, e.clientY);
     const sc = simLike ? scrollableAt(w.x, w.y) : undefined;
@@ -617,6 +626,22 @@ export default function VisualizerPanel() {
     const wy = (my - view.panY) / view.zoom;
     setView({ zoom: newZoom, panX: mx - wx * newZoom, panY: my - wy * newZoom });
   };
+
+  // Attach wheel zoom/scroll as a NON-passive native listener. React registers its onWheel at the
+  // document root as passive, so calling e.preventDefault() in a JSX onWheel handler is ignored and
+  // the browser warns "Unable to preventDefault inside passive event listener". A latest-closure ref
+  // lets the once-mounted listener read current state without re-subscribing on every render.
+  const onWheelRef = useRef(onWheel);
+  useEffect(() => {
+    onWheelRef.current = onWheel;
+  });
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e: WheelEvent) => onWheelRef.current(e);
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+  }, []);
 
   // Click in Simulation mode: switch tabs (button group) or toggle press state.
   // It never selects/highlights — that's reserved for View/Move.
@@ -753,19 +778,47 @@ export default function VisualizerPanel() {
     }
   };
 
+  // Save a clean, native-resolution PNG of the current layout (perspective/root resolution, no
+  // pan/zoom or selection overlays). Reuses the same offscreen render as the bug reporter.
+  const takeScreenshot = async () => {
+    const dataUrl = captureVisualizer();
+    if (!dataUrl) {
+      useStore.getState().setStatus("Nothing to capture");
+      return;
+    }
+    const name = useStore.getState().fileName ?? "layout";
+    const base = name.replace(/\.twui\.xml$/i, "").replace(/\.[^.]+$/, "") || "layout";
+    const path = await pickSaveFile({
+      filters: [{ name: "PNG image", extensions: ["png"] }],
+      defaultFileName: `${base}.png`,
+    });
+    if (!path) return;
+    try {
+      await savePng(path, dataUrl);
+      useStore.getState().setStatus(`Saved screenshot to ${path}`);
+    } catch (err) {
+      useStore.getState().setStatus(`${err}`);
+    }
+  };
+
   // Right-click a component on the canvas: pick it across all visible layers, make its file
-  // active + selected, then open the shared component menu (same as the Hierarchy).
+  // active + selected, then open the shared component menu (same as the Hierarchy). On empty
+  // canvas we still offer "Take screenshot" — a layout-level action.
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    const screenshotItem: MenuItem = { label: "Take screenshot…", onSelect: () => void takeScreenshot() };
     const w = toWorld(e.clientX, e.clientY);
     const hit = hitTestAll(w.x, w.y);
-    if (!hit) return; // empty canvas — suppress the native menu, show nothing
+    if (!hit) {
+      menu.open(e, [screenshotItem]);
+      return;
+    }
     if (hit.layerId !== activeTabId) switchTab(hit.layerId);
     select(hit.guid);
     const st = useStore.getState();
     const comp = st.doc ? componentMap(st.doc).get(hit.guid) : undefined;
     const hidden = !!comp && (getAttr(comp, "visible") === "false" || getAttr(comp, "is_visible") === "false");
-    menu.open(e, buildComponentMenu(hit.guid, { hidden }));
+    menu.open(e, [...buildComponentMenu(hit.guid, { hidden }), { label: "", separator: true }, screenshotItem]);
   };
 
   const fit = useCallback(() => {
@@ -843,7 +896,6 @@ export default function VisualizerPanel() {
               ? "pointer"
               : "grab",
           }}
-          onWheel={onWheel}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}

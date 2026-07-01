@@ -113,6 +113,49 @@ point. For that to land with ownership already true, the Lua **applies the bundl
 (`08-script-bridge.md`). Sequence: click → event → Lua applies bundle → Lua deducts 1 → resource events fire →
 nodes re-check `0.purchased` (bought node → `purchased`) and the button re-gates.
 
+## Variable prices (positive and negative)
+
+The cost above is a hardcoded `1`. To give each node its **own** price — and let some bundles *refund* the
+resource instead of costing it — carry a **signed** price in a third script object, read by the button *and*
+the Lua. Convention used here: **negative = a purchase (spend), positive = a refund (gain).**
+
+1. **Set the price on the node click** with the **numeric** accessor `SetNumericValue` (not the string one):
+
+```xml
+context_function_id="Do( ScriptObjectContext(&quot;ironic_selected_id&quot;).SetStringValue(&quot;<GUID>&quot;), ScriptObjectContext(&quot;ironic_selected_key&quot;).SetStringValue(&quot;<bundle key>&quot;), ScriptObjectContext(&quot;ironic_selected_cost&quot;).SetNumericValue( -3 ) )"
+```
+
+2. **Gate on the signed price** instead of `>= 1` — the shipped idiom (`3k_dlc07_schemes_panel.twui.xml`):
+
+```xml
+context_function_id="ScriptObjectContext(&quot;ironic_selected_id&quot;).StringValue != &quot;&quot; &amp;&amp; PlayersFaction.PooledResourceContext( &quot;ironic_unit_upgrades&quot; ).Total + ScriptObjectContext( &quot;ironic_selected_cost&quot; ).NumericValue &gt;= 0"
+```
+
+`Total + price >= 0`: a refund (price > 0) always passes; a purchase (price < 0) needs `Total >= |price|`. At
+`price = -1` this is exactly the old `Total >= 1`, so the placeholder changes no behaviour.
+
+3. **Display the signed amount** — magnitude for a buy, `+N` for a refund — and refresh it on each selection:
+
+```xml
+<callback_with_context
+	callback_id="ContextTextLabel"
+	context_object_id="CcoStaticObject"
+	context_function_id="( c = ScriptObjectContext( &quot;ironic_selected_cost&quot; ).NumericValue ) =&gt; { GetIfElse( c &lt; 0, RoundFloat( c * (-1) ), &quot;+&quot; + RoundFloat( c ) ) }">
+	<child_m_user_properties>
+		<property name="event0" value="ScriptObjectValueUpdatedironic_selected_cost"/>
+	</child_m_user_properties>
+</callback_with_context>
+```
+
+4. **Lua applies the signed price directly** — `apply_transaction_to_factor(factor, price)`, no negation (a
+   negative value decreases the pool, positive increases); `price == 0` needs a `+1`/`-1` nudge or no refresh
+   fires. See `08-script-bridge.md`.
+
+Script objects expose `SetNumericValue` / `NumericValue` alongside the string pair (`04-callbacks-cco.md`), and
+Cco has negative literals and `*`, so `c * (-1)` and `Total + price` are valid. **Per-node vs per-key:** look
+the price up by whatever identifies the node — if every node shares one bundle key, key by the node **GUID**
+(unique); once each node has its own real bundle key, key by that.
+
 ## What did NOT work / watch out
 
 - **Don't clear the selection in the same click that fires the event.** The event reaches Lua *after* the
@@ -121,7 +164,8 @@ nodes re-check `0.purchased` (bought node → `purchased`) and the button re-gat
   re-clicks. (`07-gotchas.md`)
 - **The `purchased` state blanks the dynamic icon** unless you drop its full brighten — `07-gotchas.md`.
 - **One placeholder bundle key on every node** ⇒ buying any one marks them all owned. Give each node a unique
-  `EffectBundleFromKey(...)` / `0.purchased` key for per-node behaviour.
+  `EffectBundleFromKey(...)` / `0.purchased` key for per-node behaviour (and so each can carry its own price —
+  see Variable prices above).
 
 ## Verify
 

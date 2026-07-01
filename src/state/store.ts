@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
-import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, TwuiDocument } from "../types/twui";
+import { CcoDocs, CcoShorthand, CharacterDb, ContextDb, FactionContext, PreviewBindingConfig, TwuiDocument } from "../types/twui";
 import * as ipc from "../ipc/commands";
 import { pickOpenFile, pickSaveFile } from "../ipc/dialog";
 import {
@@ -31,7 +31,9 @@ import {
   addCallback,
   addCallbackProp,
   addComponentImage,
+  addContainerChild,
   addImageMetric,
+  addNamedChild,
   addNode,
   addState,
   componentGuidSet,
@@ -40,6 +42,7 @@ import {
   deleteState,
   duplicateNode,
   editChildAttr,
+  editNamedChildAttr,
   extractSubtree,
   genGuid,
   moveCallbackProp,
@@ -50,6 +53,8 @@ import {
   regenGuidSet,
   removeCallbackProp,
   removeChild,
+  removeContainerChild,
+  removeNamedChild,
   renameNode,
   replaceComponent,
   replaceHierarchyNode,
@@ -72,8 +77,8 @@ interface View {
 export type Mode = "view" | "move" | "create" | "align" | "sim" | "tooltip";
 
 /** Dockable panels that can be collapsed or popped out into their own OS window. */
-export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles" | "layers";
-export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles", "layers"];
+export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" | "packfiles" | "packeditor" | "layers" | "diagnosis";
+export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles", "packeditor", "layers", "diagnosis"];
 
 /** Games the editor supports. The Settings table always offers these; the user
  *  points each at its own folders (no folder scanning / auto-detect). */
@@ -126,6 +131,9 @@ export interface Settings {
    *  file and the active one. Falls back to `lastFile` for blobs persisted before tabs. */
   openTabs: { path: string; fromPack: boolean; visible: boolean }[];
   activeTab: string | null;
+  /** Editor-only DB-table preview bindings, keyed by doc key (filePath/packPath/workspacePath).
+   *  Never written to the .twui.xml; resolved rows are session-only (see `previewRows`). */
+  previewBindings: Record<string, PreviewBindingConfig[]>;
 }
 
 const DEFAULT_VIEW: View = { zoom: 0.5, panX: 40, panY: 40 };
@@ -152,6 +160,7 @@ const DEFAULT_SETTINGS: Settings = {
   lastFile: null,
   openTabs: [],
   activeTab: null,
+  previewBindings: {},
 };
 
 /** Deep-merge the persisted prefs subset over the freshly-created store so older or
@@ -178,6 +187,7 @@ function mergePersisted(current: AppStore, persisted: unknown): AppStore {
     gamePaths: { ...(ps.gamePaths ?? {}) },
     keybinds: { ...(ps.keybinds ?? {}) },
     perspective: ps.perspective ?? null,
+    previewBindings: { ...(ps.previewBindings ?? {}) },
   };
   return {
     ...current,
@@ -206,6 +216,8 @@ export interface TabMeta {
   fileName: string | null;
   filePath: string | null;
   packPath: string | null;
+  /** Workspace-pack-relative path when the file was opened from the editable Pack Editor. */
+  workspacePath: string | null;
   dirty: boolean;
   /** Composited as a layer in the visualizer. The active tab always renders regardless; this
    *  only governs non-active files (opt-in overlays). Tab order is the layer z-order. */
@@ -219,6 +231,7 @@ export interface PerDocSlice {
   filePath: string | null;
   fileName: string | null;
   packPath: string | null;
+  workspacePath: string | null;
   dirty: boolean;
   selectedGuid: string | null;
   selectedGuids: string[];
@@ -262,6 +275,13 @@ export interface AppStore {
   packMode: boolean;
   /** Source-relative path of a file opened from a pack (drives Save-As default name). */
   packPath: string | null;
+  /** Workspace-pack-relative path of the active doc when it was opened from the Pack Editor; when
+   *  set, Save (Ctrl+S) writes back into the open workspace pack instead of Save-As. */
+  workspacePath: string | null;
+  /** The open editable workspace pack's disk path (the "Pack Editor"), or null. */
+  workspacePack: string | null;
+  /** The `.twui.xml` paths in the open workspace pack — backs the Pack Editor tree. */
+  workspaceLayouts: string[];
   /** Every `.twui.xml` in the active pack(s) — backs the pack content browser. */
   packLayouts: string[];
   /** Whether pack mode includes Mod-type packs (false = vanilla only). */
@@ -332,6 +352,9 @@ export interface AppStore {
   /** Editor-preview affordance: render a data-bound list's template once (as a layout
    *  skeleton) when no script pack is connected. Only affects non-simulation renders. */
   previewEmptyLists: boolean;
+  /** Resolved DB rows for the active preview bindings, keyed by `${docKey}::${targetGuid}`.
+   *  Session-only (rebuilt by `loadPreviewRows` on file open / binding change). */
+  previewRows: Record<string, { key: string; value: Record<string, string> }[]>;
   /** User-set UI preference booleans (the game's `PrefAsBool`), e.g.
    *  `ui_alternative_unit_cards`. Drives preference-gated state/visibility in the preview. */
   uiPrefs: Record<string, boolean>;
@@ -383,6 +406,20 @@ export interface AppStore {
   setCulture: (key: string) => void;
   setSubculture: (key: string) => void;
   openFile: (path: string, fromPack?: boolean) => Promise<void>;
+  /** Open a layout from the editable workspace pack for editing (Ctrl+S saves back into the pack). */
+  openWorkspaceFile: (rel: string) => Promise<void>;
+  /** Create a brand-new empty Mod pack on disk and open it as the editable workspace. */
+  newPackWorkspace: (path: string) => Promise<void>;
+  /** Open an existing `.pack` as the editable workspace. */
+  openPackWorkspace: (path: string) => Promise<void>;
+  /** Close the editable workspace. */
+  closePackWorkspace: () => Promise<void>;
+  /** Re-read the workspace pack's `.twui.xml` list. */
+  refreshWorkspaceLayouts: () => Promise<void>;
+  /** Add a new blank `.twui.xml` to the workspace pack at `rel` and open it. */
+  createWorkspaceFile: (rel: string) => Promise<void>;
+  /** Delete a `.twui.xml` from the workspace pack (and close its tab if open). */
+  deleteWorkspaceFile: (rel: string) => Promise<void>;
   /** Open a file with a layer placement: "single" makes it the only composited file (active +
    *  editable, all others hidden); "top"/"bottom" add it as a visible reference layer at that
    *  z-order while keeping the file you were editing active. */
@@ -456,6 +493,15 @@ export interface AppStore {
   removeCallbackProp: (compGuid: string, containerTag: string, cbIndex: number, propIndex: number) => void;
   moveChild: (parentGuid: string, containerTag: string, index: number, dir: -1 | 1) => void;
   removeChild: (parentGuid: string, containerTag: string, index: number) => void;
+  // Generic nested-structure CRUD for the below-component containers that lack a bespoke editor
+  // (localised_texts, transitionmap, animations, material overrides, component_text). One-level
+  // list rows are addressed by (owner guid, container tag, index) — reusing editChildAttr/moveChild
+  // for edit/reorder; single named children (component_text) by (owner guid, child tag).
+  addContainerChild: (parentGuid: string, containerTag: string, childTag: string, initialAttrs: [string, string][], withGuid?: boolean) => void;
+  removeContainerChild: (parentGuid: string, containerTag: string, index: number) => void;
+  addNamedChild: (parentGuid: string, childTag: string) => void;
+  editNamedChildAttr: (parentGuid: string, childTag: string, key: string, value: string) => void;
+  removeNamedChild: (parentGuid: string, childTag: string) => void;
   toggleVisible: (guid: string) => void;
   beginDrag: () => void;
   liveSetOffset: (guid: string, x: number, y: number) => void;
@@ -469,6 +515,11 @@ export interface AppStore {
   setPanelPopped: (id: PanelId, popped: boolean) => void;
   setShowBounds: (v: boolean) => void;
   setPreviewEmptyLists: (v: boolean) => void;
+  /** Add/replace (cfg) or remove (null) the preview binding for `target` under `docKey`,
+   *  then refresh resolved rows. Persisted in settings; never touches the .twui.xml. */
+  setPreviewBinding: (docKey: string, target: string, cfg: PreviewBindingConfig | null) => void;
+  /** Fetch + cache rows for the active document's preview bindings (best-effort). */
+  loadPreviewRows: () => Promise<void>;
   setUiPref: (key: string, value: boolean) => void;
   setMode: (m: Mode) => void;
   setRenderResolution: (r: { w: number; h: number } | null) => void;
@@ -488,10 +539,19 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/** Stable key identifying the active document for preview-binding config/rows. */
+function docKeyOf(s: {
+  filePath: string | null;
+  packPath: string | null;
+  workspacePath: string | null;
+}): string | null {
+  return s.filePath ?? s.packPath ?? s.workspacePath ?? null;
+}
+
 /** The top-level store fields that belong to ONE open file. `snapshotActive`/`hydrate` move
  *  them between the live state and a parked `PerDocSlice`; one list keeps them from drifting. */
 const PER_DOC_FIELDS = [
-  "doc", "filePath", "fileName", "packPath", "dirty",
+  "doc", "filePath", "fileName", "packPath", "workspacePath", "dirty",
   "selectedGuid", "selectedGuids", "revealed", "previewState",
   "undoStack", "redoStack", "templates", "createdLayouts",
   "scriptConn", "dataPackOverride", "componentDataPacks", "scriptDraft",
@@ -517,7 +577,7 @@ function hydrate(s: AppStore, slice: PerDocSlice): void {
 /** The empty-document state (no file open) — used when the last tab closes. */
 function emptySlice(): PerDocSlice {
   return {
-    doc: null, filePath: null, fileName: null, packPath: null, dirty: false,
+    doc: null, filePath: null, fileName: null, packPath: null, workspacePath: null, dirty: false,
     selectedGuid: null, selectedGuids: [], revealed: {}, previewState: {},
     undoStack: [], redoStack: [], templates: {}, createdLayouts: {},
     scriptConn: { id: null, path: null, text: null, status: "none" },
@@ -594,6 +654,9 @@ export const useStore = create<AppStore>()(
     dataRoot: null,
     packMode: false,
     packPath: null,
+    workspacePath: null,
+    workspacePack: null,
+    workspaceLayouts: [],
     packLayouts: [],
     imageEpoch: 0,
     packIncludeMods: false,
@@ -632,6 +695,7 @@ export const useStore = create<AppStore>()(
     mode: DEFAULT_SETTINGS.visualizer.defaultMode,
     showBounds: DEFAULT_SETTINGS.visualizer.showBounds,
     previewEmptyLists: true,
+    previewRows: {},
     uiPrefs: {},
     renderResolution: null,
     clipboard: null,
@@ -669,6 +733,10 @@ export const useStore = create<AppStore>()(
       const gp = get().settings.gamePaths[name];
       const wantPack = get().packMode;
       try {
+        // Tell the backend the game changed first: this swaps the rpfm game key + bundled schema
+        // and drops the game-specific caches, so the setPackSource/setDataRoot below rebuild the
+        // source for the new game instead of reusing the previous game's cached base pack.
+        await ipc.setGameKey(name);
         if (wantPack && gp?.data) await get().setPackSource(gp.data);
         else if (!wantPack && gp?.outside) await get().setDataRoot(gp.outside);
         else if (gp?.data) await get().setPackSource(gp.data);
@@ -897,6 +965,7 @@ export const useStore = create<AppStore>()(
           fileName: baseName(path),
           filePath: fromPack ? null : path,
           packPath: fromPack ? path : null,
+          workspacePath: null,
           dirty: false,
           // Opt-in overlay: a freshly opened file isn't composited until toggled on (it's drawn
           // anyway while it's the active tab).
@@ -913,6 +982,7 @@ export const useStore = create<AppStore>()(
           // No on-disk path for pack files -> Save falls through to Save-As.
           s.filePath = fromPack ? null : path;
           s.packPath = fromPack ? path : null;
+          s.workspacePath = null;
           s.fileName = baseName(path);
           s.dirty = false;
           s.selectedGuid = null;
@@ -937,6 +1007,148 @@ export const useStore = create<AppStore>()(
           s.status = `Error: ${e}`;
           // The file failed to load -> drop the tab we optimistically added.
           removeTab(s, id);
+        });
+      }
+    },
+
+    // --- Editable pack workspace (the "Pack Editor") ---
+
+    openWorkspaceFile: async (rel) => {
+      const id = `workspace:${rel}`;
+      if (get().tabs.some((t) => t.id === id)) {
+        get().switchTab(id);
+        return;
+      }
+      set((s) => {
+        if (s.activeTabId) s.inactiveDocs[s.activeTabId] = snapshotActive(s);
+        s.tabs.push({
+          id,
+          fileName: baseName(rel),
+          filePath: null,
+          packPath: null,
+          workspacePath: rel,
+          dirty: false,
+          visible: false,
+        });
+        s.activeTabId = id;
+        s.status = `Loading ${baseName(rel)}…`;
+      });
+      try {
+        const doc = await ipc.readWorkspaceLayout(rel);
+        set((s) => {
+          s.doc = doc;
+          s.filePath = null;
+          s.packPath = null;
+          s.workspacePath = rel; // Save (Ctrl+S) writes back into the workspace pack.
+          s.fileName = baseName(rel);
+          s.dirty = false;
+          s.selectedGuid = null;
+          s.selectedGuids = [];
+          s.revealed = {};
+          s.undoStack = [];
+          s.redoStack = [];
+          s.templates = {};
+          s.createdLayouts = {};
+          s.scriptConn = { id: null, path: null, text: null, status: "none" };
+          s.dataPackOverride = null;
+          s.componentDataPacks = {};
+          s.scriptDraft = null;
+          s.previewState = {};
+          s.status = `Loaded ${baseName(rel)}`;
+          rememberTabs(s);
+        });
+        await get().hydrateDocResources(doc, baseName(rel));
+      } catch (e) {
+        set((s) => {
+          s.status = `Error: ${e}`;
+          removeTab(s, id);
+        });
+      }
+    },
+
+    newPackWorkspace: async (path) => {
+      try {
+        await ipc.newPackWorkspace(path);
+        set((s) => {
+          s.workspacePack = path;
+          s.workspaceLayouts = [];
+          s.imageEpoch++;
+          s.status = `New pack ${baseName(path)}`;
+        });
+      } catch (e) {
+        set((s) => { s.status = `New pack error: ${e}`; });
+      }
+    },
+
+    openPackWorkspace: async (path) => {
+      try {
+        const layouts = await ipc.openPackWorkspace(path);
+        set((s) => {
+          s.workspacePack = path;
+          s.workspaceLayouts = layouts;
+          s.imageEpoch++;
+          s.status = `Opened pack ${baseName(path)}`;
+        });
+      } catch (e) {
+        set((s) => { s.status = `Open pack error: ${e}`; });
+      }
+    },
+
+    closePackWorkspace: async () => {
+      try {
+        await ipc.closePackWorkspace();
+      } catch {
+        /* ignore */
+      }
+      set((s) => {
+        s.workspacePack = null;
+        s.workspaceLayouts = [];
+        s.imageEpoch++;
+      });
+    },
+
+    refreshWorkspaceLayouts: async () => {
+      try {
+        const layouts = await ipc.listWorkspaceLayouts();
+        set((s) => {
+          s.workspaceLayouts = layouts;
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    createWorkspaceFile: async (rel) => {
+      const res = get().renderResolution;
+      const width = res?.w ?? 1920;
+      const height = res?.h ?? 1080;
+      try {
+        const doc = await buildBlankDocument({ version: 142, width, height });
+        await ipc.saveWorkspaceLayout(rel, doc);
+        await get().refreshWorkspaceLayouts();
+        set((s) => {
+          s.imageEpoch++;
+        });
+        await get().openWorkspaceFile(rel);
+      } catch (e) {
+        set((s) => {
+          s.status = `New pack file error: ${e}`;
+        });
+      }
+    },
+
+    deleteWorkspaceFile: async (rel) => {
+      try {
+        await ipc.deleteWorkspaceLayout(rel);
+        set((s) => {
+          const id = `workspace:${rel}`;
+          if (s.tabs.some((t) => t.id === id)) removeTab(s, id);
+          s.imageEpoch++;
+        });
+        await get().refreshWorkspaceLayouts();
+      } catch (e) {
+        set((s) => {
+          s.status = `Delete error: ${e}`;
         });
       }
     },
@@ -970,9 +1182,25 @@ export const useStore = create<AppStore>()(
     },
 
     save: async () => {
-      const { doc, filePath } = get();
+      const { doc, filePath, workspacePath } = get();
       if (!doc) return;
-      // No on-disk path (e.g. opened from a pack) -> prompt for a destination.
+      // Opened from the editable Pack Editor: write back into the pack + persist it (Ctrl+S).
+      if (workspacePath) {
+        try {
+          await ipc.saveWorkspaceLayout(workspacePath, doc);
+          set((s) => {
+            setActiveDirty(s, false);
+            s.status = `Saved ${baseName(workspacePath)} into pack`;
+            s.imageEpoch++; // refresh previews that read the workspace as an overlay
+          });
+        } catch (e) {
+          set((s) => {
+            s.status = `Save error: ${e}`;
+          });
+        }
+        return;
+      }
+      // No on-disk path (e.g. opened from a read-only pack) -> prompt for a destination.
       if (!filePath) {
         await get().saveAsDialog();
         return;
@@ -998,6 +1226,7 @@ export const useStore = create<AppStore>()(
         set((s) => {
           s.filePath = path;
           s.packPath = null; // Save-As always writes a loose, on-disk file.
+          s.workspacePath = null;
           s.fileName = baseName(path);
           // The active tab now points at the saved-on-disk file: update its identity + metadata.
           const newId = `file:${path}`;
@@ -1007,6 +1236,7 @@ export const useStore = create<AppStore>()(
             t.fileName = baseName(path);
             t.filePath = path;
             t.packPath = null;
+            t.workspacePath = null;
             t.dirty = false;
           }
           s.activeTabId = newId;
@@ -1106,6 +1336,8 @@ export const useStore = create<AppStore>()(
       } catch {
         /* ComponentCreator layouts are optional; ignore */
       }
+      // Resolve any DB-table preview bindings for this document (best-effort).
+      await get().loadPreviewRows();
     },
 
     adoptUntitledDoc: (doc, fileName) =>
@@ -1114,7 +1346,7 @@ export const useStore = create<AppStore>()(
         if (s.activeTabId) s.inactiveDocs[s.activeTabId] = snapshotActive(s);
         const id = `new:${genGuid()}`;
         // Untitled: no filePath/packPath -> Save routes to Save-As; rememberTabs skips it.
-        s.tabs.push({ id, fileName, filePath: null, packPath: null, dirty: true, visible: false });
+        s.tabs.push({ id, fileName, filePath: null, packPath: null, workspacePath: null, dirty: true, visible: false });
         s.activeTabId = id;
         s.doc = doc;
         s.filePath = null;
@@ -1324,7 +1556,8 @@ export const useStore = create<AppStore>()(
     saveAsDialog: async () => {
       if (!get().doc) return;
       // Suggest the pack file's own name when saving a pack-opened file.
-      const suggested = get().packPath ? baseName(get().packPath!) : undefined;
+      const fromPackLike = get().packPath ?? get().workspacePath;
+      const suggested = fromPackLike ? baseName(fromPackLike) : undefined;
       const path = await pickSaveFile({
         filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
         defaultPath: get().dataRoot ?? undefined,
@@ -1724,6 +1957,27 @@ export const useStore = create<AppStore>()(
       get().mutate((doc) => editChildAttr(doc, parentGuid, containerTag, index, key, value));
     },
 
+    // Generic nested-structure CRUD. Text-valued attrs here (e.g. localised_text.text,
+    // component_text.text) are treated exactly like the existing state `text` attr — stored/edited
+    // verbatim, no entity encode/decode — so behaviour matches the rest of the clean view and no
+    // asymmetric double-escaping is introduced. (Callback expressions, which do carry entities,
+    // keep their dedicated encoded path above.)
+    addContainerChild: (parentGuid, containerTag, childTag, initialAttrs, withGuid) => {
+      get().mutate((doc) => addContainerChild(doc, parentGuid, containerTag, childTag, initialAttrs, withGuid));
+    },
+    removeContainerChild: (parentGuid, containerTag, index) => {
+      get().mutate((doc) => removeContainerChild(doc, parentGuid, containerTag, index));
+    },
+    addNamedChild: (parentGuid, childTag) => {
+      get().mutate((doc) => addNamedChild(doc, parentGuid, childTag));
+    },
+    editNamedChildAttr: (parentGuid, childTag, key, value) => {
+      get().mutate((doc) => editNamedChildAttr(doc, parentGuid, childTag, key, value));
+    },
+    removeNamedChild: (parentGuid, childTag) => {
+      get().mutate((doc) => removeNamedChild(doc, parentGuid, childTag));
+    },
+
     // Hide/show a component by toggling visible="false" on its <components>
     // element. The visualizer prunes hidden subtrees, so this also hides the
     // node's children. Showing removes the flag rather than writing
@@ -1826,6 +2080,52 @@ export const useStore = create<AppStore>()(
       }),
     setShowBounds: (v) => set((s) => { s.showBounds = v; }),
     setPreviewEmptyLists: (v) => set((s) => { s.previewEmptyLists = v; }),
+
+    setPreviewBinding: (docKey, target, cfg) => {
+      set((s) => {
+        const list = (s.settings.previewBindings[docKey] ?? []).filter((b) => b.target !== target);
+        if (cfg) list.push(cfg);
+        if (list.length) s.settings.previewBindings[docKey] = list;
+        else delete s.settings.previewBindings[docKey];
+      });
+      void get().loadPreviewRows();
+    },
+
+    loadPreviewRows: async () => {
+      const s0 = get();
+      const docKey = docKeyOf(s0);
+      if (!docKey) return;
+      const configs = s0.settings.previewBindings[docKey] ?? [];
+      const next: Record<string, { key: string; value: Record<string, string> }[]> = {};
+      for (const cfg of configs) {
+        try {
+          const tbl = await ipc.readDbTable(cfg.table);
+          if (!tbl.header.length) continue;
+          const header = tbl.header;
+          const keyIdx = header.indexOf("key");
+          const filterIdx = cfg.filter ? header.indexOf(cfg.filter.column) : -1;
+          const limit = Math.min(Math.max(1, cfg.limit ?? 50), 200);
+          const rows: { key: string; value: Record<string, string> }[] = [];
+          for (const row of tbl.rows) {
+            if (filterIdx >= 0 && cfg.filter && !(row[filterIdx] ?? "").includes(cfg.filter.contains)) continue;
+            const value: Record<string, string> = {};
+            header.forEach((h, i) => { value[h] = row[i] ?? ""; });
+            const key = (keyIdx >= 0 ? row[keyIdx] : undefined) ?? String(rows.length);
+            rows.push({ key, value });
+            if (rows.length >= limit) break;
+          }
+          next[`${docKey}::${cfg.target}`] = rows;
+        } catch {
+          /* a missing/undecodable table just yields no rows for this binding */
+        }
+      }
+      set((s) => {
+        // Replace only THIS doc's rows (clears stale rows when a binding is removed); keep others.
+        const prefix = `${docKey}::`;
+        for (const k of Object.keys(s.previewRows)) if (k.startsWith(prefix)) delete s.previewRows[k];
+        Object.assign(s.previewRows, next);
+      });
+    },
     setUiPref: (key, value) => set((s) => { s.uiPrefs[key] = value; }),
 
     setMode: (m) => set((s) => { s.mode = m; }),

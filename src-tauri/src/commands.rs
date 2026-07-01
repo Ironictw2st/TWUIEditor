@@ -77,6 +77,13 @@ pub fn read_script(state: State<AppState>, path: String) -> Result<String, Strin
     api::read_script(&state, &path)
 }
 
+/// Read a DB table (header + stringified rows) for the preview-binding feature.
+/// Missing/undecodable table -> empty header+rows.
+#[tauri::command]
+pub fn read_db_table(state: State<AppState>, table: String) -> api::DbTable {
+    api::read_db_table(&state, &table)
+}
+
 /// Read and parse template layouts referenced by `template_id`, keyed by id.
 #[tauri::command]
 pub fn load_templates(
@@ -118,6 +125,12 @@ pub fn current_game(state: State<AppState>) -> Option<String> {
 #[tauri::command]
 pub fn set_game(state: State<AppState>, name: String) -> Result<(), String> {
     api::set_game(&state, &name)
+}
+
+/// Update the active rpfm game key + drop game-specific caches, without re-pointing the data root.
+#[tauri::command]
+pub fn set_game_key(state: State<AppState>, name: String) -> Result<(), String> {
+    api::set_game_key(&state, &name)
 }
 
 #[tauri::command]
@@ -200,6 +213,66 @@ pub fn read_layout(path: String) -> Result<Document, String> {
 #[tauri::command]
 pub fn save_layout(path: String, doc: Document) -> Result<(), String> {
     api::save_layout(&path, doc)
+}
+
+/// Write a PNG (base64 or `data:image/png;base64,...`) to an absolute host path.
+#[tauri::command]
+pub fn save_png(path: String, b64: String) -> Result<(), String> {
+    api::save_png(&path, &b64)
+}
+
+// --- Editable pack workspace (the "Pack Editor") ---
+
+/// Create a new empty Mod pack at `path` and open it as the editable workspace.
+#[tauri::command]
+pub fn new_pack_workspace(state: State<AppState>, path: String) -> Result<(), String> {
+    api::new_pack_workspace(&state, &path)
+}
+
+/// Open an existing `.pack` as the editable workspace; returns its `.twui.xml` paths.
+#[tauri::command]
+pub fn open_pack_workspace(state: State<AppState>, path: String) -> Result<Vec<String>, String> {
+    api::open_pack_workspace(&state, &path)
+}
+
+/// The `.twui.xml` paths in the open workspace pack.
+#[tauri::command]
+pub fn list_workspace_layouts(state: State<AppState>) -> Vec<String> {
+    api::list_workspace_layouts(&state)
+}
+
+/// Read+parse a layout from the workspace pack.
+#[tauri::command]
+pub fn read_workspace_layout(state: State<AppState>, rel: String) -> Result<Document, String> {
+    api::read_workspace_layout(&state, &rel)
+}
+
+/// Write `doc` into the workspace pack (create/replace `rel`) and persist the pack to disk.
+#[tauri::command]
+pub fn save_workspace_layout(
+    state: State<AppState>,
+    rel: String,
+    doc: Document,
+) -> Result<(), String> {
+    api::save_workspace_layout(&state, &rel, doc)
+}
+
+/// Delete a layout from the workspace pack and persist.
+#[tauri::command]
+pub fn delete_workspace_layout(state: State<AppState>, rel: String) -> Result<(), String> {
+    api::delete_workspace_layout(&state, &rel)
+}
+
+/// Close the editable workspace.
+#[tauri::command]
+pub fn close_pack_workspace(state: State<AppState>) {
+    api::close_pack_workspace(&state)
+}
+
+/// The open workspace's path + dirty flag.
+#[tauri::command]
+pub fn pack_workspace_status(state: State<AppState>) -> api::WorkspaceStatus {
+    api::pack_workspace_status(&state)
 }
 
 /// Round-trip a file in memory and report whether serialize(parse(x)) == x.

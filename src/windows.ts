@@ -11,8 +11,10 @@ const TITLE: Record<PanelId, string> = {
   inspector: "Inspector",
   perspective: "Perspective",
   visualizer: "Visualizer",
-  packfiles: "Pack Files",
+  packfiles: "Dependencies",
+  packeditor: "Pack Editor",
   layers: "Layers",
+  diagnosis: "Diagnosis",
 };
 const SIZE: Record<PanelId, { width: number; height: number }> = {
   hierarchy: { width: 360, height: 820 },
@@ -20,7 +22,9 @@ const SIZE: Record<PanelId, { width: number; height: number }> = {
   perspective: { width: 560, height: 220 },
   visualizer: { width: 1040, height: 780 },
   packfiles: { width: 380, height: 820 },
+  packeditor: { width: 380, height: 820 },
   layers: { width: 300, height: 600 },
+  diagnosis: { width: 420, height: 600 },
 };
 
 /** Open (or focus) the OS window for a panel. `onClosed` fires when the user closes that window. */

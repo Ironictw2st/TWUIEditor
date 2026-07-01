@@ -6,7 +6,7 @@
 // External docking is treated like its non-external edge for positioning v1
 // (the anchor/offset already place the child outside); refine later if needed.
 
-import { CcoShorthand, MinisterialPosition, RawElement, TwuiDocument, FactionContext } from "../types/twui";
+import { CcoShorthand, MinisterialPosition, PreviewBinding, RawElement, TwuiDocument, FactionContext } from "../types/twui";
 import {
   activeState,
   childByTag,
@@ -650,7 +650,8 @@ export function computeLayout(
   posts?: MinisterialPosition[],
   renderResolution?: { w: number; h: number } | null,
   previewEmptyLists = false,
-  uiPrefs: Record<string, boolean> = {}
+  uiPrefs: Record<string, boolean> = {},
+  previewBindings: PreviewBinding[] = []
 ): LayoutResult {
   activeMeasureText = measureText;
   const items: RenderItem[] = [];
@@ -718,6 +719,13 @@ export function computeLayout(
     uiPrefs,
   };
 
+  // Editor-only DB-table preview bindings, indexed by the container guid they attach to.
+  // Only bindings with resolved rows participate (an empty/missing table leaves the layout
+  // untouched — the container renders statically exactly as before).
+  const pbByTarget = new Map<string, PreviewBinding>(
+    previewBindings.filter((b) => b.rows.length).map((b) => [b.target, b])
+  );
+
   // Pick the rendered state: a Simulation forced state (click feedback) wins, then the
   // `ui_alternative_unit_cards` preference (the game flips unit-card components to their
   // `alternative` state), else current/default/active.
@@ -777,7 +785,19 @@ export function computeLayout(
       if (path !== undefined) slotOverrides.set(imageSetterSlot(cb), path);
     }
     const isCb = cbs.find((c) => c.id === "ContextImageSetter");
-    const iconOverride = slotOverrides.get(0);
+    // Editor preview-binding image override: this component is an image mapping target and a DB
+    // row is in scope -> use the column's value (optionally via a "{{value}}" path template) as
+    // the slot-0 image, reusing the ContextImageSetter override plumbing below.
+    const pbImg = (() => {
+      const m = scope.previewBinding?.mappings.find(
+        (mp) => mp.aspect === "image" && (mp.target === (guidOf(hierNode) ?? "") || (!!mp.targetId && mp.targetId === getAttr(comp, "id")))
+      );
+      if (!m) return undefined;
+      const raw = asRecord(scope.entry)?.[m.column];
+      if (typeof raw !== "string" || raw === "") return undefined;
+      return m.template ? m.template.replace("{{value}}", raw) : raw;
+    })();
+    const iconOverride = slotOverrides.get(0) ?? pbImg;
 
     // Templated components historically draw a resolved ContextImageSetter as an extra
     // image on top (the fallback below). Only a parent-determined icon
@@ -831,6 +851,23 @@ export function computeLayout(
       }
       const t = evalTextLabel(tlCb.funcId, s, loc);
       if (t !== null) text = t;
+    }
+
+    // Editor preview-binding text override: this component is a text mapping target and a DB row
+    // is in scope -> replace its text with the mapped column value (loc-resolved unless `literal`).
+    // Runs after ContextTextLabel so the explicit preview mapping wins; gated, so unbound
+    // components are untouched.
+    if (scope.previewBinding) {
+      const m = scope.previewBinding.mappings.find(
+        (mp) => mp.aspect === "text" && (mp.target === (guidOf(hierNode) ?? "") || (!!mp.targetId && mp.targetId === getAttr(comp, "id")))
+      );
+      if (m) {
+        const raw = asRecord(scope.entry)?.[m.column];
+        if (typeof raw === "string" && raw !== "") {
+          const v = m.template ? m.template.replace("{{value}}", raw) : raw;
+          text = m.resolve === "literal" ? v : (loc?.[v] ?? v);
+        }
+      }
     }
 
     // Character portrait: a Character2DDisplayCreator whose role has an assigned
@@ -1016,6 +1053,8 @@ export function computeLayout(
     const comp = cmap.get(guidOf(hierNode) ?? "");
     const children = elementChildren(hierNode);
     const le = comp ? getLayoutEngine(comp) : undefined;
+    // Editor-only DB-table preview binding attached to THIS container (if any).
+    const pb = comp ? pbByTarget.get(guidOf(comp) ?? "") : undefined;
     // This component's `maskimage` (if any) alpha-clips its children — passed to each emitted
     // child so a masked child (e.g. the faction-leader portrait) composites through it.
     const childMaskPath = comp ? maskImagePath(comp) : undefined;
@@ -1090,6 +1129,39 @@ export function computeLayout(
           track(
             emit(widget, wcomp, st, { x: origin.x, y: origin.y, w, h }, origin, depth, clip, wscope, subCmap, sub, { w, h }, childMaskPath)
           );
+        }
+        return finish();
+      }
+    }
+
+    // DB-table preview binding (editor-only): a container the user attached a table to
+    // repeats its template child once per resolved row, even with NO List callback —
+    // this previews runtime-populated panels (e.g. book_of_grudges). Gated on a binding
+    // for THIS guid (rows already non-empty, see pbByTarget); otherwise the normal
+    // List/static paths run unchanged. Reuses the same layoutEngine/emit/track plumbing,
+    // and sets `previewBinding` on each row scope so mapped descendants draw column values.
+    if (pb && children.length) {
+      const tmpl = children[pb.templateIndex ?? 0] ?? children[0];
+      const tcomp = cmap.get(guidOf(tmpl) ?? "");
+      const tstate = tcomp ? activeState(tcomp) : undefined;
+      if (tcomp) {
+        const instances = pb.rows.map((r) => ({
+          node: tmpl,
+          comp: tcomp,
+          state: tstate,
+          scope: propagate(tcomp, { ...scope, entry: r.value, entryKey: r.key, previewBinding: pb, vars: { ...scope.vars } }),
+        }));
+        if (le) {
+          for (const p of layoutEngine(le, instances, origin, templates)) {
+            track(emit(p.node, p.comp, p.state, p.rect, origin, depth, clip, p.scope ?? scope, cmap, lDoc, { w: p.rect.w, h: p.rect.h }, childMaskPath));
+          }
+        } else {
+          let y = origin.y;
+          for (const inst of instances) {
+            const { w, h } = sizeFor(inst.comp, inst.state, origin, templates);
+            track(emit(inst.node, inst.comp, inst.state, { x: origin.x, y, w, h }, origin, depth, clip, inst.scope, cmap, lDoc, { w, h }, childMaskPath));
+            y += h;
+          }
         }
         return finish();
       }

@@ -42,8 +42,8 @@ import { shorthandHint } from "../twui/cco_shorthand";
 import { componentCreatorLayout } from "../twui/creator";
 import { attrInVersion, AttrKind, attrsFor, DOCKING_VALUES, schemaFor, validateAttr } from "../twui/schema";
 import { locateHier } from "../twui/mutate";
-import { RawElement, TwuiDocument } from "../types/twui";
-import { imageUrl, parseElement, serializeElement } from "../ipc/commands";
+import { PreviewBindingConfig, PreviewMapping, RawElement, TwuiDocument } from "../types/twui";
+import { imageUrl, parseElement, readDbTable, serializeElement } from "../ipc/commands";
 
 /** Controlled text field that commits to the store on blur / Enter only. */
 function Field({
@@ -819,6 +819,68 @@ function StateBlock({
           />
         ))}
       </div>
+      {/* State-level structures previously reachable only via the Raw tab, addressed by the state's
+          own guid: its <component_text> text/font block, <transitionmap> transitions, and material
+          shader overrides. The niche/rare ones hide when absent so states don't get cluttered. */}
+      <NamedChildSection
+        ownerGuid={guid}
+        el={state}
+        childTag="component_text"
+        kind="state"
+        title="Component text"
+        variant="block"
+        preferred={[
+          "text",
+          "textlabel",
+          "textvalign",
+          "texthalign",
+          "texthbehaviour",
+          "font_m_font_name",
+          "font_m_size",
+          "font_m_colour",
+          "fontcat_name",
+        ]}
+      />
+      <ContainerListSection
+        ownerGuid={guid}
+        el={state}
+        containerTag="transitionmap"
+        rowTag="transition"
+        kind="transition"
+        title="Transitions"
+        variant="block"
+        hideWhenEmpty
+        preferred={[
+          "index",
+          "transition_m_target_state",
+          "transition_m_transition_time",
+          "transition_m_interpolation_property_mask",
+        ]}
+      />
+      <ContainerListSection
+        ownerGuid={guid}
+        el={state}
+        containerTag="material_m_parameter_overrides"
+        rowTag="property"
+        kind="material_parameter"
+        title="Material parameters"
+        variant="block"
+        hideWhenEmpty
+        preferred={["name", "x", "y", "z", "w", "is_override_of_default"]}
+        rowLabel={(row) => getAttr(row, "name") || "parameter"}
+      />
+      <ContainerListSection
+        ownerGuid={guid}
+        el={state}
+        containerTag="material_m_texture_overrides"
+        rowTag="property"
+        kind="material_texture"
+        title="Material textures"
+        variant="block"
+        hideWhenEmpty
+        preferred={["slot_id", "filepath", "is_override_of_default"]}
+        rowLabel={(row) => getAttr(row, "slot_id") || getAttr(row, "filepath") || "texture"}
+      />
     </div>
   );
 }
@@ -955,6 +1017,400 @@ function ComponentImagesSection({ guid, comp, dataRoot }: { guid: string; comp: 
   );
 }
 
+/** Picker for a localised_text's `state` attribute — the STATE NAME (not a guid). Lists the
+ *  component's state names plus a blank "(all states)" default, keeping an unknown current value
+ *  selectable (mirrors ComponentImagePicker / SchemaField enum handling). */
+function StateNamePicker({
+  value,
+  stateNames,
+  onChange,
+}: {
+  value: string | undefined;
+  stateNames: string[];
+  onChange: (v: string) => void;
+}) {
+  const cur = value ?? "";
+  const known = cur === "" || stateNames.includes(cur);
+  return (
+    <label className="flex items-center gap-2 mb-1">
+      <span className={LABEL_CLS} title="The state this text applies to (empty = all states).">
+        state
+      </span>
+      <select className="flex-1" value={cur} onChange={(e) => onChange(e.target.value)}>
+        <option value="">(all states)</option>
+        {!known && cur && <option value={cur}>{`(unknown) ${cur}`}</option>}
+        {stateNames.map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** Generic editor for a one-level list container below a component or state — localised_texts,
+ *  transitionmap, animations, and the material overrides. Rows are addressed by (owner guid,
+ *  container tag, index), reusing the schema-driven AttrFields/AddAttr and the generic
+ *  editChildAttr/moveChild/removeContainerChild store helpers, so ONE component drives every such
+ *  structure (it differs only by props). Renders as a top-level `Section` ("section") or a compact
+ *  in-block sub-list ("block", used inside a StateBlock). `custom` supplies bespoke controls for
+ *  specific attr keys (e.g. a state-name picker); those keys are skipped by the generic AttrFields.
+ *  Passing `guid=""` to the fields is safe — the `editFn` overrides the guid-based commit path. */
+function ContainerListSection({
+  ownerGuid,
+  el,
+  containerTag,
+  rowTag,
+  kind,
+  title,
+  preferred,
+  seedAttrs = [],
+  withGuid = false,
+  rowLabel,
+  addLabel,
+  variant = "section",
+  hideWhenEmpty = false,
+  defaultOpen,
+  custom,
+}: {
+  ownerGuid: string;
+  el: RawElement;
+  containerTag: string;
+  rowTag: string;
+  kind: AttrKind;
+  title: string;
+  preferred: string[];
+  seedAttrs?: [string, string][];
+  withGuid?: boolean;
+  rowLabel?: (row: RawElement, i: number) => string;
+  addLabel?: string;
+  variant?: "section" | "block";
+  hideWhenEmpty?: boolean;
+  defaultOpen?: boolean;
+  custom?: Record<string, (row: RawElement, editRow: (k: string, v: string) => void) => React.ReactNode>;
+}) {
+  const cont = childByTag(el, containerTag);
+  const rows = cont ? elementChildren(cont) : [];
+  const addContainerChild = useStore((s) => s.addContainerChild);
+  const editChildAttr = useStore((s) => s.editChildAttr);
+  const moveChild = useStore((s) => s.moveChild);
+  const removeContainerChild = useStore((s) => s.removeContainerChild);
+  if (hideWhenEmpty && rows.length === 0) return null;
+  const customKeys = custom ? Object.keys(custom) : [];
+  const add = (
+    <AddButton
+      label={addLabel ?? `+ Add ${rowTag}`}
+      onClick={() => addContainerChild(ownerGuid, containerTag, rowTag, seedAttrs, withGuid)}
+    />
+  );
+  const body = (
+    <>
+      {rows.length === 0 && <div className="text-gray-600 text-[11px]">None.</div>}
+      {rows.map((row, i) => {
+        const editRow = (k: string, v: string) => editChildAttr(ownerGuid, containerTag, i, k, v);
+        return (
+          <div key={guidOf(row) ?? `${rowTag}${i}`} className="mb-2 border border-edge rounded p-2">
+            <div className="flex items-center gap-2 mb-1">
+              <div className="text-[11px] text-accent flex-1 min-w-0 truncate">
+                {rowLabel ? rowLabel(row, i) : `${row.tag} ${i + 1}`}
+              </div>
+              <RowControls
+                index={i}
+                count={rows.length}
+                onMove={(dir) => moveChild(ownerGuid, containerTag, i, dir)}
+                onDelete={() => removeContainerChild(ownerGuid, containerTag, i)}
+              />
+            </div>
+            {customKeys.map((k) => (
+              <div key={`c:${k}`}>{custom![k](row, editRow)}</div>
+            ))}
+            <AttrFields guid="" el={row} kind={kind} preferred={preferred} skip={customKeys} editFn={editRow} />
+            <AddAttr guid="" kind={kind} present={row.attrs.map((x) => x[0])} editFn={editRow} />
+          </div>
+        );
+      })}
+    </>
+  );
+  if (variant === "block") {
+    return (
+      <div className="mt-2">
+        <div className="flex items-center gap-2 mb-1">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500 flex-1">
+            {title} ({rows.length})
+          </div>
+          {add}
+        </div>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <Section title={`${title} (${rows.length})`} defaultOpen={defaultOpen ?? (rows.length > 0 && rows.length <= 8)}>
+      <div className="flex items-center gap-2 mb-2">
+        <div className="flex-1" />
+        {add}
+      </div>
+      {body}
+    </Section>
+  );
+}
+
+/** Generic editor for a single named child that carries only attributes (e.g. a state's
+ *  `<component_text>`). The named-child analogue of LayoutEngineSection: add/remove the child and
+ *  edit its attrs through editNamedChildAttr. Renders as a `Section` or a compact in-block sub-list. */
+function NamedChildSection({
+  ownerGuid,
+  el,
+  childTag,
+  kind,
+  title,
+  preferred,
+  variant = "section",
+  defaultOpen,
+}: {
+  ownerGuid: string;
+  el: RawElement;
+  childTag: string;
+  kind: AttrKind;
+  title: string;
+  preferred: string[];
+  variant?: "section" | "block";
+  defaultOpen?: boolean;
+}) {
+  const child = childByTag(el, childTag);
+  const addNamedChild = useStore((s) => s.addNamedChild);
+  const editNamedChildAttr = useStore((s) => s.editNamedChildAttr);
+  const removeNamedChild = useStore((s) => s.removeNamedChild);
+  const editFn = (k: string, v: string) => editNamedChildAttr(ownerGuid, childTag, k, v);
+  const body = !child ? (
+    <button
+      className="px-2 py-0.5 rounded bg-button hover:bg-buttonHover border border-edge text-[11px]"
+      onClick={() => addNamedChild(ownerGuid, childTag)}
+    >
+      + Add {title}
+    </button>
+  ) : (
+    <>
+      <div className="flex justify-end mb-1">
+        <button
+          className="px-1 leading-none text-[11px] text-gray-400 hover:text-red-400"
+          title="Remove"
+          onClick={() => removeNamedChild(ownerGuid, childTag)}
+        >
+          × remove
+        </button>
+      </div>
+      <AttrFields guid="" el={child} kind={kind} preferred={preferred} editFn={editFn} />
+      <AddAttr guid="" kind={kind} present={child.attrs.map((x) => x[0])} editFn={editFn} />
+    </>
+  );
+  if (variant === "block") {
+    return (
+      <div className="mt-2">
+        <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">{title}</div>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <Section title={title} defaultOpen={defaultOpen ?? !!child}>
+      {body}
+    </Section>
+  );
+}
+
+/** Editor-only "Preview data (DB table)" section: bind a DB table to this container so the
+ *  Visualizer repeats its template child once per row and fills mapped descendant components.
+ *  Persisted per doc key in settings; never written to the .twui.xml. Keyed by guid in the
+ *  parent so the draft re-seeds when a different container is selected. */
+function PreviewDataSection({ doc, guid, hierNode }: { doc: TwuiDocument; guid: string; hierNode: RawElement }) {
+  const filePath = useStore((s) => s.filePath);
+  const packPath = useStore((s) => s.packPath);
+  const workspacePath = useStore((s) => s.workspacePath);
+  const allBindings = useStore((s) => s.settings.previewBindings);
+  const previewRows = useStore((s) => s.previewRows);
+  const setPreviewBinding = useStore((s) => s.setPreviewBinding);
+  const docKey = filePath ?? packPath ?? workspacePath;
+
+  const children = elementChildren(hierNode);
+  const existing = (docKey ? allBindings[docKey]?.find((b) => b.target === guid) : undefined) ?? null;
+
+  const [tableInput, setTableInput] = useState(existing?.table ?? "");
+  const [table, setTable] = useState(existing?.table ?? "");
+  const [templateIndex, setTemplateIndex] = useState(existing?.templateIndex ?? 0);
+  const [limit, setLimit] = useState(existing?.limit ?? 50);
+  const [filterCol, setFilterCol] = useState(existing?.filter?.column ?? "");
+  const [filterContains, setFilterContains] = useState(existing?.filter?.contains ?? "");
+  const [mappings, setMappings] = useState<PreviewMapping[]>(existing?.mappings ?? []);
+  const [header, setHeader] = useState<string[]>([]);
+  const [msg, setMsg] = useState("");
+
+  const loadHeader = useCallback(async (t: string) => {
+    const name = t.trim();
+    setTable(name);
+    if (!name) { setHeader([]); setMsg(""); return; }
+    try {
+      const tbl = await readDbTable(name);
+      setHeader(tbl.header);
+      setMsg(tbl.header.length ? `${tbl.header.length} columns, ${tbl.rows.length} rows` : "table not found");
+    } catch {
+      setHeader([]);
+      setMsg("read failed");
+    }
+  }, []);
+
+  // Fetch columns once on mount when a table is already configured (component is keyed by guid).
+  useEffect(() => {
+    if (existing?.table) void loadHeader(existing.table);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const descendants = useMemo(() => {
+    const cmap = componentMap(doc);
+    const out: { guid: string; label: string }[] = [];
+    const walk = (n: RawElement) => {
+      for (const ch of elementChildren(n)) {
+        const g = guidOf(ch) ?? "";
+        const c = cmap.get(g);
+        out.push({ guid: g, label: (c && getAttr(c, "id")) || ch.tag });
+        walk(ch);
+      }
+    };
+    walk(hierNode);
+    return out;
+  }, [doc, hierNode]);
+
+  const colOptions = header.length ? header : (existing?.mappings.map((m) => m.column) ?? []);
+  const sel = "bg-button border border-edge rounded text-[11px] px-1 py-0.5";
+
+  const updateMapping = (i: number, patch: Partial<PreviewMapping>) =>
+    setMappings((ms) => ms.map((m, j) => (j === i ? { ...m, ...patch } : m)));
+  const removeMapping = (i: number) => setMappings((ms) => ms.filter((_, j) => j !== i));
+  const addMapping = () =>
+    setMappings((ms) => [...ms, { target: descendants[0]?.guid ?? "", aspect: "text", column: colOptions[0] ?? "", resolve: "auto" }]);
+
+  const apply = () => {
+    const name = (tableInput || table).trim();
+    if (!docKey || !name) return;
+    const cfg: PreviewBindingConfig = {
+      target: guid,
+      table: name,
+      templateIndex,
+      limit,
+      mappings: mappings.filter((m) => m.target && m.column),
+      ...(filterCol && filterContains ? { filter: { column: filterCol, contains: filterContains } } : {}),
+    };
+    setPreviewBinding(docKey, guid, cfg);
+  };
+  const clear = () => { if (docKey) setPreviewBinding(docKey, guid, null); };
+
+  const rowCount = docKey ? (previewRows[`${docKey}::${guid}`]?.length ?? 0) : 0;
+
+  return (
+    <Section title="Preview data (DB table)" defaultOpen={!!existing}>
+      <div className="text-[10px] text-gray-500 mb-2">
+        Repeat this container's template child once per DB-table row and fill mapped components.
+        Editor-only preview; never saved to the .twui.xml.
+      </div>
+      {!docKey && <div className="text-[11px] text-amber-400 mb-1">Save the file first to enable preview bindings.</div>}
+
+      <label className="flex items-center gap-2 mb-1">
+        <span className="text-textMuted text-[11px] w-28 shrink-0">DB table</span>
+        <input
+          className="flex-1"
+          value={tableInput}
+          onChange={(e) => setTableInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void loadHeader(tableInput); }}
+          placeholder="e.g. missions_tables"
+        />
+        <button className={sel} onClick={() => void loadHeader(tableInput)}>Load</button>
+      </label>
+      {msg && <div className="text-[10px] text-gray-500 mb-1">{msg}</div>}
+
+      <label className="flex items-center gap-2 mb-1">
+        <span className="text-textMuted text-[11px] w-28 shrink-0">Repeat child</span>
+        <select className={`flex-1 ${sel}`} value={templateIndex} onChange={(e) => setTemplateIndex(Number(e.target.value))}>
+          {children.map((ch, i) => {
+            const c = componentMap(doc).get(guidOf(ch) ?? "");
+            return <option key={i} value={i}>{(c && getAttr(c, "id")) || ch.tag}</option>;
+          })}
+        </select>
+      </label>
+
+      <label className="flex items-center gap-2 mb-1">
+        <span className="text-textMuted text-[11px] w-28 shrink-0">Row limit</span>
+        <input className="flex-1" type="number" min={1} max={200} value={limit} onChange={(e) => setLimit(Number(e.target.value) || 1)} />
+      </label>
+
+      <label className="flex items-center gap-2 mb-1">
+        <span className="text-textMuted text-[11px] w-28 shrink-0">Filter (opt)</span>
+        <select className={sel} value={filterCol} onChange={(e) => setFilterCol(e.target.value)}>
+          <option value="">— column —</option>
+          {colOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input className="flex-1" value={filterContains} onChange={(e) => setFilterContains(e.target.value)} placeholder="contains…" />
+      </label>
+
+      <div className="mt-2 mb-1 flex items-center gap-2">
+        <span className="text-textMuted text-[11px]">Column → component</span>
+        <div className="flex-1" />
+        <button className={sel} onClick={addMapping}>+ Add</button>
+      </div>
+      {mappings.length === 0 && <div className="text-gray-600 text-[11px] mb-1">No mappings.</div>}
+      {mappings.map((m, i) => (
+        <div key={i} className="mb-2 border border-edge rounded p-2">
+          <div className="flex items-center gap-1 mb-1">
+            <select className={`flex-1 ${sel}`} value={m.target} onChange={(e) => updateMapping(i, { target: e.target.value })}>
+              {descendants.map((d) => <option key={d.guid} value={d.guid}>{d.label}</option>)}
+            </select>
+            <button className={sel} onClick={() => removeMapping(i)} title="Remove mapping">x</button>
+          </div>
+          <div className="flex items-center gap-1 mb-1">
+            <select className={sel} value={m.aspect} onChange={(e) => updateMapping(i, { aspect: e.target.value as "text" | "image" })}>
+              <option value="text">text</option>
+              <option value="image">image</option>
+            </select>
+            {header.length ? (
+              <select className={`flex-1 ${sel}`} value={m.column} onChange={(e) => updateMapping(i, { column: e.target.value })}>
+                {colOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            ) : (
+              <input className="flex-1" value={m.column} onChange={(e) => updateMapping(i, { column: e.target.value })} placeholder="column" />
+            )}
+            {m.aspect === "text" && (
+              <select className={sel} value={m.resolve ?? "auto"} onChange={(e) => updateMapping(i, { resolve: e.target.value as PreviewMapping["resolve"] })}>
+                <option value="auto">auto</option>
+                <option value="loc">loc</option>
+                <option value="literal">literal</option>
+              </select>
+            )}
+          </div>
+          <input
+            className="w-full"
+            value={m.template ?? ""}
+            onChange={(e) => updateMapping(i, { template: e.target.value || undefined })}
+            placeholder={m.aspect === "image" ? "path template e.g. ui/campaign ui/effect_pictures/{{value}}" : "optional {{value}} template"}
+          />
+        </div>
+      ))}
+
+      <div className="flex items-center gap-2 mt-2">
+        <button
+          className="px-2 py-0.5 rounded text-[11px] border bg-accent/30 border-accent disabled:opacity-40"
+          onClick={apply}
+          disabled={!docKey || !(tableInput || table).trim()}
+        >
+          Apply
+        </button>
+        {existing && <button className={sel} onClick={clear}>Remove</button>}
+        <div className="flex-1" />
+        {existing && <span className="text-[10px] text-gray-500">{rowCount} rows shown</span>}
+      </div>
+    </Section>
+  );
+}
+
 export default function InspectorPanel() {
   const doc = useStore((s) => s.doc);
   const selectedGuid = useStore((s) => s.selectedGuid);
@@ -981,6 +1437,9 @@ export default function InspectorPanel() {
 
   const guid = guidOf(comp) ?? "";
   const states = componentStates(comp);
+  // State names for the localised-text state picker (deduped; states are name-tagged, some also
+  // carry a `name` attr — mirror StateBlock's `name ?? tag` label).
+  const stateNames = Array.from(new Set(states.map((s) => getAttr(s, "name") ?? s.tag)));
   const hierNode = locateHier(doc, guid)?.node;
   // The root of the TWUI hierarchy — the only component where layout-version conversion is offered.
   const rootEl = hierarchyRoot(doc);
@@ -1075,15 +1534,56 @@ export default function InspectorPanel() {
 
         <LayoutEngineSection guid={guid} comp={comp} />
 
+        {hierNode && elementChildren(hierNode).length > 0 && (
+          <PreviewDataSection key={guid} doc={doc} guid={guid} hierNode={hierNode} />
+        )}
+
         <EmbeddedLayoutSection comp={comp} />
 
         <BindingsSection doc={doc} comp={comp} guid={guid} />
 
         <CallbacksSection guid={guid} comp={comp} />
 
+        <ContainerListSection
+          ownerGuid={guid}
+          el={comp}
+          containerTag="localised_texts"
+          rowTag="localised_text"
+          kind="localised_text"
+          title="Localised text"
+          preferred={["state", "is_text_localised", "text_label", "text", "tooltip_label", "tooltip_text"]}
+          rowLabel={(row) => {
+            const st = getAttr(row, "state");
+            const t = getAttr(row, "text_label") || getAttr(row, "text") || getAttr(row, "tooltip_label") || "";
+            return `${st || "(all states)"}${t ? ` · ${t}` : ""}`;
+          }}
+          custom={{
+            state: (row, editRow) => (
+              <StateNamePicker value={getAttr(row, "state")} stateNames={stateNames} onChange={(v) => editRow("state", v)} />
+            ),
+          }}
+        />
+
         <StatesSection guid={guid} comp={comp} states={states} />
 
         <ComponentImagesSection guid={guid} comp={comp} dataRoot={dataRoot} />
+
+        <ContainerListSection
+          ownerGuid={guid}
+          el={comp}
+          containerTag="animations"
+          rowTag="show"
+          kind="animation"
+          title="Animations"
+          preferred={["id"]}
+          addLabel="+ Add animation"
+          hideWhenEmpty
+          seedAttrs={[["id", "show"]]}
+          rowLabel={(row) => {
+            const id = getAttr(row, "id");
+            return id && id !== row.tag ? `${row.tag} (${id})` : row.tag;
+          }}
+        />
 
         <ModelViewSection comp={comp} />
 

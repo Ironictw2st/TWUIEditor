@@ -73,6 +73,29 @@ end
 `pooled_resource_factors` row for that resource, or `apply_transaction_to_factor` silently no-ops (a common
 "nothing got deducted" cause).
 
+## Signed costs (spend or refund)
+
+For per-item prices — some that spend, some that refund — carry a **signed** number from the UI in a numeric
+script object (set there with `SetNumericValue`, `04-callbacks-cco.md`) and apply it **directly**:
+
+```lua
+local price = tonumber(effect.get_context_value("CcoScriptObject", "ironic_selected_cost", "NumericValue")) or 0
+
+-- apply_transaction_to_factor takes the signed value as-is:
+--   price < 0 -> decreases the pool (a purchase)    price > 0 -> increases it (a refund)
+if price == 0 then
+	-- a zero transaction fires no PooledResource* refresh; nudge +1 then -1 (nets zero)
+	cm:modify_model():get_modify_pooled_resource(pr):apply_transaction_to_factor(factor, 1)
+	cm:modify_model():get_modify_pooled_resource(pr):apply_transaction_to_factor(factor, -1)
+else
+	cm:modify_model():get_modify_pooled_resource(pr):apply_transaction_to_factor(factor, price)
+end
+```
+
+Affordability applies only to purchases: `if price < 0 and pr:value() < -price then return end`. Read the
+number with `"NumericValue"` (not `"StringValue"`). The UI gates the same way with `Total + price >= 0`
+(`recipes/purchase-button.md`) — keep the UI and Lua agreed on the sign convention.
+
 ## Ordering rule (drives the UI refresh)
 
 There's no UI event for "faction gained an effect bundle", so the panel refreshes off the **pooled-resource**

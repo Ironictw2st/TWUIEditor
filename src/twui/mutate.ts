@@ -780,6 +780,89 @@ export function removeCallbackProp(
   }
 }
 
+// --- Generic nested-structure CRUD. Below-component containers that aren't states / component
+//     images / image-metrics / callbacks: localised_texts, transitionmap, animations, material
+//     overrides, component_text, ... . Every one is either a one-level container under a
+//     guid-bearing owner (component OR state — findComponentElement resolves both) or a single
+//     named child, so these four helpers cover them all without per-structure code. New elements
+//     are leaf/self-closing; addressing (edit/move) reuses the generic editChildAttr/moveChild. ---
+
+/** Append a fresh `<childTag …/>` row to `containerTag` under the element addressed by
+ *  `parentGuid` (creating the container if absent). Optionally seeds this/uniqueguid so the new
+ *  row is guid-addressable. New leaf rows are self-closing. */
+export function addContainerChild(
+  doc: TwuiDocument,
+  parentGuid: string,
+  containerTag: string,
+  childTag: string,
+  initialAttrs: [string, string][] = [],
+  withGuid = false
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  if (!parent) return;
+  const cont = ensureContainer(parent, containerTag);
+  const attrs: [string, string][] = initialAttrs.map((a) => [a[0], a[1]]);
+  if (withGuid) {
+    const g = genGuid();
+    attrs.push(["this", g], ["uniqueguid", g]);
+  }
+  appendChild(cont, { kind: "element", tag: childTag, attrs, children: [], self_closing: true });
+}
+
+/** Remove the row at element-index `index` from `containerTag`; drops the now-empty container off
+ *  its parent (mirrors removeCallbackProp) so it never serializes as an empty `<x></x>` where the
+ *  game writes a self-closing empty. */
+export function removeContainerChild(
+  doc: TwuiDocument,
+  parentGuid: string,
+  containerTag: string,
+  index: number
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  const cont = parent && childByTag(parent, containerTag);
+  if (!parent || !cont) return;
+  removeChildAt(cont, index);
+  if (elementChildren(cont).length === 0) {
+    const i = parent.children.indexOf(cont);
+    if (i >= 0) parent.children.splice(i, 1);
+  }
+}
+
+/** Add an empty single named child (e.g. a state's `<component_text/>`) if it isn't already there. */
+export function addNamedChild(doc: TwuiDocument, parentGuid: string, childTag: string): void {
+  const parent = findComponentElement(doc, parentGuid);
+  if (!parent || childByTag(parent, childTag)) return;
+  appendChild(parent, { kind: "element", tag: childTag, attrs: [], children: [], self_closing: true });
+}
+
+/** Set one attribute on a single named child, creating the child (self-closing leaf) if absent.
+ *  The named-child analogue of editLayoutEngineAttr — used for `<component_text>`. */
+export function editNamedChildAttr(
+  doc: TwuiDocument,
+  parentGuid: string,
+  childTag: string,
+  key: string,
+  value: string
+): void {
+  const parent = findComponentElement(doc, parentGuid);
+  if (!parent) return;
+  let child = childByTag(parent, childTag);
+  if (!child) {
+    child = { kind: "element", tag: childTag, attrs: [], children: [], self_closing: true };
+    appendChild(parent, child);
+  }
+  setAttr(child, key, value);
+}
+
+/** Remove a single named child entirely. */
+export function removeNamedChild(doc: TwuiDocument, parentGuid: string, childTag: string): void {
+  const parent = findComponentElement(doc, parentGuid);
+  const child = parent && childByTag(parent, childTag);
+  if (!parent || !child) return;
+  const i = parent.children.indexOf(child);
+  if (i >= 0) parent.children.splice(i, 1);
+}
+
 export function isElementNode(n: TwuiNode): n is RawElement {
   return isElement(n);
 }

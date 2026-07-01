@@ -7,10 +7,12 @@
 mod folder;
 mod overlay;
 mod pack;
+mod workspace;
 
 pub use folder::FolderSource;
 pub use overlay::OverlaySource;
 pub use pack::{build_pack_source, ordered_packs, rpfm_game_key, PackSource};
+pub use workspace::WorkspacePack;
 
 pub trait DataSource: Send + Sync {
     /// Raw bytes for a relative path, or `None` if absent.

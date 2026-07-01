@@ -9,7 +9,20 @@
 // constrained here — they stay fully editable via the raw element tree / Raw tab, so
 // nothing is hidden or lost (our round-trip keeps the verbatim attrs regardless).
 
-export type AttrKind = "component" | "state" | "image" | "component_image" | "layoutEngine" | "model";
+export type AttrKind =
+  | "component"
+  | "state"
+  | "image"
+  | "component_image"
+  | "layoutEngine"
+  | "model"
+  // Below-component nested structures surfaced by the Inspector's generic list/named-child editors.
+  // (component_text reuses "state" — its attr vocabulary is identical to a state's text attrs.)
+  | "localised_text"
+  | "transition"
+  | "material_parameter"
+  | "material_texture"
+  | "animation";
 export type AttrType = "text" | "number" | "vec2" | "enum" | "bool" | "colour" | "path";
 
 export interface AttrSchema {
@@ -27,6 +40,11 @@ export interface AttrSchema {
    *  Derived from the bundled 3K (135/136) and WH3 (142) files, so it is an approximation —
    *  gating built on it stays advisory (never hides a present attr, never blocks a commit). */
   versions?: { min?: number; max?: number };
+  /** Element kinds for which this attribute is required. Drives the Diagnosis panel's
+   *  "missing required attribute" check (e.g. id on a component). Scoped per-kind because
+   *  one schema entry can apply to several kinds, and "required" rarely holds for all of
+   *  them (e.g. width is expected on a state but routinely omitted on an image). Absent = optional. */
+  requiredFor?: AttrKind[];
 }
 
 /** Whether an attribute is valid in a given layout version. `version` 0 (unknown) allows all,
@@ -105,6 +123,11 @@ const I: AttrKind[] = ["image"];
 const CI: AttrKind[] = ["component_image"];
 const LE: AttrKind[] = ["layoutEngine"];
 const M: AttrKind[] = ["model"];
+const LT: AttrKind[] = ["localised_text"];
+const TR: AttrKind[] = ["transition"];
+const MP: AttrKind[] = ["material_parameter"];
+const MT: AttrKind[] = ["material_texture"];
+const AN: AttrKind[] = ["animation"];
 
 // Shared by several kinds: GUID identity attrs (engine writes both `this` and `uniqueguid`
 // on most elements; templated instances also carry `uniqueguid_in_template`).
@@ -112,7 +135,7 @@ const GUID_T: AttrType = "text";
 
 const SCHEMA_LIST: AttrSchema[] = [
   // Layout / component
-  { name: "id", label: "id", type: "text", appliesTo: ["component", "model"], category: "Identity",
+  { name: "id", label: "id", type: "text", appliesTo: ["component", "model"], category: "Identity", requiredFor: ["component"],
     description: "The component's identifier (referenced by callbacks via self.Id and by ComponentCreator). On a ComponentModel it names the model (e.g. battle_model_primary)." },
   { name: "offset", label: "offset (x,y)", type: "vec2", appliesTo: ["component", "image"], category: "Layout", default: "0.00,0.00",
     description: "Top-left position relative to the parent (already bakes in docking for regular components)." },
@@ -313,10 +336,10 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Localisation key for this state's text (used when textlocalised)." },
   { name: "textlocalised", label: "text localised", type: "bool", enumValues: BOOL, appliesTo: S, category: "Text",
     description: "Treat the text as a localisation key (textlabel) rather than literal." },
-  { name: "textxoffset", label: "text x-offset", type: "number", appliesTo: S, category: "Text",
-    description: "Horizontal pixel offset applied to the text within the rect." },
-  { name: "textyoffset", label: "text y-offset", type: "number", appliesTo: S, category: "Text",
-    description: "Vertical pixel offset applied to the text within the rect." },
+  { name: "textxoffset", label: "text x-offset", type: "vec2", appliesTo: S, category: "Text",
+    description: "Pixel offset applied to the text within the rect, as an x,y pair." },
+  { name: "textyoffset", label: "text y-offset", type: "vec2", appliesTo: S, category: "Text",
+    description: "Secondary pixel offset applied to the text within the rect, as an x,y pair." },
   { name: "font_m_leading", label: "font leading", type: "number", appliesTo: S, category: "Text",
     description: "Line leading (line-height) for multi-line text." },
   { name: "font_m_tracking", label: "font tracking", type: "number", appliesTo: S, category: "Text", versions: { max: 136 },
@@ -421,6 +444,53 @@ const SCHEMA_LIST: AttrSchema[] = [
     description: "Texture atlas path used by the model view." },
   { name: "json_path", label: "json path", type: "path", appliesTo: M, category: "Model", versions: { min: 142 },
     description: "JSON descriptor path used by the model view." },
+
+  // --- Localised text (<localised_texts><localised_text>) — the per-state display-text + tooltip
+  //     table. `state` is the state NAME (active, hover, …); an empty entry is the all-states default. ---
+  { name: "state", label: "state", type: "text", appliesTo: LT, category: "Localised Text",
+    description: "Name of the state this text applies to (active, hover, down_off, …). Empty = the default for all states." },
+  { name: "is_text_localised", label: "text localised", type: "bool", enumValues: BOOL, appliesTo: LT, category: "Localised Text",
+    description: "Treat text_label as a localisation key rather than literal text." },
+  { name: "text_label", label: "text label", type: "text", appliesTo: LT, category: "Localised Text",
+    description: "Localisation key for the display text (used when text localised)." },
+  { name: "text", label: "text", type: "text", appliesTo: LT, category: "Localised Text",
+    description: "Literal display text for this state (fallback used when not localised)." },
+  { name: "tooltip_label", label: "tooltip label", type: "text", appliesTo: LT, category: "Localised Text",
+    description: "Localisation key for the tooltip text." },
+  { name: "tooltip_text", label: "tooltip text", type: "text", appliesTo: LT, category: "Localised Text",
+    description: "Literal tooltip text for this state." },
+
+  // --- State transitions (<transitionmap><transition>) — how a state animates to another state. ---
+  { name: "index", label: "index", type: "number", appliesTo: TR, category: "Transition",
+    description: "Ordinal of this transition within the state's transition map." },
+  { name: "transition_m_target_state", label: "target state", type: GUID_T, appliesTo: TR, category: "Transition",
+    description: "GUID of the state this transition animates to (kept in sync by GUID regeneration)." },
+  { name: "transition_m_transition_time", label: "time", type: "number", appliesTo: TR, category: "Transition",
+    description: "Duration of the transition, in seconds." },
+  { name: "transition_m_interpolation_property_mask", label: "property mask", type: "number", appliesTo: TR, category: "Transition",
+    description: "Bitmask of the properties interpolated during the transition." },
+
+  // --- Material overrides (<material_m_parameter_overrides|material_m_texture_overrides><property>). ---
+  { name: "name", label: "parameter", type: "text", appliesTo: MP, category: "Material",
+    description: "Name of the shader parameter being overridden." },
+  { name: "x", label: "x", type: "number", appliesTo: MP, category: "Material",
+    description: "X component of the shader parameter value." },
+  { name: "y", label: "y", type: "number", appliesTo: MP, category: "Material",
+    description: "Y component of the shader parameter value." },
+  { name: "z", label: "z", type: "number", appliesTo: MP, category: "Material",
+    description: "Z component of the shader parameter value." },
+  { name: "w", label: "w", type: "number", appliesTo: MP, category: "Material",
+    description: "W component of the shader parameter value." },
+  { name: "slot_id", label: "slot", type: "text", appliesTo: MT, category: "Material",
+    description: "Texture slot being overridden (e.g. s_diffuse)." },
+  { name: "filepath", label: "texture", type: "path", appliesTo: MT, category: "Material",
+    description: "Texture file (relative to the data root) bound to this slot." },
+  { name: "is_override_of_default", label: "overrides default", type: "bool", enumValues: BOOL, appliesTo: ["material_parameter", "material_texture"], category: "Material",
+    description: "Whether this entry overrides the material's default value/texture." },
+
+  // --- Animations (<animations><show|hide|oncreate|…>): the event block level (frames stay Raw). ---
+  { name: "id", label: "event", type: "text", appliesTo: AN, category: "Animation",
+    description: "The animation event this block plays on (show, hide, oncreate, glow, mouseon, …)." },
 ];
 
 const BY_NAME = new Map<string, AttrSchema[]>();

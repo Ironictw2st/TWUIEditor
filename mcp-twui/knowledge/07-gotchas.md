@@ -11,6 +11,9 @@ The non-obvious things that cost time. Most map to a `.claude` memory or a sourc
 - **The `Write` tool emits LF.** Always do the LF→CRLF normalization step and re-verify `CR==LF` after any
   edit (even a one-line edit can re-save as LF depending on the tool).
 - **GUIDs are 8-4-4-16 uppercase**, not standard UUIDs. `this`==`uniqueguid`. Keep them unique per file.
+- **If a hand-tuned file has diverged from the script that generated it, edit it in place — don't regenerate.**
+  Re-running the generator silently reverts editor tweaks (a moved button `offset`, a changed gate). Diff the
+  generator's output against the live file before trusting a regenerate.
 
 ## Positioning / layout
 - **`offset` already bakes docking/anchor.** It is the component's top-left relative to the parent and
@@ -67,7 +70,15 @@ The non-obvious things that cost time. Most map to a `.claude` memory or a sourc
   `selected*` states' brighten (that's their highlight glow).
 - **Cco has no clean `!`.** Negate with `(expr) == false`, e.g. `...Any( Key == k ) == false`.
 - **A shared placeholder bundle key** on every node makes them all read as owned after the first buy — give
-  each node a unique key for per-node behaviour.
+  each node a unique key for per-node behaviour. (A price keyed by bundle key also can't differentiate nodes
+  that share a key — key it by the node GUID until each node has its own bundle key.)
+- **Variable/signed costs go in a NUMERIC script object, not a string one.** Carry a per-node price with
+  `ScriptObjectContext("<id>").SetNumericValue(n)` / `.NumericValue` and gate with `Total + n >= 0` (positive =
+  a refund, always affordable; negative = a purchase needing `Total >= |n|`). The engine's
+  `apply_transaction_to_factor(factor, n)` takes the signed value directly (negative decreases the pool,
+  positive increases) — pick one sign convention, keep UI + Lua agreed, and don't double-negate.
+- **A zero-cost transaction fires no refresh.** `apply_transaction_to_factor(factor, 0)` doesn't change the pool,
+  so no `PooledResource*` event fires and the bought node won't flip — nudge `+1` then `-1` (Yuan Shao does this).
 
 ## Editor vs game
 - The editor renders **geometry, images, states, docking** and lets you inspect/edit. It does **not** run

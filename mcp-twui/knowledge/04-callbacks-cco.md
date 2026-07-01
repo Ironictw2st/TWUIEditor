@@ -109,6 +109,12 @@ Templated instances use `<callbacks_with_context>` instead of `<callbackwithcont
   `ContextCommandLeftClick` with `.SetStringValue( <expr> )`; read it in an expression with `.StringValue`;
   campaign **Lua** reads it via `effect.get_context_value("CcoScriptObject", "<id>", "StringValue")`. Writing
   raises the `ScriptObjectValueUpdated<id>` event. This is the UI↔Lua data bridge — see `08-script-bridge.md`.
+- **Numeric script objects**: the same slot also has a **numeric** pair — `.SetNumericValue( <number> )` /
+  `.NumericValue` (Lua: `effect.get_context_value("CcoScriptObject", "<id>", "NumericValue")`). Use it to carry a
+  number (e.g. a per-item cost) for arithmetic/comparison without string coercion. Cco has negative literals and
+  `+` / `* (-1)`, so a **signed** cost gates cleanly as
+  `PooledResource...Total + ScriptObjectContext( "<id>" ).NumericValue >= 0` (shipped in
+  `3k_dlc07_schemes_panel.twui.xml`): a positive value always passes, a negative needs `Total >= |value|`.
 
 ## Inline tokens in `text` / tooltip strings
 

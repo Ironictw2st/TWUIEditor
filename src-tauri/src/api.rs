@@ -17,6 +17,7 @@ use crate::image::{self, ImageStatus};
 use crate::loc;
 use crate::model::{parse, serialize, Document, Element};
 use crate::script::{self, ScriptHit};
+use crate::source::DataSource;
 use crate::state::AppState;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -58,6 +59,17 @@ pub fn read_layout(path: &str) -> Result<Document, String> {
 pub fn save_layout(path: &str, doc: Document) -> Result<(), String> {
     let text = serialize::serialize(&doc);
     std::fs::write(path, text).map_err(|e| format!("Failed to write {path}: {e}"))
+}
+
+/// Decode a PNG carried as a bare base64 string or a full `data:image/png;base64,...` URL and
+/// write the bytes to an absolute host path. Used by the Visualizer's "Take screenshot" action.
+pub fn save_png(path: &str, b64: &str) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let raw = b64.rsplit(',').next().unwrap_or("").trim();
+    let bytes = BASE64
+        .decode(raw)
+        .map_err(|e| format!("bad PNG data: {e}"))?;
+    std::fs::write(path, bytes).map_err(|e| format!("Failed to write {path}: {e}"))
 }
 
 /// Round-trip a file in memory and report whether serialize(parse(x)) == x.
@@ -160,6 +172,23 @@ pub fn load_loc(state: &AppState) -> HashMap<String, String> {
     loc::load(state)
 }
 
+/// A decoded DB table: column header + stringified rows (same shape as an RPFM export).
+#[derive(serde::Serialize)]
+pub struct DbTable {
+    pub header: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// Generic DB-table reader for the editor's preview-binding feature. Reads any table
+/// from the active source (binary via schema in pack mode, else the TSV export). A
+/// missing/undecodable table returns empty header+rows (the caller treats it as "no data").
+pub fn read_db_table(state: &AppState, table: &str) -> DbTable {
+    match db::read_db_table(state, table) {
+        Some((header, rows)) => DbTable { header, rows },
+        None => DbTable { header: vec![], rows: vec![] },
+    }
+}
+
 pub fn find_script(state: &AppState, script_id: &str) -> Option<ScriptHit> {
     script::find_by_id(state, script_id)
 }
@@ -242,6 +271,17 @@ pub fn set_game(state: &AppState, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Update only the active rpfm game (selects the pack GameInfo + bundled schema) and drop the
+/// game-specific caches, without re-pointing the data root. The frontend applies the new game's
+/// configured pack/data folder separately, so — unlike `set_game` — this does no filesystem lookup.
+pub fn set_game_key(state: &AppState, name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("invalid game name '{name}'"));
+    }
+    state.set_game_key(name);
+    Ok(())
+}
+
 pub fn set_data_root(state: &AppState, path: &str) -> Result<(), String> {
     let p = PathBuf::from(path);
     if !p.join("ui").is_dir() {
@@ -271,6 +311,76 @@ pub fn clear_overlay_pack(state: &AppState) {
 
 pub fn get_overlay_pack(state: &AppState) -> Option<String> {
     state.overlay_pack().map(|p| p.to_string_lossy().into_owned())
+}
+
+// --- Editable pack workspace (the "Pack Editor") ---
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceStatus {
+    pub path: Option<String>,
+    pub dirty: bool,
+}
+
+/// Create a new empty Mod pack at `path` and open it as the editable workspace.
+pub fn new_pack_workspace(state: &AppState, path: &str) -> Result<(), String> {
+    state.new_workspace(PathBuf::from(path))
+}
+
+/// Open an existing `.pack` as the editable workspace; returns its `.twui.xml` paths.
+pub fn open_pack_workspace(state: &AppState, path: &str) -> Result<Vec<String>, String> {
+    state.open_workspace(PathBuf::from(path))
+}
+
+/// The `.twui.xml` paths in the open workspace pack (empty if none open).
+pub fn list_workspace_layouts(state: &AppState) -> Vec<String> {
+    state
+        .workspace()
+        .map(|w| w.list(&|p| p.ends_with(".twui.xml")))
+        .unwrap_or_default()
+}
+
+/// Read + parse a layout from the workspace pack.
+pub fn read_workspace_layout(state: &AppState, rel: &str) -> Result<Document, String> {
+    let ws = state.workspace().ok_or("no pack workspace is open")?;
+    let bytes = ws.read(rel).ok_or_else(|| format!("'{rel}' not in the workspace pack"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    parse::parse(&text)
+}
+
+/// Serialize `doc` into the workspace pack (creating or replacing `rel`) and persist the pack to
+/// disk (the Ctrl+S path).
+pub fn save_workspace_layout(state: &AppState, rel: &str, doc: Document) -> Result<(), String> {
+    let ws = state.workspace().ok_or("no pack workspace is open")?;
+    let bytes = serialize::serialize(&doc).into_bytes();
+    ws.insert_file(rel, &bytes)?;
+    ws.save_to_disk()?;
+    state.invalidate_caches();
+    Ok(())
+}
+
+/// Delete a layout from the workspace pack and persist.
+pub fn delete_workspace_layout(state: &AppState, rel: &str) -> Result<(), String> {
+    let ws = state.workspace().ok_or("no pack workspace is open")?;
+    ws.remove_file(rel)?;
+    ws.save_to_disk()?;
+    state.invalidate_caches();
+    Ok(())
+}
+
+/// Close the editable workspace.
+pub fn close_pack_workspace(state: &AppState) {
+    state.close_workspace();
+}
+
+/// The open workspace's path + dirty flag.
+pub fn pack_workspace_status(state: &AppState) -> WorkspaceStatus {
+    match state.workspace() {
+        Some(ws) => WorkspaceStatus {
+            path: Some(ws.path().to_string_lossy().into_owned()),
+            dirty: ws.is_dirty(),
+        },
+        None => WorkspaceStatus { path: None, dirty: false },
+    }
 }
 
 pub fn get_schema_path(state: &AppState) -> Option<String> {
@@ -424,6 +534,9 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
         "load_cco_shorthand" => ok(load_cco_shorthand(state)),
         "load_loc" => ok(load_loc(state)),
         "host_default_paths" => ok(host_default_paths(state)),
+        "list_workspace_layouts" => ok(list_workspace_layouts(state)),
+        "close_pack_workspace" => ok(close_pack_workspace(state)),
+        "pack_workspace_status" => ok(pack_workspace_status(state)),
 
         // --- with args ---
         "set_data_root" => {
@@ -441,6 +554,14 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             }
             let a: A = de(args)?;
             ok(set_game(state, &a.name)?)
+        }
+        "set_game_key" => {
+            #[derive(Deserialize)]
+            struct A {
+                name: String,
+            }
+            let a: A = de(args)?;
+            ok(set_game_key(state, &a.name)?)
         }
         "set_pack_source" => {
             #[derive(Deserialize)]
@@ -493,6 +614,56 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             let a: A = de(args)?;
             ok(save_layout(&a.path, a.doc)?)
         }
+        "save_png" => {
+            #[derive(Deserialize)]
+            struct A {
+                path: String,
+                b64: String,
+            }
+            let a: A = de(args)?;
+            ok(save_png(&a.path, &a.b64)?)
+        }
+        "new_pack_workspace" => {
+            #[derive(Deserialize)]
+            struct A {
+                path: String,
+            }
+            let a: A = de(args)?;
+            ok(new_pack_workspace(state, &a.path)?)
+        }
+        "open_pack_workspace" => {
+            #[derive(Deserialize)]
+            struct A {
+                path: String,
+            }
+            let a: A = de(args)?;
+            ok(open_pack_workspace(state, &a.path)?)
+        }
+        "read_workspace_layout" => {
+            #[derive(Deserialize)]
+            struct A {
+                rel: String,
+            }
+            let a: A = de(args)?;
+            ok(read_workspace_layout(state, &a.rel)?)
+        }
+        "save_workspace_layout" => {
+            #[derive(Deserialize)]
+            struct A {
+                rel: String,
+                doc: Document,
+            }
+            let a: A = de(args)?;
+            ok(save_workspace_layout(state, &a.rel, a.doc)?)
+        }
+        "delete_workspace_layout" => {
+            #[derive(Deserialize)]
+            struct A {
+                rel: String,
+            }
+            let a: A = de(args)?;
+            ok(delete_workspace_layout(state, &a.rel)?)
+        }
         "roundtrip_check" => {
             #[derive(Deserialize)]
             struct A {
@@ -526,6 +697,14 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             }
             let a: A = de(args)?;
             ok(read_script(state, &a.path)?)
+        }
+        "read_db_table" => {
+            #[derive(Deserialize)]
+            struct A {
+                table: String,
+            }
+            let a: A = de(args)?;
+            ok(read_db_table(state, &a.table))
         }
         "load_templates" => {
             #[derive(Deserialize)]
