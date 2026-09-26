@@ -61,6 +61,11 @@ pub fn load(state: &AppState) -> HashMap<String, String> {
         "ceo_equipped_set_bonuses_title_",
         "ceo_equipped_set_bonuses_description_",
         "effects_description_",
+        // Component text/tooltips (`textlabel`/`tooltiplabel`), `{{tr:}}` replacements and
+        // the `Loc()` fallback table -- full-keyed so they can't collide with bare keys.
+        "uied_component_texts_localised_string_",
+        "ui_text_replacements_localised_text_",
+        "random_localisation_strings_string_",
     ];
 
     for (key, value) in all.iter() {
@@ -103,6 +108,16 @@ mod tests {
         assert_eq!(
             loc.get("pooled_resources_display_name_3k_dlc07_pooled_resource_ambition").map(String::as_str),
             Some("Aspiration")
+        );
+        // Rich-text tables used by the text/tooltip resolver.
+        assert_eq!(
+            loc.get("uied_component_texts_localised_string_button_sort_Tooltip_29003fca").map(String::as_str),
+            Some("Sort by occupation")
+        );
+        assert!(loc.keys().any(|k| k.starts_with("ui_text_replacements_localised_text_")));
+        assert_eq!(
+            loc.get("random_localisation_strings_string_unit_details_rank").map(String::as_str).map(|s| !s.is_empty()),
+            Some(true)
         );
     }
 }

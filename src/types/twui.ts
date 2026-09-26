@@ -74,6 +74,10 @@ export interface ContextDb {
   campaigns: string[];
   campaign_factions: Record<string, string[]>;
   ministerial_positions: MinisterialPosition[];
+  /** `[[col:<key>]]` markup colours (ui_colours key -> `#RRGGBB`). Absent on older backends. */
+  ui_colours?: Record<string, string>;
+  /** `[[img:<key>]]` markup icons (ui_tagged_images key -> image path). */
+  tagged_images?: Record<string, string>;
 }
 
 export interface FactionContext {

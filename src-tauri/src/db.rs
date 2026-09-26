@@ -18,6 +18,10 @@ pub struct ContextDb {
     pub campaign_factions: std::collections::HashMap<String, Vec<String>>,
     /// Court-office title variants (one per cultural row), resolved to display text.
     pub ministerial_positions: Vec<MinisterialPosition>,
+    /// `[[col:<key>]]` text-markup colours: ui_colours key -> `#RRGGBB`.
+    pub ui_colours: std::collections::HashMap<String, String>,
+    /// `[[img:<key>]]` text-markup icons: ui_tagged_images key -> image path.
+    pub tagged_images: std::collections::HashMap<String, String>,
 }
 
 /// One cultural variant of a court office: which post it is, the context it applies
@@ -235,6 +239,33 @@ pub fn load(state: &AppState) -> ContextDb {
         }
     }
 
+    // Rich-text markup lookups. Colour column name varies by schema version, so take
+    // the first non-key column that holds a 6-digit hex value.
+    if let Some((h, rows)) = read_db_table(state, "ui_colours_tables") {
+        let k = col_index(&h, "key");
+        for r in &rows {
+            let key = get(r, k);
+            if key.is_empty() {
+                continue;
+            }
+            let hex = r.iter().enumerate().filter(|(i, _)| Some(*i) != k).map(|(_, v)| v.trim()).find(|v| {
+                v.len() == 6 && v.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            if let Some(hex) = hex {
+                out.ui_colours.insert(key.to_string(), format!("#{hex}"));
+            }
+        }
+    }
+    if let Some((h, rows)) = read_db_table(state, "ui_tagged_images_tables") {
+        let (k, ip) = (col_index(&h, "key"), col_index(&h, "image_path"));
+        for r in &rows {
+            let (key, path) = (get(r, k), get(r, ip));
+            if !key.is_empty() && !path.is_empty() {
+                out.tagged_images.insert(key.to_string(), path.replace('\\', "/"));
+            }
+        }
+    }
+
     out
 }
 
@@ -285,6 +316,12 @@ mod tests {
         assert!(main.iter().any(|f| f == "3k_main_faction_cao_cao"));
         let eight = db.campaign_factions.get("8p_start_pos").expect("8p campaign");
         assert!(!eight.iter().any(|f| f == "3k_main_faction_cao_cao"));
+        // Rich-text markup tables.
+        assert_eq!(db.ui_colours.get("red").map(String::as_str), Some("#FF4810"));
+        assert_eq!(
+            db.tagged_images.get("info_mode_icon").map(String::as_str),
+            Some("ui/skins/default/icon_info.png")
+        );
     }
 
     /// Pack-mode end-to-end: decode binary db + loc from the live install using

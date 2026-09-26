@@ -16,6 +16,8 @@ import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { imageUrl, savePng } from "../ipc/commands";
 import { pickSaveFile } from "../ipc/dialog";
 import { captureVisualizer, setCaptureFn } from "./visualizerCapture";
+import TooltipBox, { TipLayout } from "./TooltipBox";
+import { cssColour, isImageRun, layoutRuns, MarkupTables, Run } from "../twui/richText";
 
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
 const EMPTY_LAYOUT: LayoutResult = { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] };
@@ -221,8 +223,8 @@ function drawScene(
         drawPlaceholder(ctx, imageDrawRect(di, 0, 0), zoom);
       }
     }
-    if (item.text) {
-      drawText(ctx, item);
+    if (item.text || item.runs) {
+      drawText(ctx, item, getImage);
     }
     if (clipped) ctx.restore();
   }
@@ -265,7 +267,7 @@ export default function VisualizerPanel() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
   const [size, setSize] = useState({ w: 800, h: 600 });
-  const [, forceTick] = useState(0);
+  const [tick, forceTick] = useState(0);
   // Hover is shared (hierarchy <-> canvas) via the store; window-local (see sync.ts).
   const hover = useStore((s) => s.hoveredGuid);
   const setHover = useStore((s) => s.setHovered);
@@ -318,6 +320,12 @@ export default function VisualizerPanel() {
   // Compute a layout for each visible layer (active + opt-in overlays), stacked bottom-to-top in
   // `tabs` order. The active layer uses the live top-level state; reference layers use their
   // parked slice and render in their default (un-simulated) state.
+  // `[[col:]]` / `[[img:]]` text-markup lookups (ui_colours / ui_tagged_images).
+  const markupTables: MarkupTables = useMemo(
+    () => ({ colours: contextDb?.ui_colours, images: contextDb?.tagged_images }),
+    [contextDb]
+  );
+
   const renderLayers: RenderLayer[] = useMemo(
     () => {
       // Shared inputs every reference layer depends on (its own tree and the active doc's live
@@ -335,7 +343,7 @@ export default function VisualizerPanel() {
             measureText, contextDb?.ministerial_positions, renderResolution,
             // Skeleton placeholders are an editor aid — never in Simulation/Tooltip, which
             // faithfully mirror the game (an unbound list there shows nothing).
-            previewEmptyLists && !simLike, uiPrefs, previewBindings
+            previewEmptyLists && !simLike, uiPrefs, previewBindings, markupTables
           )
         : EMPTY_LAYOUT;
 
@@ -352,7 +360,7 @@ export default function VisualizerPanel() {
           false, slice.createdLayouts, ccoShorthand, slice.componentDataPacks as Record<string, LuaValue>,
           measureText, contextDb?.ministerial_positions, renderResolution,
           // Overlay (reference) layers don't carry the active doc's preview bindings.
-          previewEmptyLists && !simLike, uiPrefs, []
+          previewEmptyLists && !simLike, uiPrefs, [], markupTables
         );
         refLayoutCache.current.set(slice.doc, l);
         return l;
@@ -415,6 +423,23 @@ export default function VisualizerPanel() {
     }
     return img;
   }, [dataRoot, imageEpoch]);
+
+  // `{{tt:<layout>}}` tooltips: lay the tooltip layout out in the current preview context
+  // (list skeletons on, so data-bound tooltips still show their structure) and paint it with
+  // the same scene painter as the canvas.
+  const computeTipLayout = useCallback(
+    (tl: TipLayout) =>
+      computeLayout(
+        tl.doc, context, tokens, tl.templates, loc, dataPack, EMPTY_SIM, staticVars,
+        false, {}, ccoShorthand, {}, measureText, contextDb?.ministerial_positions, null,
+        true, uiPrefs, [], markupTables
+      ),
+    [context, tokens, loc, dataPack, staticVars, ccoShorthand, contextDb, uiPrefs, markupTables]
+  );
+  const paintTip = useCallback(
+    (ctx: CanvasRenderingContext2D, l: LayoutResult) => drawScene(ctx, l, { getImage, background: null, zoom: 1, surface: false }),
+    [getImage]
+  );
 
   // Resize canvas to container.
   useEffect(() => {
@@ -536,11 +561,13 @@ export default function VisualizerPanel() {
     return { x: (sx - view.panX) / view.zoom, y: (sy - view.panY) / view.zoom };
   };
 
-  const hitTest = (wx: number, wy: number): string | null => {
+  const hitTest = (wx: number, wy: number, tipOnly = false): string | null => {
     // The most SPECIFIC component under the point: smallest area among the items
     // whose rect contains it, tie-broken by deeper nesting then later draw order.
     // (A plain "topmost-drawn" pick lets a large container/overlay that merely
     // spans the cursor swallow every click — e.g. court-screen frames.)
+    // Tooltip mode bubbles like the game: the hovered component's tooltip, else the nearest
+    // enclosing component's -- i.e. the most specific item under the point that HAS one.
     let best: string | null = null;
     let bestArea = Infinity;
     let bestDepth = -1;
@@ -548,6 +575,7 @@ export default function VisualizerPanel() {
       const it = layout.items[i];
       const r = it.rect;
       if (r.w <= 0 || r.h <= 0) continue;
+      if (tipOnly && !it.tooltip) continue;
       if (wx < r.x || wx > r.x + r.w || wy < r.y || wy > r.y + r.h) continue;
       const area = r.w * r.h;
       if (area < bestArea || (area === bestArea && it.depth >= bestDepth)) {
@@ -740,7 +768,7 @@ export default function VisualizerPanel() {
       setScroll(d.sc.guid, d.startScroll + ((w.y - d.startWY) / d.travel) * max, d.sc);
     } else {
       const w = toWorld(e.clientX, e.clientY);
-      setHover(mode === "sim" ? null : hitTest(w.x, w.y));
+      setHover(mode === "sim" ? null : hitTest(w.x, w.y, mode === "tooltip"));
       if (mode === "tooltip") setTipPos({ x: e.clientX, y: e.clientY });
     }
   };
@@ -913,12 +941,16 @@ export default function VisualizerPanel() {
             const tip = layout.items.find((i) => i.guid === hover)?.tooltip;
             if (!tip) return null;
             return (
-              <div
-                className="fixed z-40 max-w-[320px] px-2 py-1 rounded bg-sunken border border-edge text-[11px] text-text whitespace-pre-wrap pointer-events-none shadow-lg"
-                style={{ left: tipPos.x + 14, top: tipPos.y + 14 }}
-              >
-                {tip}
-              </div>
+              <TooltipBox
+                tip={tip}
+                x={tipPos.x}
+                y={tipPos.y}
+                tables={markupTables}
+                epoch={imageEpoch}
+                computeLayout={computeTipLayout}
+                paint={paintTip}
+                tick={tick}
+              />
             );
           })()}
       </div>
@@ -953,16 +985,85 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D, r: Rect, zoom: number) {
   ctx.restore();
 }
 
-function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; fontName?: string; textHAlign?: string; textVAlign?: string; textInset?: { left: number; right: number; top: number; bottom: number } }) {
-  if (!item.text) return;
+type TextItem = {
+  rect: Rect;
+  text?: string;
+  runs?: Run[];
+  wrap?: "word" | "char";
+  leading?: number;
+  fontColour?: string;
+  fontSize?: number;
+  fontName?: string;
+  textHAlign?: string;
+  textVAlign?: string;
+  textInset?: { left: number; right: number; top: number; bottom: number };
+};
+
+/** The component font with a markup run's bold/italic applied on top. */
+function runFont(base: string, style: { bold?: boolean; italic?: boolean }): string {
+  let f = base;
+  if (style.bold) f = f.replace(/^(\S+) \d+ /, "$1 700 ");
+  if (style.italic) f = f.replace(/^\S+ /, "italic ");
+  return f;
+}
+
+function drawText(ctx: CanvasRenderingContext2D, item: TextItem, getImage?: (path: string) => HTMLImageElement | null) {
+  if (!item.text && !item.runs) return;
   const size = item.fontSize ?? 13;
+  const baseColour = cssColour(item.fontColour);
+  const base = fontSpec(item.fontName, size);
   ctx.save();
-  ctx.fillStyle = item.fontColour && item.fontColour[0] === "#" ? item.fontColour.slice(0, 7) : "#ffffff";
-  ctx.font = fontSpec(item.fontName, size);
+  ctx.fillStyle = baseColour;
+  ctx.font = base;
   ctx.textBaseline = "middle";
   // textxoffset=(left,right), textyoffset=(top,bottom) define the inset box; align within it.
   const { tx, ty, align } = textAnchor(item.rect, item.textInset, item.textHAlign, item.textVAlign, size);
-  ctx.textAlign = align;
-  ctx.fillText(item.text, tx, ty);
+  if (!item.runs) {
+    // Plain single-line text: the original fast path.
+    ctx.textAlign = align;
+    ctx.fillText(item.text!, tx, ty);
+    ctx.restore();
+    return;
+  }
+
+  // Rich text: styled runs, hard newlines, optional word/char wrapping within the inset box.
+  const ins = item.textInset ?? { left: 0, right: 0, top: 0, bottom: 0 };
+  const boxW = item.rect.w - ins.left - ins.right;
+  const measure = (t: string, st: { bold?: boolean; italic?: boolean }) => {
+    ctx.font = runFont(base, st);
+    return ctx.measureText(t).width;
+  };
+  const lines = layoutRuns(item.runs, measure, size, item.wrap ? Math.max(1, boxW) : undefined, item.wrap === "char");
+  const lineH = size * 1.15 + (item.leading ?? 0);
+  // Anchor the block so a single line lands exactly where the plain path puts it.
+  const n = lines.length;
+  const firstY =
+    item.textVAlign === "Top" ? ty : item.textVAlign === "Bottom" ? ty - (n - 1) * lineH : ty - ((n - 1) * lineH) / 2;
+  ctx.textAlign = "left";
+  lines.forEach((line, i) => {
+    const y = firstY + i * lineH;
+    const x0 =
+      item.textHAlign === "Center"
+        ? item.rect.x + (ins.left + item.rect.w - ins.right - line.width) / 2
+        : item.textHAlign === "Right"
+          ? item.rect.x + item.rect.w - ins.right - line.width
+          : item.rect.x + ins.left;
+    for (const p of line.runs) {
+      if (isImageRun(p.run)) {
+        const img = getImage?.(p.run.img);
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            ctx.drawImage(img, x0 + p.x, y - size / 2, p.width, size);
+          } catch {
+            /* ignore */
+          }
+        }
+        continue;
+      }
+      ctx.font = runFont(base, p.run);
+      ctx.fillStyle = p.run.colour ?? baseColour;
+      ctx.fillText(p.run.text, x0 + p.x, y);
+    }
+  });
   ctx.restore();
 }

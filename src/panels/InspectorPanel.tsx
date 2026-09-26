@@ -17,6 +17,7 @@ import {
 } from "../twui/doc";
 import { describeMigration, previewMigration } from "../twui/migrate";
 import { componentScriptId } from "../twui/script";
+import { staticTooltipOrigin, stateTextOrigin } from "../twui/textSource";
 import { inheritedContexts, Inheritance, representativeScope } from "../twui/inherit";
 import {
   callbacks,
@@ -736,8 +737,36 @@ function ImageMetricBlock({
   );
 }
 
+/** Read-only "what the game shows" hint under a state's attributes: the static text and
+ *  tooltip after loc resolution (textlabel/tooltiplabel -> uied_component_texts), so a
+ *  missing loc row or a `textlocalised` flag that's off is visible at a glance. */
+function ResolvedTextHint({ comp, state }: { comp: RawElement; state: RawElement }) {
+  const loc = useStore((s) => s.loc);
+  const text = stateTextOrigin(comp, state, loc ?? undefined);
+  const tip = staticTooltipOrigin(comp, state, loc ?? undefined);
+  const rows: { label: string; o: typeof text }[] = [];
+  if (text.key || text.text) rows.push({ label: "text", o: text });
+  if (tip.key || tip.text) rows.push({ label: "tooltip", o: tip });
+  if (!rows.length) return null;
+  return (
+    <div className="mt-1 mb-1 text-[10px] border-l-2 border-edge pl-2">
+      {rows.map(({ label, o }) => (
+        <div key={label} className="flex gap-2" title={o.key}>
+          <span className="text-textMuted w-24 shrink-0">{label} resolves to</span>
+          <span className="flex-1 min-w-0 break-words">
+            {o.text !== undefined ? <span className="text-text">{o.text}</span> : <span className="text-textMuted">(empty)</span>}
+            {!o.localised && o.key && <span className="text-textMuted italic"> (no loc row: literal used)</span>}
+            {o.localised && <span className="text-textMuted italic"> (localised)</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StateBlock({
   state,
+  comp,
   active,
   ciByGuid,
   dataRoot,
@@ -748,6 +777,7 @@ function StateBlock({
   ciOptions,
 }: {
   state: RawElement;
+  comp: RawElement;
   active?: boolean;
   ciByGuid: Map<string, { imagepath: string }>;
   dataRoot: string | null;
@@ -801,6 +831,7 @@ function StateBlock({
         ]}
       />
       <AddAttr guid={guid} kind="state" present={state.attrs.map((x) => x[0])} />
+      <ResolvedTextHint comp={comp} state={state} />
       <div className="mt-2">
         <div className="flex items-center gap-2 mb-1">
           <div className="text-[10px] uppercase tracking-wide text-gray-500 flex-1">Images ({metrics.length})</div>
@@ -2128,6 +2159,7 @@ function StatesSection({ guid, comp, states }: { guid: string; comp: RawElement;
             <StateBlock
               key={guidOf(s) ?? `s${i}`}
               state={s}
+              comp={comp}
               active={(getAttr(s, "name") ?? "") === preview}
               ciByGuid={ciByGuid}
               dataRoot={dataRoot}

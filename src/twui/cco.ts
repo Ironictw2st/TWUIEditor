@@ -4,6 +4,7 @@
 // panel's own List/ContextList, ContextImageSetter, ContextTextLabel,
 // ContextPropagator and Context(Visibility|Trash) callbacks, not any one panel.
 
+import { expandTextReplacements } from "./richText";
 import { CcoShorthand, PreviewBinding, ShorthandDef } from "../types/twui";
 import { RawElement } from "../types/twui";
 import { childByTag, elementChildren, getAttr } from "./doc";
@@ -465,7 +466,11 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
       const a = evalExpr(call.arg, scope, loc);
       switch (call.name) {
         case "Loc":
-          return typeof a === "string" ? loc?.[a] ?? a : undefined;
+          // Campaign strings are bare-keyed; `random_localisation_strings` is the game's
+          // other `Loc()` table and stays full-keyed in the map.
+          return typeof a === "string"
+            ? loc?.[a] ?? loc?.["random_localisation_strings_string_" + a] ?? a
+            : undefined;
         case "ToUpper":
           return a == null ? undefined : String(a).toUpperCase();
         case "RoundFloat":
@@ -502,15 +507,18 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
   return chained;
 }
 
-/** Replace inline `{{Type:expr}}` tokens in a text string (tt tokens stripped). */
+/** Replace inline `{{Type:expr}}` tokens in a text string. `{{tr:key}}` is a UI text
+ *  replacement (resolved from loc, kept verbatim if missing); `{{tt:…}}` tooltip refs and
+ *  unresolvable context tokens are not display text and are dropped. */
 export function resolveInlineTokens(text: string, scope: Scope, loc?: Record<string, string>): string {
   if (!text.includes("{{")) return text;
-  return text.replace(/\{\{([A-Za-z]+):([\s\S]*?)\}\}/g, (_m, type: string, expr: string) => {
+  return text.replace(/\{\{([A-Za-z]+):([\s\S]*?)\}\}/g, (m, type: string, expr: string) => {
+    if (type === "tr") return expandTextReplacements(m, loc);
     if (type === "CcoScriptObject" || type === "CcoScriptTableNode") {
       const v = evalExpr(expr, scope, loc);
       return v == null ? "" : String(v);
     }
-    return ""; // tt: tooltip refs and anything else → not display text
+    return "";
   });
 }
 

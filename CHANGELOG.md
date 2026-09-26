@@ -3,6 +3,19 @@
 Notable changes per release. The section for a tagged version becomes that release's notes,
 shown in the app's update prompt (Settings -> About / Updates and the startup banner).
 
+## [Unreleased]
+
+### Added
+- **In-game text resolution** — component text and tooltips resolve the way the game does:
+  localised `textlabel`/`tooltiplabel` strings (3K state attributes and WH3 `localised_texts`),
+  `{{tr:}}` text replacements, and `Loc()` falling back to `random_localisation_strings`. Text
+  renders `[[col]]`, `[[b]]`, `[[i]]` and `[[img]]` markup, line breaks and "Split by word"
+  wrapping.
+- **Tooltip mode** shows real tooltips: the localised or literal state tooltip, `Title||Body`
+  headers, styled markup, and `{{tt:...}}` tooltip layouts drawn in place. Hovering bubbles up to
+  the nearest component that has a tooltip.
+- **Inspector** shows what each state's text and tooltip resolve to, and flags a missing loc row.
+
 ## [0.0.7] - 2026-07-01
 
 ### Added
