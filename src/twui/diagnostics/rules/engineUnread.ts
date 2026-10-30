@@ -6,7 +6,7 @@
 // only for the element kinds the extraction covers.
 
 import { ENGINE_ATTRS } from "../../engineAttrs";
-import { ENGINE_VERSIONS } from "../../engineSchema";
+import { ENGINE_KIND_MAP as ENGINE_KINDS, ENGINE_VERSIONS, engineReadsInVersion, engineVersionText } from "../../engineSchema";
 import type { AttrKind } from "../../schema";
 import type { Diagnostic, Rule } from "../types";
 
@@ -40,6 +40,22 @@ for (const a of ENGINE_ATTRS) {
   if (!READ.has(kind)) READ.set(kind, new Set());
   READ.get(kind)!.add(a.attr);
 }
+/** (kind, name) -> the engine rows, for the layout-version check. */
+const ROWS = new Map<string, typeof ENGINE_ATTRS>();
+for (const a of ENGINE_ATTRS) {
+  const kind = ENGINE_KINDS[a.kind] ?? KIND_MAP[a.kind];
+  if (!kind || a.attr === "this") continue;
+  const k = `${kind}.${a.attr}`;
+  ROWS.set(k, [...(ROWS.get(k) ?? []), a]);
+}
+
+/** The reader that ignores `name` in `version`, when every reader of it does (else undefined). */
+function versionGate(kind: AttrKind, name: string, version: number) {
+  const rows = ROWS.get(`${kind}.${name}`);
+  if (!rows?.length || rows.some((a) => engineReadsInVersion(a, version))) return undefined;
+  return rows[0];
+}
+
 /** UIEd's own bookkeeping: the game ignores it, but vanilla files carry it everywhere
  *  (~11k uses in the bundled 3K layouts), so it is not worth a note. */
 const EDITOR_METADATA = new Set(["stateeditordisplaypos", "comment", "locked", "marked_for_deletion"]);
@@ -65,7 +81,20 @@ export const engineUnreadRule: Rule = {
     const out: Diagnostic[] = [];
     for (const c of ctx.classified) {
       for (const [name] of c.el.attrs) {
-        if (EDITOR_METADATA.has(name) || engineReads(c.kind, name, c.templated) !== false) continue;
+        if (EDITOR_METADATA.has(name)) continue;
+        const reads = engineReads(c.kind, name, c.templated);
+        const gate = reads ? versionGate(c.kind, name, ctx.version) : undefined;
+        if (gate) {
+          out.push({
+            ruleId: "engine-unread-attr",
+            severity: "info",
+            message: `${name} is ignored by the 3K game in layout version ${ctx.version} (${engineVersionText(gate)})`,
+            guid: c.guid,
+            attr: name,
+          });
+          continue;
+        }
+        if (reads !== false) continue;
         out.push({
           ruleId: "engine-unread-attr",
           severity: "info",

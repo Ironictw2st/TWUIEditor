@@ -17,7 +17,8 @@
    "member": "m_CallbackID",
    "type": "string",
    "offset": null,
-   "serializer": "FUN_140631530"
+   "serializer": "FUN_140631530",
+   "max_version": 114
   },
   {
    "kind": "component",
@@ -25,7 +26,8 @@
    "member": "m_ContextObjectId",
    "type": "string",
    "offset": null,
-   "serializer": "FUN_140631530"
+   "serializer": "FUN_140631530",
+   "max_version": 114
   },
   {
    "kind": "component",
@@ -33,7 +35,8 @@
    "member": "m_ContextFunctionId",
    "type": "string",
    "offset": null,
-   "serializer": "FUN_140631530"
+   "serializer": "FUN_140631530",
+   "max_version": 114
   },
   {
    "kind": "component",
@@ -335,6 +338,15 @@
   },
   {
    "kind": "template_link",
+   "attr": "this",
+   "member": null,
+   "type": "guid",
+   "offset": null,
+   "serializer": "FUN_140634080",
+   "max_version": 125
+  },
+  {
+   "kind": "template_link",
    "attr": "id",
    "member": "m_id",
    "type": "pooled_string",
@@ -365,6 +377,15 @@
    "type": "list",
    "offset": null,
    "serializer": "FUN_140634080"
+  },
+  {
+   "kind": "state",
+   "attr": "this",
+   "member": null,
+   "type": "guid",
+   "offset": null,
+   "serializer": "FUN_140639580",
+   "max_version": 125
   },
   {
    "kind": "state",
@@ -617,7 +638,8 @@
    "member": "m_TransitionMap",
    "type": "list",
    "offset": null,
-   "serializer": "FUN_140639580"
+   "serializer": "FUN_140639580",
+   "max_version": 125
   },
   {
    "kind": "state",
@@ -653,6 +675,15 @@
   },
   {
    "kind": "image",
+   "attr": "this",
+   "member": null,
+   "type": "guid",
+   "offset": null,
+   "serializer": "FUN_140636300",
+   "min_version": 136
+  },
+  {
+   "kind": "image",
    "attr": "image",
    "member": "image",
    "type": "list",
@@ -665,7 +696,8 @@
    "member": "m_UniqueGUID",
    "type": "guid",
    "offset": "0x20",
-   "serializer": "FUN_140636300"
+   "serializer": "FUN_140636300",
+   "min_version": 136
   },
   {
    "kind": "image",
@@ -874,6 +906,15 @@
    "type": "string",
    "offset": null,
    "serializer": "FUN_140636300"
+  },
+  {
+   "kind": "component_image",
+   "attr": "this",
+   "member": null,
+   "type": "guid",
+   "offset": null,
+   "serializer": "FUN_140635be0",
+   "max_version": 125
   },
   {
    "kind": "component_image",
@@ -1234,7 +1275,8 @@
    "member": "m_min_dimensions",
    "type": "vec2",
    "offset": "0x78",
-   "serializer": "FUN_14063c020"
+   "serializer": "FUN_14063c020",
+   "min_version": 131
   },
   {
    "kind": "layoutEngine",
@@ -1418,7 +1460,8 @@
    "member": "m_min_dimensions",
    "type": "vec2",
    "offset": "0x78",
-   "serializer": "FUN_14063d1e0"
+   "serializer": "FUN_14063d1e0",
+   "min_version": 131
   },
   {
    "kind": "layoutEngine",

@@ -33,6 +33,8 @@ lines += [
     "  serializer: string;",
     "  default?: string;",
     "  values?: string[];",
+    "  /** Layout versions the reader looks at this attribute in (inclusive); absent = all. */",
+    "  versions?: { min?: number; max?: number };",
     "}",
     "",
     "export const ENGINE_EXE = %s;" % json.dumps(data["exe"]),
@@ -62,6 +64,9 @@ for r in rows:
         o["default"] = dv
     if r.get("values"):
         o["values"] = r["values"]
+    vr = {k: r[f] for k, f in (("min", "min_version"), ("max", "max_version")) if f in r}
+    if vr:
+        o["versions"] = vr
     lines.append("  " + json.dumps(o) + ",")
 lines += ["];", ""]
 open(OUT, "w", encoding="utf-8", newline="\n").write("\n".join(lines))

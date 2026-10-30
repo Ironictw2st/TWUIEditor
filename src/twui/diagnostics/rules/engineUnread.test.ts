@@ -67,6 +67,17 @@ describe("engine-unread-attr", () => {
     expect(templated).toEqual([]);
   });
 
+  it("notes attributes the game skips in this layout version", () => {
+    // image metric uniqueguid: read only from v136 (vanilla v135 files never carry it)
+    const v135 = run(docWith({ version: "135" }));
+    expect(v135.map((d) => d.attr)).toEqual(["uniqueguid"]);
+    expect(v135[0].message).toMatch(/layout version 135 \(read only from v136\)/);
+    expect(run(docWith({ version: "136" }))).toEqual([]);
+    // plain component callback attrs: read only before v115
+    const cb = run(docWith({ compAttrs: { callbackid: "x" } }));
+    expect(cb.map((d) => d.message)).toEqual([expect.stringMatching(/read only up to v114/)]);
+  });
+
   it("is silent outside the 3K layout versions", () => {
     expect(run(docWith({ version: "142", stateAttrs: { stateeditordisplaypos: "1,1" } }))).toEqual([]);
   });

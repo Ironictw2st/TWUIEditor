@@ -36,13 +36,29 @@ const VALUE_TYPES = new Set([
 const BY_KIND = new Map<AttrKind, Map<string, EngineAttr>>();
 for (const a of ENGINE_ATTRS) {
   const kind = ENGINE_KIND_MAP[a.kind];
-  if (!kind || !VALUE_TYPES.has(a.type)) continue;
+  // `this` is also used to link the hierarchy, outside these readers: claim nothing about it
+  if (!kind || !VALUE_TYPES.has(a.type) || a.attr === "this") continue;
   if (!BY_KIND.has(kind)) BY_KIND.set(kind, new Map());
   const m = BY_KIND.get(kind)!;
   const prev = m.get(a.attr);
   if (!prev) m.set(a.attr, a);
   else if (!prev.type.split("|").includes(a.type)) m.set(a.attr, { ...prev, type: `${prev.type}|${a.type}`, default: undefined, offset: null });
   else if (prev.default !== a.default) m.set(a.attr, { ...prev, default: undefined });
+}
+
+/** Whether the game's reader looks at an attribute in layout `version` (0 = unknown = yes). */
+export function engineReadsInVersion(a: EngineAttr, version: number): boolean {
+  if (!version || !a.versions) return true;
+  const { min, max } = a.versions;
+  return (min === undefined || version >= min) && (max === undefined || version <= max);
+}
+
+/** "read only from v131" / "read only up to v125" */
+export function engineVersionText(a: EngineAttr): string {
+  const { min, max } = a.versions ?? {};
+  if (min !== undefined && max !== undefined) return `read only in v${min}-v${max}`;
+  if (min !== undefined) return `read only from v${min}`;
+  return max !== undefined ? `read only up to v${max}` : "read in every version";
 }
 
 /** The engine's reader for `name` on an element of `kind`, if the value type is known. */

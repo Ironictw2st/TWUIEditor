@@ -35,6 +35,11 @@ describe("engine overlay on 3K versions", () => {
     expect(attrsFor("layoutEngine", 142).some((s) => s.name === "skew_angle")).toBe(false);
   });
 
+  it("carries the game's version range into the schema", () => {
+    expect(S("min_dimensions", "layoutEngine", 136).versions).toEqual({ min: 131 });
+    expect(attrsFor("component", 136).some((s) => s.name === "callbackid")).toBe(false);
+  });
+
   it("accepts either type where engine readers of one kind disagree (spacing: list vs radial)", () => {
     const sp = S("spacing", "layoutEngine");
     expect(sp.engine?.type).toBe("vec2|float");

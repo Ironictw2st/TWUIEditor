@@ -14,7 +14,7 @@
 // attributes the table does not list yet.
 
 import type { EngineAttr } from "./engineAttrs";
-import { ENGINE_VERSIONS, engineAttrFor, engineAttrsOf, engineValueProblem } from "./engineSchema";
+import { ENGINE_VERSIONS, engineAttrFor, engineAttrsOf, engineReadsInVersion, engineValueProblem } from "./engineSchema";
 
 export type AttrKind =
   | "component"
@@ -533,7 +533,8 @@ export function attrsFor(kind: AttrKind, version = 0): AttrSchema[] {
   if (!ENGINE_VERSIONS.has(version)) return out;
   const have = new Set(out.map((s) => s.name));
   const merged = out.map((s) => schemaFor(s.name, kind, version) ?? s);
-  for (const a of engineAttrsOf(kind)) if (!have.has(a.attr)) merged.push(withEngine(undefined, a, kind));
+  for (const a of engineAttrsOf(kind))
+    if (!have.has(a.attr) && engineReadsInVersion(a, version)) merged.push(withEngine(undefined, a, kind));
   return merged;
 }
 
@@ -559,6 +560,7 @@ function withEngine(base: AttrSchema | undefined, a: EngineAttr, kind: AttrKind)
   if (a.type === "enum" && a.values) s.enumValues = a.values;
   if (a.type === "bool") s.enumValues = BOOL;
   if (a.default !== undefined) s.default = a.default;
+  if (a.versions) s.versions = a.versions;
   if (base) s.description = `${base.description} (${where})`;
   return s;
 }

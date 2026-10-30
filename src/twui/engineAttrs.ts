@@ -24,14 +24,16 @@ export interface EngineAttr {
   serializer: string;
   default?: string;
   values?: string[];
+  /** Layout versions the reader looks at this attribute in (inclusive); absent = all. */
+  versions?: { min?: number; max?: number };
 }
 
 export const ENGINE_EXE = "Three_Kingdoms.exe 1.7.2.0";
 
 export const ENGINE_ATTRS: EngineAttr[] = [
-  {"kind": "component", "attr": "callbackid", "member": "m_CallbackID", "type": "string", "offset": null, "serializer": "FUN_140631530"},
-  {"kind": "component", "attr": "contextobjectid", "member": "m_ContextObjectId", "type": "string", "offset": null, "serializer": "FUN_140631530"},
-  {"kind": "component", "attr": "contextfunctionid", "member": "m_ContextFunctionId", "type": "string", "offset": null, "serializer": "FUN_140631530"},
+  {"kind": "component", "attr": "callbackid", "member": "m_CallbackID", "type": "string", "offset": null, "serializer": "FUN_140631530", "versions": {"max": 114}},
+  {"kind": "component", "attr": "contextobjectid", "member": "m_ContextObjectId", "type": "string", "offset": null, "serializer": "FUN_140631530", "versions": {"max": 114}},
+  {"kind": "component", "attr": "contextfunctionid", "member": "m_ContextFunctionId", "type": "string", "offset": null, "serializer": "FUN_140631530", "versions": {"max": 114}},
   {"kind": "component", "attr": "callbackwithcontextlist", "member": "m_CallbackWithContextList", "type": "list", "offset": null, "serializer": "FUN_140631530"},
   {"kind": "component", "attr": "offset", "member": "m_offset", "type": "vec2", "offset": "0x150", "serializer": "FUN_140631530"},
   {"kind": "component", "attr": "allowhorizontalresize", "member": "m_AllowHorizontalResize", "type": "bool", "offset": "0x2c1", "serializer": "FUN_140631530", "default": "true"},
@@ -64,10 +66,12 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "component", "attr": "maskimage", "member": "m_MaskImage", "type": "guid_ref", "offset": "0x2a0", "serializer": "FUN_140631530"},
   {"kind": "component", "attr": "currentstate", "member": "m_CurrentState", "type": "guid_ref", "offset": null, "serializer": "FUN_140631530"},
   {"kind": "component", "attr": "defaultstate", "member": "m_DefaultState", "type": "guid_ref", "offset": null, "serializer": "FUN_140631530"},
+  {"kind": "template_link", "attr": "this", "member": null, "type": "guid", "offset": null, "serializer": "FUN_140634080", "versions": {"max": 125}},
   {"kind": "template_link", "attr": "id", "member": "m_id", "type": "pooled_string", "offset": "0xf0", "serializer": "FUN_140634080"},
   {"kind": "template_link", "attr": "template_id", "member": "m_template_id", "type": "pooled_string", "offset": "0x198", "serializer": "FUN_140634080"},
   {"kind": "template_link", "attr": "is_dev_only", "member": "m_is_dev_only", "type": "bool", "offset": "0x2dc", "serializer": "FUN_140634080", "default": "false"},
   {"kind": "template_link", "attr": "part_of_template", "member": "part_of_template", "type": "list", "offset": null, "serializer": "FUN_140634080"},
+  {"kind": "state", "attr": "this", "member": null, "type": "guid", "offset": null, "serializer": "FUN_140639580", "versions": {"max": 125}},
   {"kind": "state", "attr": "name", "member": "m_Name", "type": "pooled_string", "offset": "0x38", "serializer": "FUN_140639580"},
   {"kind": "state", "attr": "width", "member": "m_Width", "type": "float", "offset": "0x258", "serializer": "FUN_140639580", "default": "32"},
   {"kind": "state", "attr": "height", "member": "m_Height", "type": "float", "offset": "0x25c", "serializer": "FUN_140639580", "default": "32"},
@@ -94,13 +98,14 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "state", "attr": "disabled", "member": "m_Disabled", "type": "bool", "offset": "0x26d", "serializer": "FUN_140639580", "default": "false"},
   {"kind": "state", "attr": "pixelcollision", "member": "m_PixelCollision", "type": "bool", "offset": "0x26e", "serializer": "FUN_140639580", "default": "false"},
   {"kind": "state", "attr": "imagemetrics", "member": "m_ImageMetrics", "type": "list", "offset": null, "serializer": "FUN_140639580"},
-  {"kind": "state", "attr": "transitionmap", "member": "m_TransitionMap", "type": "list", "offset": null, "serializer": "FUN_140639580"},
+  {"kind": "state", "attr": "transitionmap", "member": "m_TransitionMap", "type": "list", "offset": null, "serializer": "FUN_140639580", "versions": {"max": 125}},
   {"kind": "state", "attr": "transitionmap", "member": "m_TransitionMap", "type": "list", "offset": null, "serializer": "FUN_140639580"},
   {"kind": "state", "attr": "material_name", "member": "material_name", "type": "string", "offset": null, "serializer": "FUN_140639580"},
   {"kind": "state", "attr": "material_m_parameter_overrides", "member": "m_material->m_parameter_overrides", "type": "list", "offset": null, "serializer": "FUN_140639580"},
   {"kind": "state", "attr": "material_m_texture_overrides", "member": "m_material->m_texture_overrides", "type": "string", "offset": null, "serializer": "FUN_140639580"},
+  {"kind": "image", "attr": "this", "member": null, "type": "guid", "offset": null, "serializer": "FUN_140636300", "versions": {"min": 136}},
   {"kind": "image", "attr": "image", "member": "image", "type": "list", "offset": null, "serializer": "FUN_140636300"},
-  {"kind": "image", "attr": "uniqueguid", "member": "m_UniqueGUID", "type": "guid", "offset": "0x20", "serializer": "FUN_140636300"},
+  {"kind": "image", "attr": "uniqueguid", "member": "m_UniqueGUID", "type": "guid", "offset": "0x20", "serializer": "FUN_140636300", "versions": {"min": 136}},
   {"kind": "image", "attr": "componentimage", "member": "m_ComponentImage", "type": "guid_ref", "offset": "0x10", "serializer": "FUN_140636300"},
   {"kind": "image", "attr": "offset", "member": "m_Offset", "type": "vec2", "offset": null, "serializer": "FUN_140636300"},
   {"kind": "image", "attr": "width", "member": "m_Width", "type": "float", "offset": "0x88", "serializer": "FUN_140636300", "default": "32"},
@@ -123,6 +128,7 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "image", "attr": "ui_colour_preset_type_key", "member": "ui_colour_preset_type_key", "type": "pooled_string", "offset": null, "serializer": "FUN_140636300"},
   {"kind": "image", "attr": "shader_name", "member": "shader_name", "type": "string", "offset": null, "serializer": "FUN_140636300"},
   {"kind": "image", "attr": "shader_name", "member": "shader_name", "type": "string", "offset": null, "serializer": "FUN_140636300"},
+  {"kind": "component_image", "attr": "this", "member": null, "type": "guid", "offset": null, "serializer": "FUN_140635be0", "versions": {"max": 125}},
   {"kind": "component_image", "attr": "uniqueguid", "member": "m_UniqueGUID", "type": "guid", "offset": null, "serializer": "FUN_140635be0"},
   {"kind": "component_image", "attr": "imagepath", "member": "ImagePath", "type": "string", "offset": null, "serializer": "FUN_140635be0"},
   {"kind": "component_image", "attr": "width", "member": "m_Width", "type": "uint", "offset": "0x60", "serializer": "FUN_140635be0", "default": "32"},
@@ -164,7 +170,7 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "layoutEngine", "attr": "allow_overlap", "member": "m_allow_overlap", "type": "bool", "offset": "0x9a", "serializer": "FUN_14063c020", "default": "false"},
   {"kind": "layoutEngine", "attr": "allow_scale_items_down", "member": "m_allow_scale_items_down", "type": "bool", "offset": "0x9b", "serializer": "FUN_14063c020", "default": "false"},
   {"kind": "layoutEngine", "attr": "reverse_order", "member": "m_reverse_order", "type": "bool", "offset": "0x9d", "serializer": "FUN_14063c020", "default": "false"},
-  {"kind": "layoutEngine", "attr": "min_dimensions", "member": "m_min_dimensions", "type": "vec2", "offset": "0x78", "serializer": "FUN_14063c020"},
+  {"kind": "layoutEngine", "attr": "min_dimensions", "member": "m_min_dimensions", "type": "vec2", "offset": "0x78", "serializer": "FUN_14063c020", "versions": {"min": 131}},
   {"kind": "layoutEngine", "attr": "min_size", "member": "m_min_size", "type": "int", "offset": null, "serializer": "FUN_14063c020"},
   {"kind": "layoutEngine", "attr": "margins", "member": "m_margins", "type": "vec2", "offset": "0x68", "serializer": "FUN_14063c020"},
   {"kind": "layoutEngine", "attr": "skew_angle", "member": "m_skew_angle", "type": "int", "offset": "0x88", "serializer": "FUN_14063c020", "default": "0"},
@@ -184,7 +190,7 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "layoutEngine", "attr": "allow_overlap", "member": "m_allow_overlap", "type": "bool", "offset": "0x9a", "serializer": "FUN_14063d1e0", "default": "false"},
   {"kind": "layoutEngine", "attr": "allow_scale_items_down", "member": "m_allow_scale_items_down", "type": "bool", "offset": "0x9b", "serializer": "FUN_14063d1e0", "default": "false"},
   {"kind": "layoutEngine", "attr": "reverse_order", "member": "m_reverse_order", "type": "bool", "offset": "0x9d", "serializer": "FUN_14063d1e0", "default": "false"},
-  {"kind": "layoutEngine", "attr": "min_dimensions", "member": "m_min_dimensions", "type": "vec2", "offset": "0x78", "serializer": "FUN_14063d1e0"},
+  {"kind": "layoutEngine", "attr": "min_dimensions", "member": "m_min_dimensions", "type": "vec2", "offset": "0x78", "serializer": "FUN_14063d1e0", "versions": {"min": 131}},
   {"kind": "layoutEngine", "attr": "min_size", "member": "m_min_size", "type": "int", "offset": null, "serializer": "FUN_14063d1e0"},
   {"kind": "layoutEngine", "attr": "margins", "member": "m_margins", "type": "vec2", "offset": "0x68", "serializer": "FUN_14063d1e0"},
   {"kind": "layoutEngine", "attr": "skew_angle", "member": "m_skew_angle", "type": "int", "offset": "0x88", "serializer": "FUN_14063d1e0", "default": "0"},

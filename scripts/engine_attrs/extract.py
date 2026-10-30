@@ -338,6 +338,29 @@ for fva, kind in SERIALIZERS.items():
             m = re.search(r"byte ptr \[r\w+ \+ r\w+ \+ (0x[0-9a-f]+)\]", x.op_str)
             if m and s_at(int(m.group(1), 16)):
                 loops.append((i, s_at(int(m.group(1), 16))))
+    # layout-version gates: `cmp <version>, N` + jb/jae over a range of property blocks
+    gates = []
+    for g, x in enumerate(ins[:-1]):
+        m = re.search(r", (0x[0-9a-f]+|\d+)$", x.op_str) if x.mnemonic == "cmp" else None
+        j = ins[g + 1]
+        if not m or "byte ptr" in x.op_str or j.mnemonic not in ("jb", "jae"):
+            continue
+        n = int(m.group(1), 0)
+        if not 100 <= n <= 160:
+            continue
+        tgt = int(j.op_str, 16)
+        if tgt > j.address:   # jb skip = read only from version n; jae skip = read only below n
+            gates.append((j.address, tgt, ("min_version", n) if j.mnemonic == "jb" else ("max_version", n - 1)))
+            for y in ins[g + 2:]:
+                if y.address >= tgt:
+                    break
+                if y.mnemonic == "lea" and rip_target(y) and s_at(rip_target(y) - BASE) == "this"                         and not any(r["kind"] == kind and r["attr"] == "this" for r in schema):
+                    schema.append({"kind": kind, "attr": "this", "member": None, "type": "guid", "offset": None,
+                                   "serializer": "FUN_%x" % fva, gates[-1][2][0]: gates[-1][2][1]})
+
+    def gate_of(addr):
+        return [v for lo, hi, v in gates if lo < addr < hi]
+
     for k, (i, member) in enumerate(loops):
         end = loops[k + 1][0] if k + 1 < len(loops) else len(ins)
         c = classify(ins, i, end)
@@ -356,6 +379,8 @@ for fva, kind in SERIALIZERS.items():
             row["default"] = c["default"]
         if c["values"]:
             row["values"] = c["values"]
+        for key, n in gate_of(ins[i].address):
+            row[key] = n
         schema.append(row)
 
 # second reader: template-instance overrides (snake_case), read for components created from a template
