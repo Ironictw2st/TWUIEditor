@@ -35,7 +35,7 @@ import {
 } from "../twui/template";
 import { LuaValue } from "../twui/lua";
 import { ENGINE_VERSIONS } from "../twui/engineSchema";
-import { childResize, EngineImage, redockOffset, resizeStateImages } from "./engineLayout";
+import { childResize, EngineImage, listLayout, redockOffset, resizeStateImages } from "./engineLayout";
 import {
   asRecord,
   callbacks,
@@ -1626,6 +1626,35 @@ export function layoutEngine(
 
   const ordered = reverse ? [...children].reverse() : children;
   const out: Placed[] = [];
+
+  // 3K layouts: the game's own List / HorizontalList placement (engineLayout.listLayout). Every
+  // child is stacked (its saved offset is the editor's cache of this), plus its dock_offset.
+  if (engineMode && (type === "List" || type === "HorizontalList")) {
+    const sizes = ordered.map(({ node, comp, state, scope }) => measure(node, comp, state, scope));
+    const vec = (k: string): [number, number] => parseVec2(getAttr(le, k), [0, 0]);
+    const { offsets } = listLayout(
+      ordered.map(({ comp }, i) => ({ ...sizes[i], dockOffset: parseVec2(getAttr(comp, "dock_offset"), [0, 0]) })),
+      { w: parentRect.w, h: parentRect.h },
+      {
+        horizontal,
+        spacing: [sx, sy],
+        margins: [mx, my],
+        secondaryMargins: vec("secondary_margins"),
+        itemsPerRow: parseInt(getAttr(le, "itemsperrow") ?? "1", 10) || 1,
+        crossAlign: horizontal ? valign : halign,
+        skewAngle: parseInt(getAttr(le, "skew_angle") ?? "0", 10) || 0,
+        sizeToContent,
+        maxLength: parseInt(getAttr(le, "max_length") ?? "0", 10) || 0,
+        minDimensions: vec("min_dimensions"),
+        equalSpacingSize: parseInt(getAttr(le, "equal_spacing_size") ?? "0", 10) || 0,
+      }
+    );
+    ordered.forEach(({ node, comp, state, scope }, i) => {
+      const [ox, oy] = offsets[i];
+      out.push({ node, comp, state, rect: { x: parentRect.x + ox, y: parentRect.y + oy, w: sizes[i].w, h: sizes[i].h }, scope });
+    });
+    return out;
+  }
 
   // RadialList: each item's CENTRE sits on a circle of `radius` px around the container
   // centre, stepping `spacing` radians per item from `starting_angle`. `spacing` is a single

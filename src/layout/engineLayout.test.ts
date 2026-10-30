@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { childResize, dockCell, EngineImage, redockOffset, resizeStateImages, roundAway } from "./engineLayout";
+import { childResize, dockCell, EngineImage, listLayout, redockOffset, resizeStateImages, roundAway } from "./engineLayout";
 
 const img = (o: Partial<EngineImage>): EngineImage => ({
   w: 32, h: 32, ox: 0, oy: 0, dockOffset: [0, 0],
@@ -74,5 +74,26 @@ describe("redockOffset", () => {
   it("None keeps the offset; docked = cell + dock_offset", () => {
     expect(redockOffset("None", [5, 6], [1, 1], { w: 100, h: 100 }, { w: 10, h: 10 })).toEqual([5, 6]);
     expect(redockOffset("Bottom Center", [5, 6], [1, -2], { w: 100, h: 100 }, { w: 10, h: 10 })).toEqual([46, 88]);
+  });
+});
+
+describe("listLayout (FUN_14061fc70 + List / HorizontalList vtables)", () => {
+  const base = {
+    horizontal: false, spacing: [0, 0] as [number, number], margins: [0, 0] as [number, number],
+    secondaryMargins: [0, 0] as [number, number], itemsPerRow: 1, skewAngle: 0, sizeToContent: false,
+    maxLength: 0, minDimensions: [0, 0] as [number, number], equalSpacingSize: 0,
+  };
+  const item = (w: number, h: number, d: [number, number] = [0, 0]) => ({ w, h, dockOffset: d });
+  it("vanilla cheet_sheet_battle zoom_in_out: List, margins main axis, centred in the 300 state", () => {
+    const r = listLayout([item(48, 84), item(235, 43)], { w: 300, h: 167 }, { ...base, spacing: [0, 10], margins: [30, 0], crossAlign: "Center", sizeToContent: true });
+    expect(r.offsets).toEqual([[126, 30], [33, 124]]);
+  });
+  it("vanilla icon_skill_points: HorizontalList, dock offsets, centred in the 44-high state", () => {
+    const r = listLayout([item(12, 19, [0, -2]), item(11, 26, [-2, -1]), item(20, 20, [-3, -4])], { w: 50, h: 44 }, { ...base, horizontal: true, crossAlign: "Center", sizeToContent: true });
+    expect(r.offsets).toEqual([[0, 11], [10, 8], [20, 8]]);
+  });
+  it("itemsperrow wraps rows by the tallest item", () => {
+    const r = listLayout([item(10, 5), item(10, 8), item(10, 5)], { w: 100, h: 100 }, { ...base, itemsPerRow: 2, spacing: [2, 3] });
+    expect(r.offsets).toEqual([[0, 0], [12, 0], [0, 11]]);
   });
 });

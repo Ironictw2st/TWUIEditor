@@ -135,6 +135,96 @@ export function childResize(
   return rw > 0 && rh > 0 ? { w: rw, h: rh } : child;
 }
 
+export interface ListParams {
+  horizontal: boolean;
+  spacing: [number, number];
+  /** main axis (start, end) */
+  margins: [number, number];
+  /** cross axis (start, end) */
+  secondaryMargins: [number, number];
+  itemsPerRow: number;
+  /** cross-axis alignment: horizontal_alignment for List, vertical_alignment for HorizontalList */
+  crossAlign?: string;
+  skewAngle: number;
+  sizeToContent: boolean;
+  maxLength: number;
+  minDimensions: [number, number];
+  equalSpacingSize: number;
+}
+
+export interface ListItem {
+  w: number;
+  h: number;
+  dockOffset: [number, number];
+}
+
+/** List / HorizontalList layout (base Layout FUN_14061fc70 with the List vtable 0x1432c06d8;
+ *  HorizontalList 0x1432c27a0 is the same with the axes swapped). `items` are the visible
+ *  children in placement order (reverse_order already applied). Returns each item's offset in
+ *  the container and the container size after `sizetocontent`.
+ *  - cursor starts at (secondary_margins.start, margins.start) [List: x = cross, y = main]
+ *  - an item goes to cursor + its own dock_offset
+ *  - inside a row (itemsperrow > 1) the cursor steps w + spacing.x; at a row end it steps the
+ *    row's tallest item (truncated) + spacing.y and returns to secondary_margins.start, shifted by
+ *    round(tan(skew_angle) * y)
+ *  - sizetocontent: furthest edge + the end margins, main size capped by max_length, floored by
+ *    min_dimensions / equal_spacing_size
+ *  - single-row lists then align on the cross axis against the container's state size (not the
+ *    content size): Center = round((W - w)/2 - sec.end) + x, Right = round(W - w - (x -
+ *    sec.start) - sec.end)
+ *  Checked against the offsets UIEd saved for vanilla list children: 98.3% (List) / 98.7%
+ *  (HorizontalList) reproduce exactly; the rest are stale caches. */
+export function listLayout(items: ListItem[], container: { w: number; h: number }, p: ListParams): { offsets: [number, number][]; size: { w: number; h: number } } {
+  // Work in List orientation: x = cross axis, y = main axis.
+  const T = (a: [number, number]): [number, number] => (p.horizontal ? [a[1], a[0]] : a);
+  const sp = T(p.spacing);
+  const perRow = Math.max(p.itemsPerRow, 0);
+  const tanSkew = p.skewAngle ? Math.tan((p.skewAngle * Math.PI) / 180) : 0;
+  let cx = p.secondaryMargins[0];
+  let cy = p.margins[0];
+  let rowMax = 0;
+  const pos: [number, number][] = [];
+  const dims = items.map((it) => T([it.w, it.h]));
+  items.forEach((it, i) => {
+    const [w, h] = dims[i];
+    const d = T(it.dockOffset);
+    pos.push([cx + d[0], cy + d[1]]);
+    const endOfRow = perRow === 0 || (i + 1) % perRow === 0 || i === items.length - 1;
+    if (!endOfRow) {
+      cx += w + sp[0];
+      rowMax = Math.max(rowMax, Math.trunc(h));
+    } else {
+      cy += Math.max(rowMax, Math.trunc(h)) + sp[1];
+      cx = p.secondaryMargins[0];
+      if (tanSkew) cx += roundAway(tanSkew * cy);
+      rowMax = 0;
+    }
+  });
+  const [aW] = T([container.w, container.h]);
+  let [W, H] = T([container.w, container.h]);
+  if (p.sizeToContent && items.length) {
+    W = Math.max(...pos.map((q, i) => q[0] + dims[i][0])) + p.secondaryMargins[1];
+    H = Math.max(...pos.map((q, i) => q[1] + dims[i][1])) + p.margins[1];
+    if (p.maxLength > 0 && H > p.maxLength) H = p.maxLength;
+    const [minW, minH] = T(p.minDimensions);
+    if (minW > 0 && W < minW) W = minW;
+    if (minH > 0 && H < minH) H = minH;
+    if (p.equalSpacingSize > 0 && H < p.equalSpacingSize) H = p.equalSpacingSize;
+  }
+  const wantAlign = p.crossAlign === "Center" ? 1 : p.crossAlign === (p.horizontal ? "Bottom" : "Right") ? 2 : 0;
+  if (wantAlign && perRow <= 1) {
+    pos.forEach((q, i) => {
+      const w = dims[i][0];
+      q[0] =
+        wantAlign === 1
+          ? roundAway(aW * 0.5 - w * 0.5 - p.secondaryMargins[1]) + q[0]
+          : roundAway(aW - w - (q[0] - p.secondaryMargins[0]) - p.secondaryMargins[1]);
+    });
+  }
+  const [sw, sh] = T([W, H]);
+  return { offsets: pos.map((q) => T(q)), size: { w: sw, h: sh } };
+}
+
 /** Position of a component relative to its parent after a re-dock (FUN_140565390): None keeps
  *  `offset`; any other docking = trunc(cell) + `dock_offset`. */
 export function redockOffset(
