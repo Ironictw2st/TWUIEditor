@@ -8,6 +8,13 @@
 // Description + Required), adapted to a TS data table. Unknown attributes are NOT
 // constrained here — they stay fully editable via the raw element tree / Raw tab, so
 // nothing is hidden or lost (our round-trip keeps the verbatim attrs regardless).
+//
+// For 3K layout versions the table is overlaid with what the game itself reads
+// (engineSchema.ts, from Three_Kingdoms.exe): enum values, defaults, value parsing, and the
+// attributes the table does not list yet.
+
+import type { EngineAttr } from "./engineAttrs";
+import { ENGINE_VERSIONS, engineAttrFor, engineAttrsOf, engineValueProblem } from "./engineSchema";
 
 export type AttrKind =
   | "component"
@@ -45,6 +52,8 @@ export interface AttrSchema {
    *  one schema entry can apply to several kinds, and "required" rarely holds for all of
    *  them (e.g. width is expected on a state but routinely omitted on an image). Absent = optional. */
   requiredFor?: AttrKind[];
+  /** Set on 3K layout versions when the game's own reader for this attribute is known. */
+  engine?: EngineAttr;
 }
 
 /** Whether an attribute is valid in a given layout version. `version` 0 (unknown) allows all,
@@ -505,26 +514,61 @@ for (const s of SCHEMA_LIST) {
  *  Always returns a match when the name is known, even if it is out-of-version, so a present
  *  out-of-version attribute still renders with its label/type. */
 export function schemaFor(name: string, kind?: AttrKind, version = 0): AttrSchema | undefined {
+  const engine = ENGINE_VERSIONS.has(version) ? engineAttrFor(kind, name) : undefined;
   const list = BY_NAME.get(name);
-  if (!list) return undefined;
-  if (kind) {
+  let base: AttrSchema | undefined;
+  if (list && kind) {
     const forKind = list.filter((s) => s.appliesTo.includes(kind));
-    if (forKind.length) {
-      return forKind.find((s) => attrInVersion(s, version)) ?? forKind[0];
-    }
+    if (forKind.length) base = forKind.find((s) => attrInVersion(s, version)) ?? forKind[0];
   }
-  return list[0];
+  if (engine && kind) return withEngine(base, engine, kind);
+  return base ?? list?.[0];
 }
 
 /** All schema entries that apply to a given element kind and are valid in `version` (for the
- *  "add attribute" dropdown). `version` 0 (unknown) includes everything. */
+ *  "add attribute" dropdown). `version` 0 (unknown) includes everything. On 3K versions this
+ *  also lists the attributes the game reads that the table above does not describe yet. */
 export function attrsFor(kind: AttrKind, version = 0): AttrSchema[] {
-  return SCHEMA_LIST.filter((s) => s.appliesTo.includes(kind) && attrInVersion(s, version));
+  const out = SCHEMA_LIST.filter((s) => s.appliesTo.includes(kind) && attrInVersion(s, version));
+  if (!ENGINE_VERSIONS.has(version)) return out;
+  const have = new Set(out.map((s) => s.name));
+  const merged = out.map((s) => schemaFor(s.name, kind, version) ?? s);
+  for (const a of engineAttrsOf(kind)) if (!have.has(a.attr)) merged.push(withEngine(undefined, a, kind));
+  return merged;
+}
+
+const ENGINE_TYPE: Record<string, AttrType> = {
+  bool: "bool", enum: "enum", int: "number", uint: "number", float: "number", vec2: "vec2", colour: "colour",
+};
+
+/** `base` (may be absent) with the game's enum values / default / reader attached. */
+function withEngine(base: AttrSchema | undefined, a: EngineAttr, kind: AttrKind): AttrSchema {
+  const where = `read by the game as ${a.type}${a.offset ? ` (field +${a.offset})` : ""}`;
+  const s: AttrSchema = base
+    ? { ...base }
+    : {
+        name: a.attr,
+        label: a.attr,
+        type: ENGINE_TYPE[a.type] ?? "text",
+        appliesTo: [kind],
+        category: "Engine",
+        description: `${a.member ?? a.attr}: not described yet; ${where}.`,
+        priorityHint: "low",
+      };
+  s.engine = a;
+  if (a.type === "enum" && a.values) s.enumValues = a.values;
+  if (a.type === "bool") s.enumValues = BOOL;
+  if (a.default !== undefined) s.default = a.default;
+  if (base) s.description = `${base.description} (${where})`;
+  return s;
 }
 
 /** Advisory validation — returns a human message when the value looks malformed, else
  *  null. Never blocks a commit (the raw tree always keeps whatever the user types). */
 export function validateAttr(schema: AttrSchema, value: string): string | null {
+  // The game's own parsing wins where it is known (3K versions).
+  if (schema.engine && schema.engine.type !== "colour" && ENGINE_TYPE[schema.engine.type])
+    return engineValueProblem(schema.engine, value);
   const v = value.trim();
   if (v === "") return null;
   switch (schema.type) {

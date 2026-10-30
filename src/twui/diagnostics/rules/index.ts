@@ -7,6 +7,7 @@ import { attrVersionRule } from "./attrVersion";
 import { ccoPropagatorRule } from "./ccoPropagator";
 import { ccoUndocumentedRule } from "./ccoUndocumented";
 import { duplicateGuidsRule } from "./duplicateGuids";
+import { engineUnreadRule } from "./engineUnread";
 import { hierarchyComponentsRule } from "./hierarchyComponents";
 import { imageRefsRule } from "./imageRefs";
 import { imageResizeDockRule } from "./imageResizeDock";
@@ -24,4 +25,5 @@ export const RULES: Rule[] = [
   imageResizeDockRule,
   ccoUndocumentedRule,
   ccoPropagatorRule,
+  engineUnreadRule,
 ];
