@@ -34,6 +34,8 @@ import {
   templateIdMap,
 } from "../twui/template";
 import { LuaValue } from "../twui/lua";
+import { ENGINE_VERSIONS } from "../twui/engineSchema";
+import { childResize, EngineImage, redockOffset, resizeStateImages } from "./engineLayout";
 import {
   asRecord,
   callbacks,
@@ -316,6 +318,19 @@ function resolveSize(
   parentDesign: { w: number; h: number }
 ): { w: number; h: number } {
   if (isTemplated(comp)) return designChild;
+  if (engineMode) {
+    return childResize(
+      designChild,
+      {
+        allowHorizontal: getAttr(comp, "allowhorizontalresize") !== "false",
+        allowVertical: getAttr(comp, "allowverticalresize") !== "false",
+        isRelativeResize: getAttr(comp, "isrelativeresize") === "true",
+        isAspectRatioLocked: getAttr(comp, "isaspectratiolocked") === "true",
+      },
+      parentDesign,
+      parentActual
+    );
+  }
   const dW = parentActual.w - parentDesign.w;
   const dH = parentActual.h - parentDesign.h;
   const hResize = getAttr(comp, "allowhorizontalresize") !== "false";
@@ -354,6 +369,15 @@ function positionChildRes(
     return { x: parent.x + hf * parent.w - ax * w + ox, y: parent.y + vf * parent.h - ay * h + oy, w, h };
   }
 
+  // The game: at load a component sits at parent + offset; once its parent has been resized it
+  // re-docks to trunc(dock cell) + dock_offset (docking None keeps the offset).
+  if (engineMode) {
+    if (parent.w === parentDesign.w && parent.h === parentDesign.h && w === designChild.w && h === designChild.h)
+      return { x: parent.x + ox, y: parent.y + oy, w, h };
+    const [dx, dy] = redockOffset(docking, [ox, oy], parseVec2(getAttr(comp, "dock_offset"), [0, 0]), parent, { w, h });
+    return { x: parent.x + dx, y: parent.y + dy, w, h };
+  }
+
   // Regular component with a baked `offset`: recover the dock_offset nudge at design res
   // (offset − dockingTerm(designParent, designChild)) and re-apply the docking term against
   // the actual sizes. Reduces exactly to `parent + offset` when actual == design.
@@ -386,6 +410,11 @@ type Templates = Record<string, TwuiDocument>;
  *  widths match the drawn font. Absent in headless layout -> estimateTextWidth fallback. */
 export type MeasureText = (text: string, fontName: string | undefined, sizePx: number) => number;
 let activeMeasureText: MeasureText | undefined;
+/** True while laying out a 3K layout (versions 129/135/136): sizes, resizing, docking and image
+ *  placement follow the game's own code (engineLayout.ts) instead of the editor's approximations. */
+let engineMode = false;
+/** A missing state / image width or height: the game's reader default (32) in engine mode. */
+const ENGINE_DEFAULT_SIZE = 32;
 /** The loc map of the layout pass in progress (for text measurement in layoutEngine). */
 let activeLoc: Record<string, string> | undefined;
 
@@ -429,6 +458,7 @@ function sizeFor(
     if (axis === "h") return { w: parent.w, h: dh };
     return { w: dw, h: dh };
   }
+  if (engineMode) return { w: num(state, "width", ENGINE_DEFAULT_SIZE), h: num(state, "height", ENGINE_DEFAULT_SIZE) };
   return { w: num(state, "width", parent.w), h: num(state, "height", parent.h) };
 }
 
@@ -472,7 +502,19 @@ function imagesForComp(
       const tc = tplCompMap.get(guidOf(comp) ?? "");
       if (tc) r = resolveAgainst(comp, tc, iconOverride);
     }
-    if (r) return layerImages(r.layers, rect);
+    if (r) {
+      const out = layerImages(r.layers, rect);
+      if (engineMode && r.layers.every((l) => l.src)) {
+        // The game: the instance's `dimensions` resizes the template state from its authored size.
+        const list = r.layers.map((l, i) => {
+          const src = l.src!;
+          const [ox, oy] = parseVec2(getAttr(src, "offset"), [0, 0]);
+          return { di: out[i], e: engineImageOf(src, num(src, "width", ENGINE_DEFAULT_SIZE), num(src, "height", ENGINE_DEFAULT_SIZE), ox, oy) };
+        });
+        placeEngineImages(list, r.stateW ?? ENGINE_DEFAULT_SIZE, r.stateH ?? ENGINE_DEFAULT_SIZE, rect);
+      }
+      return out;
+    }
     return [];
   }
   return imagesFor(comp, state, rect, iconOverride, slotOverrides);
@@ -617,6 +659,8 @@ function imagesFor(
   const hasImageSetter = callbacks(comp).some((c) => c.id === "ContextImageSetter");
 
   const out: DrawImage[] = [];
+  // Engine mode: each drawn image's game-side geometry, placed after the loop.
+  const engine: { di: DrawImage; e: EngineImage }[] = [];
   for (const img of elementChildren(metrics)) {
     if (img.tag !== "image") continue;
     const ciGuid = getAttr(img, "componentimage");
@@ -626,9 +670,14 @@ function imagesFor(
     const ciSize = sizeByGuid.get(ciGuid) ?? {};
     const [hf, vf] = dockFrac(getAttr(img, "dockpoint"));
     const [ox, oy] = parseVec2(getAttr(img, "offset"), [0, 0]);
-    // Size precedence: image metric -> component_image -> natural (at draw).
-    const w = numOpt(img, "width") ?? ciSize.w;
-    const h = numOpt(img, "height") ?? ciSize.h;
+    // Size precedence: image metric -> component_image -> natural (at draw). The game reads a
+    // missing image width/height as 32 (engine mode).
+    const w = engineMode ? num(img, "width", ENGINE_DEFAULT_SIZE) : numOpt(img, "width") ?? ciSize.w;
+    const h = engineMode ? num(img, "height", ENGINE_DEFAULT_SIZE) : numOpt(img, "height") ?? ciSize.h;
+    const track = (di: DrawImage) => {
+      out.push(di);
+      if (engineMode) engine.push({ di, e: engineImageOf(img, w ?? ENGINE_DEFAULT_SIZE, h ?? ENGINE_DEFAULT_SIZE, ox, oy) });
+    };
     if (!imagepath) {
       if (hasImageSetter) continue;
       // Only paint HAIRLINE textureless quads — divider lines (e.g. `line` 150x1, `l_line`
@@ -636,10 +685,10 @@ function imagesFor(
       // differently (e.g. root's 1440x900 #F0F0F0 tint, the ink material) — never fill those.
       const thin = w !== undefined && h !== undefined && Math.min(w, h) <= 4;
       if (!thin) continue;
-      out.push({ imagepath: "", fill: true, colour: getAttr(img, "colour"), box: rect, hf, vf, ox, oy, w, h, rotation: numOpt(img, "rotation_angle") });
+      track({ imagepath: "", fill: true, colour: getAttr(img, "colour"), box: rect, hf, vf, ox, oy, w, h, rotation: numOpt(img, "rotation_angle") });
       continue;
     }
-    out.push({
+    track({
       imagepath,
       colour: getAttr(img, "colour"),
       box: rect,
@@ -653,7 +702,40 @@ function imagesFor(
       rotation: numOpt(img, "rotation_angle"),
     });
   }
+  if (engineMode) placeEngineImages(engine, num(state, "width", ENGINE_DEFAULT_SIZE), num(state, "height", ENGINE_DEFAULT_SIZE), rect);
   return out;
+}
+
+/** The game's view of one image metric (engineLayout.ts). */
+function engineImageOf(img: RawElement, w: number, h: number, ox: number, oy: number): EngineImage {
+  return {
+    w,
+    h,
+    ox,
+    oy,
+    dockpoint: getAttr(img, "dockpoint"),
+    dockOffset: parseVec2(getAttr(img, "dock_offset"), [0, 0]),
+    canResizeWidth: getAttr(img, "canresizewidth") !== "false",
+    canResizeHeight: getAttr(img, "canresizeheight") !== "false",
+    isRelativeResize: getAttr(img, "isrelativeresize") === "true",
+    isAspectRatioLocked: getAttr(img, "isaspectratiolocked") === "true",
+  };
+}
+
+/** Engine-mode image placement, in place: the game draws an image at state + `offset` (UIEd
+ *  saves the docked position there); only when the state is drawn at another size than its
+ *  authored one do the images resize and re-dock (resizeStateImages). */
+function placeEngineImages(list: { di: DrawImage; e: EngineImage }[], designW: number, designH: number, rect: Rect) {
+  const placed = resizeStateImages(list.map((x) => x.e), designW, designH, rect.w, rect.h);
+  list.forEach(({ di }, i) => {
+    const p = placed[i];
+    di.hf = 0;
+    di.vf = 0;
+    di.ox = p.ox;
+    di.oy = p.oy;
+    di.w = p.w;
+    di.h = p.h;
+  });
 }
 
 export function computeLayout(
@@ -679,6 +761,7 @@ export function computeLayout(
 ): LayoutResult {
   activeMeasureText = measureText;
   activeLoc = loc;
+  engineMode = ENGINE_VERSIONS.has(layoutVersion(doc));
   const items: RenderItem[] = [];
   const scrollables: Scrollable[] = [];
   const sliderLinks: SliderLink[] = [];

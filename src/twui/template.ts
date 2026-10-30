@@ -26,12 +26,17 @@ export interface ResolvedLayer {
   dockpoint?: string;
   offset?: string;
   colour?: string;
+  /** The template's own image metric (unscaled), for the game-accurate resize in compute.ts. */
+  src?: RawElement;
 }
 
 export interface ResolvedTemplate {
   width: number;
   height: number;
   layers: ResolvedLayer[];
+  /** The template state's authored size (attribute values; undefined when absent). */
+  stateW?: number;
+  stateH?: number;
 }
 
 /** All distinct `template_id` values referenced anywhere in the document. */
@@ -166,11 +171,12 @@ export function resolveAgainst(
         dockpoint: getAttr(img, "dockpoint"),
         offset,
         colour: getAttr(img, "colour"),
+        src: img,
       });
     }
   }
 
-  return { width: dw, height: dh, layers };
+  return { width: dw, height: dh, layers, stateW: sw, stateH: sh };
 }
 
 /** id -> component for a template document (to match a part_of_template child by id). */
