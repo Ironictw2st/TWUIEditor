@@ -400,6 +400,24 @@ export function replaceComponent(doc: TwuiDocument, guid: string, el: RawElement
   if (idx >= 0) comps.children[idx] = el;
 }
 
+/** Replace the element whose `this` == guid anywhere in the tree. Used for
+ *  decoded binary UIC layouts, which have no <components> section. */
+export function replaceByThis(doc: TwuiDocument, guid: string, el: RawElement): void {
+  const visit = (parent: RawElement): boolean => {
+    for (let i = 0; i < parent.children.length; i++) {
+      const c = parent.children[i];
+      if (!isElement(c)) continue;
+      if (getAttr(c, "this") === guid) {
+        parent.children[i] = el;
+        return true;
+      }
+      if (visit(c)) return true;
+    }
+    return false;
+  };
+  visit(doc.root);
+}
+
 /** Replace a hierarchy node (matched by guid) with a parsed element. */
 export function replaceHierarchyNode(doc: TwuiDocument, guid: string, el: RawElement): void {
   const loc = locateHier(doc, guid);
@@ -861,6 +879,103 @@ export function removeNamedChild(doc: TwuiDocument, parentGuid: string, childTag
   if (!parent || !child) return;
   const i = parent.children.indexOf(child);
   if (i >= 0) parent.children.splice(i, 1);
+}
+
+// --- Merge-mode apply primitives ---------------------------------------------------------------
+// insertComponentSubtree is the deliberate divergence from pasteSubtree: a faithful merge needs
+// the result to equal document B, so it PRESERVES B's GUIDs (and honors position), whereas
+// pasteSubtree/cloneSubtreeWithRemap regenerate every GUID to avoid collisions on same-doc paste.
+
+/** Insert a component subtree taken from another document, KEEPING its GUIDs, at a position under
+ *  `parentGuid` — before the sibling `beforeGuid`, or appended when it is null/not found. The
+ *  hierarchy node and component defs are deep-cloned (the caller's originals stay intact). */
+export function insertComponentSubtree(
+  doc: TwuiDocument,
+  parentGuid: string,
+  beforeGuid: string | null,
+  hierNode: RawElement,
+  comps: RawElement[]
+): void {
+  const target = locateHier(doc, parentGuid);
+  if (!target) return;
+  const parent = target.node;
+  const newHier = clone(hierNode);
+  let insertAt = parent.children.length;
+  if (beforeGuid) {
+    const before = parent.children.findIndex((c) => isElement(c) && guidOf(c) === beforeGuid);
+    if (before >= 0) insertAt = before;
+  }
+  parent.children.splice(insertAt, 0, newHier);
+  parent.self_closing = false;
+  const compsSection = componentsSection(doc);
+  if (compsSection) compsSection.children.push(...comps.map((c) => clone(c)));
+}
+
+/** Replace the component definition at a specific element-index within <components>. Dup-guid-safe,
+ *  unlike replaceComponent which finds the FIRST element by guid. */
+export function replaceComponentAt(doc: TwuiDocument, compIndex: number, el: RawElement): void {
+  const comps = componentsSection(doc);
+  if (!comps) return;
+  const cur = elementChildren(comps)[compIndex];
+  if (!cur) return;
+  const at = comps.children.indexOf(cur);
+  if (at >= 0) comps.children[at] = el;
+}
+
+/** Append a prebuilt element to the named container under `ownerGuid` (creating the container). */
+export function appendContainerChild(
+  doc: TwuiDocument,
+  ownerGuid: string,
+  containerTag: string,
+  el: RawElement
+): void {
+  const owner = findComponentElement(doc, ownerGuid);
+  if (!owner) return;
+  appendChild(ensureContainer(owner, containerTag), el);
+}
+
+/** Replace the element-child at element-index `index` of the named container under `ownerGuid`. */
+export function replaceContainerChild(
+  doc: TwuiDocument,
+  ownerGuid: string,
+  containerTag: string,
+  index: number,
+  el: RawElement
+): void {
+  const owner = findComponentElement(doc, ownerGuid);
+  const cont = owner && childByTag(owner, containerTag);
+  if (!cont) return;
+  const cur = elementChildren(cont)[index];
+  if (!cur) return;
+  const at = cont.children.indexOf(cur);
+  if (at >= 0) cont.children[at] = el;
+}
+
+/** Replace (el given), add (el given, none present), or remove (el = null) a SINGLETON named child
+ *  under `ownerGuid`. Used for LayoutEngine / component_text / component_model_view, which are
+ *  single children rather than list containers. */
+export function replaceNamedChild(
+  doc: TwuiDocument,
+  ownerGuid: string,
+  childTag: string,
+  el: RawElement | null
+): void {
+  const owner = findComponentElement(doc, ownerGuid);
+  if (!owner) return;
+  const existing = childByTag(owner, childTag);
+  if (el === null) {
+    if (existing) {
+      const i = owner.children.indexOf(existing);
+      if (i >= 0) owner.children.splice(i, 1);
+    }
+    return;
+  }
+  if (existing) {
+    const i = owner.children.indexOf(existing);
+    if (i >= 0) owner.children[i] = el;
+  } else {
+    appendChild(owner, el);
+  }
 }
 
 export function isElementNode(n: TwuiNode): n is RawElement {

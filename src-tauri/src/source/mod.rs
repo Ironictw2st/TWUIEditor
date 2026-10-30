@@ -1,8 +1,11 @@
 //! A read abstraction over game data so the rest of the backend doesn't care
 //! whether files come from a loose extracted folder or directly from `.pack`
 //! archives. All relative paths are forward-slashed (e.g.
-//! `ui/templates/foo.twui.xml`); implementations normalize separators/case as
-//! needed for their backing store.
+//! `ui/templates/foo.twui.xml`) and are matched case-insensitively: `PackSource`
+//! and `WorkspacePack` get that from rpfm's lowercased path cache, `FolderSource`
+//! from its own index (an exact match is always tried first). Callers can therefore
+//! rely on the same lookup semantics whichever source is active, including on a
+//! case-sensitive filesystem.
 
 mod folder;
 mod overlay;

@@ -13,6 +13,8 @@
     "windows": [
       {
         "title": "TWUI Editor",
+        "visible": false,
+        "focus": false,
         "width": 1600,
         "height": 1000,
         "minWidth": 1100,

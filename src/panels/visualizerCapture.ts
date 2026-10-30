@@ -14,6 +14,24 @@ export function setCaptureFn(fn: CaptureFn | null): void {
 }
 
 /** Capture the visualizer at native resolution, or null if no layout is mounted/loaded. */
+/** Headless render support: how many images the Visualizer has requested that are still loading. */
+export type PendingImagesFn = () => number;
+
+let pendingFn: PendingImagesFn | null = null;
+
+export function setPendingImagesFn(fn: PendingImagesFn | null): void {
+  pendingFn = fn;
+}
+
+/** Images requested but not yet loaded (or failed); 0 when nothing is pending or no Visualizer is mounted. */
+export function pendingImages(): number {
+  try {
+    return pendingFn ? pendingFn() : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function captureVisualizer(): string | null {
   try {
     return captureFn ? captureFn() : null;

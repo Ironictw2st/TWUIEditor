@@ -1,6 +1,7 @@
 mod api;
 mod bin;
 mod bug_report;
+mod cache;
 mod cco_docs;
 mod cco_shorthand;
 mod character;
@@ -8,11 +9,13 @@ mod commands;
 mod db;
 mod image;
 mod loc;
-mod model;
+pub mod model;
+mod render_job;
 mod schema_embed;
 mod script;
 mod source;
 mod state;
+pub mod uic;
 mod update;
 mod web;
 
@@ -29,12 +32,59 @@ fn rel_from_uri(uri: &tauri::http::Uri) -> String {
         .into_owned()
 }
 
+/// Show a window without making it the foreground window (Win32 SW_SHOWNOACTIVATE).
+#[cfg(windows)]
+fn show_no_activate(w: &tauri::WebviewWindow) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn ShowWindow(hwnd: *mut core::ffi::c_void, cmd: i32) -> i32;
+    }
+    const SW_SHOWNOACTIVATE: i32 = 4;
+    match w.hwnd() {
+        Ok(h) => unsafe {
+            ShowWindow(h.0 as *mut core::ffi::c_void, SW_SHOWNOACTIVATE);
+        },
+        Err(_) => {
+            let _ = w.show();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn show_no_activate(w: &tauri::WebviewWindow) {
+    let _ = w.show();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .manage(web::WebServer::default())
+        .manage(render_job::parse())
+        .setup(|app| {
+            // Headless render (`--render`): park the window off screen (a hidden WebView2 never
+            // finished loading the page, 11 Sep 2026); the frontend bootstrap (src/render/headless.ts)
+            // captures the layout and exits the process.
+            let job = app.state::<render_job::RenderJobState>().0.clone();
+            render_job::trace(&job, "rust: setup");
+            // The window is created hidden ("visible": false in tauri.conf.json). A headless
+            // render parks it off screen, then shows it WITHOUT activating it, so it never steals
+            // focus from a fullscreen game (29 Oct 2026). "focus": false / focusable(false) were
+            // tried first: the WebView2 page then never loaded. The normal editor shows + focuses.
+            let headless = matches!(&job, Some(j) if !j.show);
+            if let Some(w) = app.get_webview_window("main") {
+                if headless {
+                    let _ = w.set_position(tauri::PhysicalPosition::new(-20000, -20000));
+                    let _ = w.set_skip_taskbar(true);
+                    show_no_activate(&w);
+                } else {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            Ok(())
+        })
         .register_uri_scheme_protocol("twuiimg", |ctx, request| {
             let app = ctx.app_handle();
             let state = app.state::<AppState>();
@@ -115,6 +165,10 @@ pub fn run() {
             web::start_web_server,
             web::stop_web_server,
             web::web_server_status,
+            render_job::get_render_job,
+            render_job::render_log,
+            render_job::write_text_file,
+            render_job::exit_app,
             update::check_update,
             update::install_update,
             bug_report::capture_app_window,

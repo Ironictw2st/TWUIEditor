@@ -2,7 +2,7 @@
 // `load_cco_docs` command). Used to annotate Inspector bindings with each CCO
 // function's return type + description.
 
-import { CcoDocs, CcoFunc } from "../types/twui";
+import { CcoDocs, CcoFunc, CcoShorthand } from "../types/twui";
 
 /** Resolve a CCO function definition — prefer the given object's table, else any. */
 export function funcDef(name: string, docs: CcoDocs | null, objectId?: string): CcoFunc | undefined {
@@ -23,6 +23,8 @@ const ENGINE = new Set([
   "FirstContext", "Size", "GetIf", "GetIfElse", "Format", "IsContextValid", "StringContains",
   "EffectBundleFromKey", "ScriptObjectContext", "Component", "CharactersForCQIs", "TableValue",
   "this", "self", "true", "false", "nil",
+  // List/aggregate builtins (evaluated by the engine, not members of any type).
+  "Sum", "Join", "Transform", "Min", "Max", "Any", "Contains", "First",
 ]);
 
 /** Function-name tokens in a binding funcId, in order, minus engine funcs/keywords.
@@ -40,6 +42,32 @@ export function funcTokens(funcId: string): string[] {
     out.push(t);
   }
   return out;
+}
+
+/** How a binding fares against the metadata-verified symbol table.
+ *  The asymmetric proof rule (reference/cco-schema-sources.md): only types in
+ *  `docs.verified` carry a provable property set — everything else is
+ *  "unverifiable", never "undocumented". */
+export type BindingStatus = "documented" | "extension" | "undocumented" | "unverifiable";
+
+/** Classify a binding's FIRST non-engine token against its context type. Only the
+ *  first token is judged — later tokens may legally resolve on list-element types
+ *  inside `Filter(..., IntValue < 0)`-style predicates. Returns undefined when
+ *  there is nothing to judge (no docs / no object / constructor / root accessor). */
+export function bindingStatus(
+  funcId: string,
+  objectId: string | undefined,
+  docs: CcoDocs | null,
+  shorthand: CcoShorthand | null,
+): BindingStatus | undefined {
+  if (!docs || !objectId || !funcId) return undefined;
+  if (!docs.verified?.includes(objectId)) return "unverifiable";
+  const t = funcTokens(funcId)[0];
+  // Nothing judgeable: pure-literal exprs, CcoRT* tooltip constructors, globals.
+  if (!t || t.startsWith("Cco") || docs.globals[t]) return undefined;
+  if (docs.objects[objectId]?.[t]) return "documented";
+  if (shorthand?.objects[objectId.toLowerCase()]?.[t]) return "extension";
+  return "undocumented";
 }
 
 /** The first documented function in a binding funcId (for an Inspector hint). */

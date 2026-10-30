@@ -501,6 +501,15 @@ function EditorSection() {
       <Row label="Reopen last file on launch">
         <Toggle checked={ed.rememberLastFile} onChange={(v) => patch({ rememberLastFile: v })} />
       </Row>
+      <Row
+        label="Allow saving into vanilla packs"
+        hint="off blocks writing into official CA (non-Mod) game packs, which can corrupt your install"
+      >
+        <Toggle
+          checked={ed.allowSaveIntoVanillaPack}
+          onChange={(v) => patch({ allowSaveIntoVanillaPack: v })}
+        />
+      </Row>
     </div>
   );
 }

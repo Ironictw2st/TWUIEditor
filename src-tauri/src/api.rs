@@ -19,6 +19,7 @@ use crate::model::{parse, serialize, Document, Element};
 use crate::script::{self, ScriptHit};
 use crate::source::DataSource;
 use crate::state::AppState;
+use crate::uic;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,23 +41,38 @@ pub fn parse_element(text: &str) -> Result<Element, String> {
 }
 
 /// Read+parse a layout by source-relative path (open from the pack browser).
+/// Binary UIC layouts (pre-3K games) are detected by magic and decoded through
+/// the verified codec; everything else takes the text path unchanged.
 pub fn read_layout_rel(state: &AppState, rel: &str) -> Result<Document, String> {
-    let content = state
-        .read_text(rel)
+    let bytes = state
+        .read(rel)
         .ok_or_else(|| format!("Failed to read {rel} from data source"))?;
+    if uic::sniff_version(&bytes).is_some() {
+        return uic::decode_verified(&bytes);
+    }
+    let content = String::from_utf8_lossy(&bytes);
     parse::parse(&content)
 }
 
 /// Read+parse a layout from an absolute host path (folder-mode open).
 pub fn read_layout(path: &str) -> Result<Document, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read {path}: {e}"))?;
+    if uic::sniff_version(&bytes).is_some() {
+        return uic::decode_verified(&bytes);
+    }
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {path}: {e}"))?;
+        String::from_utf8(bytes).map_err(|e| format!("Failed to read {path}: {e}"))?;
     parse::parse(&content)
 }
 
 /// Serialize `doc` and write it to an absolute host path. This is the only
 /// write path; its output is what the byte-identical guarantee protects.
+/// Documents decoded from binary UIC re-encode to binary.
 pub fn save_layout(path: &str, doc: Document) -> Result<(), String> {
+    if uic::is_uic_doc(&doc) {
+        let bytes = uic::encode(&doc)?;
+        return std::fs::write(path, bytes).map_err(|e| format!("Failed to write {path}: {e}"));
+    }
     let text = serialize::serialize(&doc);
     std::fs::write(path, text).map_err(|e| format!("Failed to write {path}: {e}"))
 }
@@ -129,22 +145,30 @@ pub fn list_backgrounds(state: &AppState) -> Vec<String> {
     state.list(&|p| {
         p.starts_with("background/")
             && matches!(
-                p.rsplit('.').next().unwrap_or(""),
+                p.rsplit('.').next().unwrap_or("").to_lowercase().as_str(),
                 "png" | "jpg" | "jpeg" | "dds"
             )
     })
 }
 
-/// Every `.twui.xml` reachable from the active source.
+/// Every layout reachable from the active source: `.twui.xml` text layouts
+/// plus binary UIC layouts (extensionless under `ui/`, confirmed by magic
+/// sniff and version support). The sniff costs nothing for 3K/WH3, which have
+/// no extensionless ui files.
 pub fn list_layouts(state: &AppState) -> Vec<String> {
-    state.list(&|p| p.ends_with(".twui.xml"))
+    let mut out = state.list(&|p| p.ends_with(".twui.xml") || uic::is_uic_candidate_path(p));
+    out.retain(|p| {
+        p.ends_with(".twui.xml")
+            || state.read(p).map(|b| uic::sniff_supported(&b)).unwrap_or(false)
+    });
+    out
 }
 
 /// Every image (png/dds/tga/jpg) reachable from the active source.
 pub fn list_images(state: &AppState) -> Vec<String> {
     state.list(&|p| {
         matches!(
-            p.rsplit('.').next().unwrap_or(""),
+            p.rsplit('.').next().unwrap_or("").to_lowercase().as_str(),
             "png" | "dds" | "tga" | "jpg" | "jpeg"
         )
     })
@@ -218,7 +242,7 @@ pub fn load_templates(state: &AppState, ids: Vec<String>) -> HashMap<String, Doc
 pub fn load_layouts(state: &AppState, paths: Vec<String>) -> HashMap<String, Document> {
     let mut out = HashMap::new();
     for rel in paths {
-        if rel.is_empty() || rel.contains("..") || Path::new(&rel).is_absolute() {
+        if rel.is_empty() || rel.contains("..") || image::is_absolute_path(&rel) {
             continue;
         }
         if let Some(content) = state.read_text(&format!("{rel}.twui.xml")) {
@@ -319,6 +343,9 @@ pub fn get_overlay_pack(state: &AppState) -> Option<String> {
 pub struct WorkspaceStatus {
     pub path: Option<String>,
     pub dirty: bool,
+    /// PFH file type ("Boot"/"Release"/"Patch"/"Mod"/"Movie"); None when no workspace is open.
+    /// Anything other than "Mod" is an official CA (vanilla) pack the editor guards writes to.
+    pub pfh_type: Option<String>,
 }
 
 /// Create a new empty Mod pack at `path` and open it as the editable workspace.
@@ -331,27 +358,40 @@ pub fn open_pack_workspace(state: &AppState, path: &str) -> Result<Vec<String>, 
     state.open_workspace(PathBuf::from(path))
 }
 
-/// The `.twui.xml` paths in the open workspace pack (empty if none open).
+/// The layout paths in the open workspace pack (empty if none open):
+/// `.twui.xml` plus supported binary UIC layouts.
 pub fn list_workspace_layouts(state: &AppState) -> Vec<String> {
-    state
-        .workspace()
-        .map(|w| w.list(&|p| p.ends_with(".twui.xml")))
-        .unwrap_or_default()
+    let Some(ws) = state.workspace() else {
+        return Vec::new();
+    };
+    let mut out = ws.list(&|p| p.ends_with(".twui.xml") || uic::is_uic_candidate_path(p));
+    out.retain(|p| {
+        p.ends_with(".twui.xml")
+            || ws.read(p).map(|b| uic::sniff_supported(&b)).unwrap_or(false)
+    });
+    out
 }
 
 /// Read + parse a layout from the workspace pack.
 pub fn read_workspace_layout(state: &AppState, rel: &str) -> Result<Document, String> {
     let ws = state.workspace().ok_or("no pack workspace is open")?;
     let bytes = ws.read(rel).ok_or_else(|| format!("'{rel}' not in the workspace pack"))?;
+    if uic::sniff_version(&bytes).is_some() {
+        return uic::decode_verified(&bytes);
+    }
     let text = String::from_utf8_lossy(&bytes);
     parse::parse(&text)
 }
 
 /// Serialize `doc` into the workspace pack (creating or replacing `rel`) and persist the pack to
-/// disk (the Ctrl+S path).
+/// disk (the Ctrl+S path). Documents decoded from binary UIC re-encode to binary.
 pub fn save_workspace_layout(state: &AppState, rel: &str, doc: Document) -> Result<(), String> {
     let ws = state.workspace().ok_or("no pack workspace is open")?;
-    let bytes = serialize::serialize(&doc).into_bytes();
+    let bytes = if uic::is_uic_doc(&doc) {
+        uic::encode(&doc)?
+    } else {
+        serialize::serialize(&doc).into_bytes()
+    };
     ws.insert_file(rel, &bytes)?;
     ws.save_to_disk()?;
     state.invalidate_caches();
@@ -378,8 +418,9 @@ pub fn pack_workspace_status(state: &AppState) -> WorkspaceStatus {
         Some(ws) => WorkspaceStatus {
             path: Some(ws.path().to_string_lossy().into_owned()),
             dirty: ws.is_dirty(),
+            pfh_type: Some(ws.pfh_type()),
         },
-        None => WorkspaceStatus { path: None, dirty: false },
+        None => WorkspaceStatus { path: None, dirty: false, pfh_type: None },
     }
 }
 

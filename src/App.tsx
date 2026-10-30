@@ -27,11 +27,14 @@ import UpdateBanner from "./panels/UpdateBanner";
 import DocsPanel from "./panels/DocsPanel";
 import NewFileDialog from "./panels/NewFileDialog";
 import InsertFromFileDialog from "./panels/InsertFromFileDialog";
+import MergeDialog from "./panels/MergeDialog";
+import VanillaPackWarnDialog from "./panels/VanillaPackWarnDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { pickOpenFile } from "./ipc/dialog";
 import { captureAppWindow } from "./ipc/commands";
 import { IS_BROWSER } from "./ipc/invoke";
 import HostFileBrowser from "./panels/HostFileBrowser";
+import { runHeadlessRender } from "./render/headless";
 
 const PANEL_TITLES: Record<PanelId, string> = {
   hierarchy: "Hierarchy",
@@ -57,7 +60,12 @@ function Toolbar() {
   useEffect(() => {
     // Keep the loading screen up until the whole boot chain (incl. restoring the
     // last game in its saved read mode) has resolved.
-    init().finally(() => useStore.setState({ loading: false }));
+    // `--render` sessions: open, capture and exit (no-op in a normal session). Started beside
+    // init() so a stalled boot step still leaves a trace in the render log.
+    void runHeadlessRender();
+    init().finally(() => {
+      useStore.setState({ loading: false });
+    });
   }, [init]);
 
   const [showCharacters, setShowCharacters] = useState(false);
@@ -236,12 +244,29 @@ function PackMenu() {
   const fileName = useStore((s) => s.fileName);
   const openNewFileDialog = useStore((s) => s.openNewFileDialog);
   const openInsertDialog = useStore((s) => s.openInsertDialog);
+  const openMergeDialog = useStore((s) => s.openMergeDialog);
   const newFromFile = useStore((s) => s.newFromFile);
+  const openPackWorkspace = useStore((s) => s.openPackWorkspace);
   const hasDoc = useStore((s) => s.doc != null);
 
   const newFromDisk = async () => {
-    const path = await pickOpenFile({ filters: [{ name: "TWUI Layout", extensions: ["xml"] }] });
+    const path = await pickOpenFile({
+      filters: [
+        { name: "TWUI Layout", extensions: ["xml"] },
+        // Pre-3K binary UI layouts are extensionless (e.g. Attila).
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
     if (path) await newFromFile(path, false);
+  };
+
+  // Open a `.pack` into the editable Pack Editor and reveal that panel.
+  const openPackFile = async () => {
+    const f = await pickOpenFile({ filters: [{ name: "Pack", extensions: ["pack"] }] });
+    if (f) {
+      await openPackWorkspace(f);
+      dockShowPanel("packeditor");
+    }
   };
 
   return (
@@ -267,9 +292,20 @@ function PackMenu() {
             >
               Insert from file…
             </button>
+            <button
+              className={menuItem}
+              disabled={!hasDoc}
+              title={hasDoc ? undefined : "Open or create a base layout first"}
+              onClick={() => pick(() => openMergeDialog())}
+            >
+              Merge from file…
+            </button>
             <div className="my-1 h-px bg-edge" />
             <button className={menuItem} onClick={() => pick(() => openFileDialog())}>
-              Open…
+              Open TWUI…
+            </button>
+            <button className={menuItem} onClick={() => pick(() => void openPackFile())}>
+              Open Pack File…
             </button>
             <div className="my-1 h-px bg-edge" />
             <button className={menuItem} disabled={!fileName} onClick={() => pick(() => save())}>
@@ -414,6 +450,8 @@ export default function App() {
   const closeSearch = useStore((s) => s.closeSearch);
   const newFileOpen = useStore((s) => s.newFileOpen);
   const insertOpen = useStore((s) => s.insertOpen);
+  const mergeOpen = useStore((s) => s.mergeOpen);
+  const vanillaGuard = useStore((s) => s.vanillaGuard);
   const loading = useStore((s) => s.loading);
 
   // Global shortcuts run through the central keybinding registry (src/keybinds.ts),
@@ -476,6 +514,8 @@ export default function App() {
       {searchOpen && <SearchPalette onClose={closeSearch} />}
       {newFileOpen && <NewFileDialog />}
       {insertOpen && <InsertFromFileDialog />}
+      {mergeOpen && <MergeDialog />}
+      {vanillaGuard && <VanillaPackWarnDialog />}
       {import.meta.env.PROD && !IS_BROWSER && <UpdateBanner />}
       <UnsavedChangesDialog />
       <HostFileBrowser />

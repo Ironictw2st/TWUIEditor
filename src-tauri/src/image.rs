@@ -28,10 +28,14 @@ fn ext_of(rel: &str) -> String {
         .unwrap_or_default()
 }
 
+/// True when `rel` is an absolute path we must refuse (sandboxing the image protocol to the data
+/// source). Backslashes are a valid *separator* in TWUI `imagepath`s (e.g.
+/// `ui\skins\default\foo.png`) and the data sources match them by normalising `\`→`/`, so we
+/// normalise first and only reject a genuine absolute path: a leading separator, a `X:` drive
+/// letter, or a UNC root (`\\server` → `//server`).
 pub fn is_absolute_path(rel: &str) -> bool {
-    rel.starts_with('/')
-        || rel.contains('\\')
-        || (rel.len() >= 2 && rel.as_bytes()[1] == b':')
+    let norm = rel.replace('\\', "/");
+    norm.starts_with('/') || (norm.len() >= 2 && norm.as_bytes()[1] == b':')
 }
 
 pub fn status(state: &AppState, rel: &str) -> ImageStatus {
@@ -96,7 +100,7 @@ fn decode_dds_cached(raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut h);
-    let dir = std::env::temp_dir().join("twui-editor-cache");
+    let dir = crate::cache::cache_dir();
     let file = dir.join(format!("{:016x}.png", h.finish()));
     if let Ok(bytes) = std::fs::read(&file) {
         return Ok(bytes);
@@ -106,8 +110,8 @@ fn decode_dds_cached(raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
     // twuiimg:// handler runs across an FFI boundary where an unwind is fatal).
     let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_dds(raw)))
         .map_err(|_| ResolveError::Decode("dds decode panicked".into()))??;
-    // Best-effort write; a cache miss next time is harmless.
-    let _ = std::fs::create_dir_all(&dir);
+    // Best-effort write (`cache_dir` already created the directory); a cache miss next
+    // time is harmless.
     let _ = std::fs::write(&file, &bytes);
     Ok(bytes)
 }
@@ -130,6 +134,29 @@ fn decode_dds(_raw: &[u8]) -> Result<Vec<u8>, ResolveError> {
     Err(ResolveError::Decode(
         "DDS decoding not enabled (build with --features dds)".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::is_absolute_path;
+
+    #[test]
+    fn relative_backslash_paths_are_allowed() {
+        // TWUI imagepaths commonly use `\` separators; these are relative and must resolve
+        // (the data sources normalise `\`→`/`), not be rejected as "unsafe".
+        assert!(!is_absolute_path(r"ui\skins\default\ironic_korea_tech_tree.png"));
+        assert!(!is_absolute_path("ui/skins/default/foo.png"));
+        assert!(!is_absolute_path(r"ui\mixed/sep\bar.png"));
+    }
+
+    #[test]
+    fn genuine_absolute_paths_are_rejected() {
+        assert!(is_absolute_path("/etc/passwd"));
+        assert!(is_absolute_path(r"\windows\system32"));
+        assert!(is_absolute_path(r"C:\Users\foo\secret.png"));
+        assert!(is_absolute_path("C:/Users/foo/secret.png"));
+        assert!(is_absolute_path(r"\\server\share\x.png"));
+    }
 }
 
 #[cfg(all(test, feature = "dds"))]

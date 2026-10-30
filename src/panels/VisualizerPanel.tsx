@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "../state/store";
+import { useStore, selectHasImageSource } from "../state/store";
 import type { PerDocSlice } from "../state/store";
 import ToolPalette from "./ToolPalette";
-import { computeLayout, imageDrawRect, LayoutResult, nineSliceRegions, Rect, Scrollable, Sim, textAnchor } from "../layout/compute";
+import { computeLayout, DrawImage, imageDrawRect, LayoutResult, nineSliceRegions, Rect, Scrollable, Sim, textAnchor } from "../layout/compute";
 import { parseColour } from "../twui/colour";
 import { fontSpec } from "../twui/fonts";
 import { extractDataPack, LuaValue } from "../twui/lua";
 import { useLayoutInputs } from "../state/useLayoutInputs";
-import { componentMap, getAttr, guidOf } from "../twui/doc";
+import { componentMap, elementChildren, getAttr, guidOf } from "../twui/doc";
+import type { RawElement } from "../types/twui";
 import { useContextMenu, type MenuItem } from "../components/ContextMenu";
 import { buildComponentMenu } from "./componentMenu";
 import { buttonGroup, clickableStates, interactiveTarget } from "../twui/sim";
@@ -15,7 +16,9 @@ import { locateHier } from "../twui/mutate";
 import { mouseModifierHeld, multiSelectBinding } from "../keybinds";
 import { imageUrl, savePng } from "../ipc/commands";
 import { pickSaveFile } from "../ipc/dialog";
-import { captureVisualizer, setCaptureFn } from "./visualizerCapture";
+import { captureVisualizer, setCaptureFn, setPendingImagesFn } from "./visualizerCapture";
+import TooltipBox, { TipLayout } from "./TooltipBox";
+import { cssColour, isImageRun, layoutRuns, MarkupTables, Run } from "../twui/richText";
 
 const EMPTY_SIM: Sim = { scroll: {}, state: {}, show: [], hide: [] };
 const EMPTY_LAYOUT: LayoutResult = { items: [], canvas: { x: 0, y: 0, w: 1920, h: 1080 }, scrollables: [], sliderLinks: [] };
@@ -92,6 +95,98 @@ function drawImageTinted(
   ctx.globalAlpha = 1;
 }
 
+/** Paint one image layer of a component at its resolved draw rect. Split out of `drawScene` so
+ *  the caller can wrap it in a canvas rotation without threading the transform through every
+ *  early-out branch below. */
+function drawImageLayer(
+  ctx: CanvasRenderingContext2D,
+  di: DrawImage,
+  getImage: (path: string) => HTMLImageElement | null,
+  zoom: number
+): void {
+  if (di.fill) {
+    // Textureless component_image → solid colour quad (divider lines etc.). White default.
+    const r = imageDrawRect(di, 0, 0);
+    const { rgb, alpha } = parseColour(di.colour);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = rgb ?? "#ffffff";
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const img = getImage(di.imagepath);
+  if (img && img.complete && img.naturalWidth > 0) {
+    // `contain`: scale to fit the box preserving aspect, then anchor by hf/vf (e.g. a
+    // bottom-left character portrait). Otherwise size to natural pixels (or explicit w/h).
+    let r;
+    if (di.contain) {
+      const s = Math.min(di.box.w / img.naturalWidth, di.box.h / img.naturalHeight);
+      const cw = img.naturalWidth * s;
+      const ch = img.naturalHeight * s;
+      r = { x: di.box.x + di.hf * (di.box.w - cw) + di.ox, y: di.box.y + di.vf * (di.box.h - ch) + di.oy, w: cw, h: ch };
+    } else {
+      r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
+    }
+    // A parent `maskimage`: composite the (contain-fit) portrait through the mask PNG's
+    // alpha via an offscreen canvas, reproducing the game's masked character portrait.
+    if (di.maskPath) {
+      const mask = getImage(di.maskPath);
+      if (mask && mask.complete && mask.naturalWidth > 0) {
+        const bw = Math.max(1, Math.round(di.box.w));
+        const bh = Math.max(1, Math.round(di.box.h));
+        if (!maskCanvas) maskCanvas = document.createElement("canvas");
+        maskCanvas.width = bw;
+        maskCanvas.height = bh;
+        const mctx = maskCanvas.getContext("2d");
+        if (mctx) {
+          mctx.clearRect(0, 0, bw, bh);
+          mctx.drawImage(img, r.x - di.box.x, r.y - di.box.y, r.w, r.h);
+          mctx.globalCompositeOperation = "destination-in";
+          mctx.drawImage(mask, 0, 0, bw, bh);
+          mctx.globalCompositeOperation = "source-over";
+          ctx.drawImage(maskCanvas, di.box.x, di.box.y);
+          return;
+        }
+      }
+      // mask not loaded yet → fall through and draw the portrait unmasked this frame
+    }
+    // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
+    // Runtime-swapped placeholders are drawn faint so they don't dominate.
+    const { rgb, alpha } = parseColour(di.colour);
+    const a = alpha * (isFaint(di.imagepath) ? 0.25 : 1);
+    // A `margin` image draws as a nine-patch border (corners 1:1, edges/center
+    // stretched) so a bordered texture isn't smeared across the whole rect.
+    const regions = di.margin
+      ? nineSliceRegions(r, img.naturalWidth, img.naturalHeight, di.margin)
+      : null;
+    try {
+      if (regions) {
+        for (const reg of regions) {
+          if (rgb) drawImageTinted(ctx, img, reg.dst, rgb, a, reg.src);
+          else {
+            ctx.globalAlpha = a;
+            ctx.drawImage(img, reg.src.x, reg.src.y, reg.src.w, reg.src.h, reg.dst.x, reg.dst.y, reg.dst.w, reg.dst.h);
+            ctx.globalAlpha = 1;
+          }
+        }
+      } else if (rgb) {
+        drawImageTinted(ctx, img, r, rgb, a);
+      } else {
+        ctx.globalAlpha = a;
+        ctx.drawImage(img, r.x, r.y, r.w, r.h);
+        ctx.globalAlpha = 1;
+      }
+    } catch {
+      /* ignore */
+    }
+  } else if (img && !img.complete) {
+    // still loading; leave blank
+  } else {
+    // missing image -> hatched placeholder at its known/box size
+    drawPlaceholder(ctx, imageDrawRect(di, 0, 0), zoom);
+  }
+}
+
 /** Paint the design surface: canvas background, its border, and every layout item (images +
  *  text) in DFS order. This is the shared scene-painting pass used by both the live canvas
  *  (after it applies the pan/zoom transform, then draws selection/hover overlays on top) and
@@ -139,90 +234,24 @@ function drawScene(
       ctx.clip();
     }
     for (const di of item.images) {
-      if (di.fill) {
-        // Textureless component_image → solid colour quad (divider lines etc.). White default.
-        const r = imageDrawRect(di, 0, 0);
-        const { rgb, alpha } = parseColour(di.colour);
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = rgb ?? "#ffffff";
-        ctx.fillRect(r.x, r.y, r.w, r.h);
-        ctx.globalAlpha = 1;
-        continue;
+      // `rotation_angle` (radians) spins the image about its own centre — connector lines on a
+      // node map are one vertical line texture rotated onto each edge's angle. Rotate the canvas
+      // around the draw rect's centre so the layer itself draws in unrotated coordinates.
+      const rot = di.rotation;
+      if (rot) {
+        const rr = imageDrawRect(di, 0, 0);
+        const cx = rr.x + rr.w / 2;
+        const cy = rr.y + rr.h / 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(rot);
+        ctx.translate(-cx, -cy);
       }
-      const img = getImage(di.imagepath);
-      if (img && img.complete && img.naturalWidth > 0) {
-        // `contain`: scale to fit the box preserving aspect, then anchor by hf/vf (e.g. a
-        // bottom-left character portrait). Otherwise size to natural pixels (or explicit w/h).
-        let r;
-        if (di.contain) {
-          const s = Math.min(di.box.w / img.naturalWidth, di.box.h / img.naturalHeight);
-          const cw = img.naturalWidth * s;
-          const ch = img.naturalHeight * s;
-          r = { x: di.box.x + di.hf * (di.box.w - cw) + di.ox, y: di.box.y + di.vf * (di.box.h - ch) + di.oy, w: cw, h: ch };
-        } else {
-          r = imageDrawRect(di, img.naturalWidth, img.naturalHeight);
-        }
-        // A parent `maskimage`: composite the (contain-fit) portrait through the mask PNG's
-        // alpha via an offscreen canvas, reproducing the game's masked character portrait.
-        if (di.maskPath) {
-          const mask = getImage(di.maskPath);
-          if (mask && mask.complete && mask.naturalWidth > 0) {
-            const bw = Math.max(1, Math.round(di.box.w));
-            const bh = Math.max(1, Math.round(di.box.h));
-            if (!maskCanvas) maskCanvas = document.createElement("canvas");
-            maskCanvas.width = bw;
-            maskCanvas.height = bh;
-            const mctx = maskCanvas.getContext("2d");
-            if (mctx) {
-              mctx.clearRect(0, 0, bw, bh);
-              mctx.drawImage(img, r.x - di.box.x, r.y - di.box.y, r.w, r.h);
-              mctx.globalCompositeOperation = "destination-in";
-              mctx.drawImage(mask, 0, 0, bw, bh);
-              mctx.globalCompositeOperation = "source-over";
-              ctx.drawImage(maskCanvas, di.box.x, di.box.y);
-              continue;
-            }
-          }
-          // mask not loaded yet → fall through and draw the portrait unmasked this frame
-        }
-        // Apply the image's `colour`: RGB as a multiply tint, alpha as opacity.
-        // Runtime-swapped placeholders are drawn faint so they don't dominate.
-        const { rgb, alpha } = parseColour(di.colour);
-        const a = alpha * (isFaint(di.imagepath) ? 0.25 : 1);
-        // A `margin` image draws as a nine-patch border (corners 1:1, edges/center
-        // stretched) so a bordered texture isn't smeared across the whole rect.
-        const regions = di.margin
-          ? nineSliceRegions(r, img.naturalWidth, img.naturalHeight, di.margin)
-          : null;
-        try {
-          if (regions) {
-            for (const reg of regions) {
-              if (rgb) drawImageTinted(ctx, img, reg.dst, rgb, a, reg.src);
-              else {
-                ctx.globalAlpha = a;
-                ctx.drawImage(img, reg.src.x, reg.src.y, reg.src.w, reg.src.h, reg.dst.x, reg.dst.y, reg.dst.w, reg.dst.h);
-                ctx.globalAlpha = 1;
-              }
-            }
-          } else if (rgb) {
-            drawImageTinted(ctx, img, r, rgb, a);
-          } else {
-            ctx.globalAlpha = a;
-            ctx.drawImage(img, r.x, r.y, r.w, r.h);
-            ctx.globalAlpha = 1;
-          }
-        } catch {
-          /* ignore */
-        }
-      } else if (img && !img.complete) {
-        // still loading; leave blank
-      } else {
-        // missing image -> hatched placeholder at its known/box size
-        drawPlaceholder(ctx, imageDrawRect(di, 0, 0), zoom);
-      }
+      drawImageLayer(ctx, di, getImage, zoom);
+      if (rot) ctx.restore();
     }
-    if (item.text) {
-      drawText(ctx, item);
+    if (item.text || item.runs) {
+      drawText(ctx, item, getImage);
     }
     if (clipped) ctx.restore();
   }
@@ -231,7 +260,7 @@ function drawScene(
 export default function VisualizerPanel() {
   const doc = useStore((s) => s.doc);
   const filePath = useStore((s) => s.filePath);
-  const dataRoot = useStore((s) => s.dataRoot);
+  const hasImageSource = useStore(selectHasImageSource);
   const imageEpoch = useStore((s) => s.imageEpoch);
   const selectedGuid = useStore((s) => s.selectedGuid);
   const selectedGuids = useStore((s) => s.selectedGuids);
@@ -265,7 +294,7 @@ export default function VisualizerPanel() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
   const [size, setSize] = useState({ w: 800, h: 600 });
-  const [, forceTick] = useState(0);
+  const [tick, forceTick] = useState(0);
   // Hover is shared (hierarchy <-> canvas) via the store; window-local (see sync.ts).
   const hover = useStore((s) => s.hoveredGuid);
   const setHover = useStore((s) => s.setHovered);
@@ -318,6 +347,12 @@ export default function VisualizerPanel() {
   // Compute a layout for each visible layer (active + opt-in overlays), stacked bottom-to-top in
   // `tabs` order. The active layer uses the live top-level state; reference layers use their
   // parked slice and render in their default (un-simulated) state.
+  // `[[col:]]` / `[[img:]]` text-markup lookups (ui_colours / ui_tagged_images).
+  const markupTables: MarkupTables = useMemo(
+    () => ({ colours: contextDb?.ui_colours, images: contextDb?.tagged_images }),
+    [contextDb]
+  );
+
   const renderLayers: RenderLayer[] = useMemo(
     () => {
       // Shared inputs every reference layer depends on (its own tree and the active doc's live
@@ -335,7 +370,7 @@ export default function VisualizerPanel() {
             measureText, contextDb?.ministerial_positions, renderResolution,
             // Skeleton placeholders are an editor aid — never in Simulation/Tooltip, which
             // faithfully mirror the game (an unbound list there shows nothing).
-            previewEmptyLists && !simLike, uiPrefs, previewBindings
+            previewEmptyLists && !simLike, uiPrefs, previewBindings, markupTables
           )
         : EMPTY_LAYOUT;
 
@@ -352,7 +387,7 @@ export default function VisualizerPanel() {
           false, slice.createdLayouts, ccoShorthand, slice.componentDataPacks as Record<string, LuaValue>,
           measureText, contextDb?.ministerial_positions, renderResolution,
           // Overlay (reference) layers don't carry the active doc's preview bindings.
-          previewEmptyLists && !simLike, uiPrefs, []
+          previewEmptyLists && !simLike, uiPrefs, [], markupTables
         );
         refLayoutCache.current.set(slice.doc, l);
         return l;
@@ -393,7 +428,7 @@ export default function VisualizerPanel() {
   }, [imageEpoch]);
 
   const getImage = useCallback((path: string): HTMLImageElement | null => {
-    if (!dataRoot) return null;
+    if (!hasImageSource) return null;
     const cache = imgCache.current;
     let img = cache.get(path);
     if (!img) {
@@ -414,7 +449,24 @@ export default function VisualizerPanel() {
       cache.set(path, img);
     }
     return img;
-  }, [dataRoot, imageEpoch]);
+  }, [hasImageSource, imageEpoch]);
+
+  // `{{tt:<layout>}}` tooltips: lay the tooltip layout out in the current preview context
+  // (list skeletons on, so data-bound tooltips still show their structure) and paint it with
+  // the same scene painter as the canvas.
+  const computeTipLayout = useCallback(
+    (tl: TipLayout) =>
+      computeLayout(
+        tl.doc, context, tokens, tl.templates, loc, dataPack, EMPTY_SIM, staticVars,
+        false, {}, ccoShorthand, {}, measureText, contextDb?.ministerial_positions, null,
+        true, uiPrefs, [], markupTables
+      ),
+    [context, tokens, loc, dataPack, staticVars, ccoShorthand, contextDb, uiPrefs, markupTables]
+  );
+  const paintTip = useCallback(
+    (ctx: CanvasRenderingContext2D, l: LayoutResult) => drawScene(ctx, l, { getImage, background: null, zoom: 1, surface: false }),
+    [getImage]
+  );
 
   // Resize canvas to container.
   useEffect(() => {
@@ -428,8 +480,11 @@ export default function VisualizerPanel() {
     return () => ro.disconnect();
   }, []);
 
-  // Draw.
-  useEffect(() => {
+  // Draw the whole scene. Extracted from the effect below so the Move-drag loop can call it
+  // imperatively (via requestAnimationFrame, through drawRef) without a store write. During a drag
+  // it reads `dragPreview` to translate the dragged subtree's rects, leaving the memoized layout
+  // (and computeLayout) untouched until the drag commits on mouse-up.
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -445,16 +500,29 @@ export default function VisualizerPanel() {
     ctx.save();
     ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * panX, dpr * panY);
 
+    // Move-drag preview: shift the dragged widget + its descendants by the live delta so they follow
+    // the cursor without a layout recompute. Only the active layer is edited; overlays, scrollbars
+    // and the canvas rect are unaffected by a widget move.
+    const dp = dragPreview.current;
+    const activeItems = dp
+      ? layout.items.map((it) =>
+          dp.subtree.has(it.guid)
+            ? { ...it, rect: { ...it.rect, x: it.rect.x + dp.dx, y: it.rect.y + dp.dy } }
+            : it
+        )
+      : layout.items;
+    const activeLayout: LayoutResult = dp ? { ...layout, items: activeItems } : layout;
+
     // Composite each visible layer bottom-to-top. The bottom layer paints the design surface;
     // the rest draw items only, so they stack like image layers (top tab = top layer).
     renderLayers.forEach((l, i) => {
-      drawScene(ctx, l.layout, { getImage, background, zoom, surface: i === 0 });
+      drawScene(ctx, l.active ? activeLayout : l.layout, { getImage, background, zoom, surface: i === 0 });
     });
 
     // Structure outlines are opt-in (the "Bounds" toggle) so the preview stays clean.
     if (showBounds) {
       ctx.lineWidth = 1 / zoom;
-      for (const item of layout.items) {
+      for (const item of activeItems) {
         if (selectedGuids.includes(item.guid) || item.guid === hover) continue;
         ctx.strokeStyle = "rgba(120,130,170,0.22)";
         ctx.strokeRect(item.rect.x, item.rect.y, item.rect.w, item.rect.h);
@@ -464,7 +532,7 @@ export default function VisualizerPanel() {
     // Hover + selection highlight.
     const hi = (guid: string | null, colour: string, wdt: number) => {
       if (!guid) return;
-      const it = layout.items.find((i) => i.guid === guid);
+      const it = activeItems.find((i) => i.guid === guid);
       if (!it) return;
       ctx.strokeStyle = colour;
       ctx.lineWidth = wdt / zoom;
@@ -490,7 +558,34 @@ export default function VisualizerPanel() {
     }
 
     ctx.restore();
-  }, [doc, renderLayers, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode]);
+  }, [renderLayers, layout, view, size, selectedGuid, selectedGuids, hover, getImage, showBounds, background, sim, mode, simLike]);
+
+  // Repaint whenever any draw input changes (`draw`'s identity tracks the same trigger set the old
+  // effect had — doc changes flow through renderLayers). Keep drawRef current for the rAF drag loop.
+  useEffect(() => {
+    draw();
+  }, [draw]);
+  useEffect(() => {
+    drawRef.current = draw;
+  });
+  // Cancel a pending drag-preview frame if the panel unmounts mid-drag.
+  useEffect(
+    () => () => {
+      if (rafId.current != null) cancelAnimationFrame(rafId.current);
+    },
+    []
+  );
+
+  // Headless render (`--render`): let the bootstrap wait until every requested image has
+  // settled (loaded or failed) before it captures.
+  useEffect(() => {
+    setPendingImagesFn(() => {
+      let n = 0;
+      for (const img of imgCache.current.values()) if (!img.complete) n++;
+      return n;
+    });
+    return () => setPendingImagesFn(null);
+  }, []);
 
   // Expose a clean, native-resolution PNG of the current layout for the bug-report menu.
   // Renders the shared scene (no pan/zoom/overlays) into an offscreen canvas sized to the
@@ -515,10 +610,34 @@ export default function VisualizerPanel() {
   // scrolls lists / clicks widgets.
   type DragState =
     | { kind: "pan"; x: number; y: number; panX: number; panY: number; moved: boolean }
-    | { kind: "move"; guid: string; startWX: number; startWY: number; offX: number; offY: number; moved: boolean }
+    | { kind: "move"; guid: string; startWX: number; startWY: number; offX: number; offY: number; subtree: Set<string>; moved: boolean }
     | { kind: "scroll"; sc: Scrollable; startWY: number; startScroll: number }
     | { kind: "sliderdrag"; sc: Scrollable; travel: number; startWY: number; startScroll: number };
   const drag = useRef<DragState | null>(null);
+  // Live drag-preview state (Move mode): while dragging we DON'T mutate the doc. We stash the live
+  // world-space delta plus the dragged component's subtree guids here, translate those rects at draw
+  // time, and commit the offset once on mouse-up — keeping computeLayout out of the drag loop.
+  const dragPreview = useRef<{ subtree: Set<string>; dx: number; dy: number } | null>(null);
+  const rafId = useRef<number | null>(null);
+  const drawRef = useRef<() => void>(() => {});
+
+  // Every guid in a component's hierarchy subtree (itself + descendants), so a drag preview can
+  // translate the whole subtree together with the dragged widget.
+  const subtreeGuids = (guid: string): Set<string> => {
+    const set = new Set<string>([guid]);
+    if (!doc) return set;
+    const loc = locateHier(doc, guid);
+    if (!loc) return set;
+    const walk = (node: RawElement) => {
+      for (const child of elementChildren(node)) {
+        const g = guidOf(child);
+        if (g) set.add(g);
+        walk(child);
+      }
+    };
+    walk(loc.node);
+    return set;
+  };
 
   // Absolute rect of a component's parent (for converting a drag delta to offset).
   const parentRectOf = (guid: string): Rect | undefined => {
@@ -536,11 +655,13 @@ export default function VisualizerPanel() {
     return { x: (sx - view.panX) / view.zoom, y: (sy - view.panY) / view.zoom };
   };
 
-  const hitTest = (wx: number, wy: number): string | null => {
+  const hitTest = (wx: number, wy: number, tipOnly = false): string | null => {
     // The most SPECIFIC component under the point: smallest area among the items
     // whose rect contains it, tie-broken by deeper nesting then later draw order.
     // (A plain "topmost-drawn" pick lets a large container/overlay that merely
     // spans the cursor swallow every click — e.g. court-screen frames.)
+    // Tooltip mode bubbles like the game: the hovered component's tooltip, else the nearest
+    // enclosing component's -- i.e. the most specific item under the point that HAS one.
     let best: string | null = null;
     let bestArea = Infinity;
     let bestDepth = -1;
@@ -548,6 +669,7 @@ export default function VisualizerPanel() {
       const it = layout.items[i];
       const r = it.rect;
       if (r.w <= 0 || r.h <= 0) continue;
+      if (tipOnly && !it.tooltip) continue;
       if (wx < r.x || wx > r.x + r.w || wy < r.y || wy > r.y + r.h) continue;
       const area = r.w * r.h;
       if (area < bestArea || (area === bestArea && it.depth >= bestDepth)) {
@@ -702,6 +824,7 @@ export default function VisualizerPanel() {
           startWY: w.y,
           offX: item.rect.x - parent.x,
           offY: item.rect.y - parent.y,
+          subtree: subtreeGuids(guid),
           moved: false,
         };
         return;
@@ -726,7 +849,15 @@ export default function VisualizerPanel() {
         d.moved = true;
         beginDrag(); // one undo entry for the whole drag
       }
-      liveSetOffset(d.guid, d.offX + dx, d.offY + dy);
+      // Preview only: translate the dragged subtree at draw time and coalesce redraws to one per
+      // frame. The doc isn't mutated until mouse-up, so no computeLayout runs during the drag.
+      dragPreview.current = { subtree: d.subtree, dx, dy };
+      if (rafId.current == null) {
+        rafId.current = requestAnimationFrame(() => {
+          rafId.current = null;
+          drawRef.current();
+        });
+      }
     } else if (d?.kind === "scroll") {
       const w = toWorld(e.clientX, e.clientY);
       const sc = d.sc;
@@ -740,13 +871,25 @@ export default function VisualizerPanel() {
       setScroll(d.sc.guid, d.startScroll + ((w.y - d.startWY) / d.travel) * max, d.sc);
     } else {
       const w = toWorld(e.clientX, e.clientY);
-      setHover(mode === "sim" ? null : hitTest(w.x, w.y));
+      setHover(mode === "sim" ? null : hitTest(w.x, w.y, mode === "tooltip"));
       if (mode === "tooltip") setTipPos({ x: e.clientX, y: e.clientY });
     }
   };
   const onMouseUp = (e: React.MouseEvent) => {
     const d = drag.current;
     drag.current = null;
+    // Commit a Move drag here, once. The doc was untouched during the drag (only the preview
+    // translated), so this single write triggers the one and only computeLayout for the whole
+    // gesture; the draw effect then repaints the real committed layout (preview already cleared).
+    if (d?.kind === "move" && d.moved && dragPreview.current) {
+      const { dx, dy } = dragPreview.current;
+      liveSetOffset(d.guid, d.offX + dx, d.offY + dy);
+    }
+    dragPreview.current = null;
+    if (rafId.current != null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
     // A pan that didn't move = a click → interact in Sim/Tooltip, create in Create, select in
     // Select. Move keeps the current selection (you pick via the hierarchy/Select tool) and never
     // re-selects from the canvas.
@@ -876,9 +1019,14 @@ export default function VisualizerPanel() {
             Open a .twui.xml file to preview.
           </div>
         )}
-        {doc && !dataRoot && (
+        {doc && doc.root.tag === "ui" && (
+          <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-[13px] text-center px-6">
+            No preview for binary UI layouts yet — edit via the Hierarchy tree and Inspector.
+          </div>
+        )}
+        {doc && !hasImageSource && (
           <div className="absolute top-2 left-2 right-2 text-[11px] text-amber-300/80 bg-amber-900/30 border border-amber-700/40 rounded px-2 py-1">
-            Data root not set — images won't load. Set it from Settings.
+            No image source — open a pack in the Pack Editor or set a data root from Settings.
           </div>
         )}
         <canvas
@@ -913,12 +1061,16 @@ export default function VisualizerPanel() {
             const tip = layout.items.find((i) => i.guid === hover)?.tooltip;
             if (!tip) return null;
             return (
-              <div
-                className="fixed z-40 max-w-[320px] px-2 py-1 rounded bg-sunken border border-edge text-[11px] text-text whitespace-pre-wrap pointer-events-none shadow-lg"
-                style={{ left: tipPos.x + 14, top: tipPos.y + 14 }}
-              >
-                {tip}
-              </div>
+              <TooltipBox
+                tip={tip}
+                x={tipPos.x}
+                y={tipPos.y}
+                tables={markupTables}
+                epoch={imageEpoch}
+                computeLayout={computeTipLayout}
+                paint={paintTip}
+                tick={tick}
+              />
             );
           })()}
       </div>
@@ -953,16 +1105,85 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D, r: Rect, zoom: number) {
   ctx.restore();
 }
 
-function drawText(ctx: CanvasRenderingContext2D, item: { rect: Rect; text?: string; fontColour?: string; fontSize?: number; fontName?: string; textHAlign?: string; textVAlign?: string; textInset?: { left: number; right: number; top: number; bottom: number } }) {
-  if (!item.text) return;
+type TextItem = {
+  rect: Rect;
+  text?: string;
+  runs?: Run[];
+  wrap?: "word" | "char";
+  leading?: number;
+  fontColour?: string;
+  fontSize?: number;
+  fontName?: string;
+  textHAlign?: string;
+  textVAlign?: string;
+  textInset?: { left: number; right: number; top: number; bottom: number };
+};
+
+/** The component font with a markup run's bold/italic applied on top. */
+function runFont(base: string, style: { bold?: boolean; italic?: boolean }): string {
+  let f = base;
+  if (style.bold) f = f.replace(/^(\S+) \d+ /, "$1 700 ");
+  if (style.italic) f = f.replace(/^\S+ /, "italic ");
+  return f;
+}
+
+function drawText(ctx: CanvasRenderingContext2D, item: TextItem, getImage?: (path: string) => HTMLImageElement | null) {
+  if (!item.text && !item.runs) return;
   const size = item.fontSize ?? 13;
+  const baseColour = cssColour(item.fontColour);
+  const base = fontSpec(item.fontName, size);
   ctx.save();
-  ctx.fillStyle = item.fontColour && item.fontColour[0] === "#" ? item.fontColour.slice(0, 7) : "#ffffff";
-  ctx.font = fontSpec(item.fontName, size);
+  ctx.fillStyle = baseColour;
+  ctx.font = base;
   ctx.textBaseline = "middle";
   // textxoffset=(left,right), textyoffset=(top,bottom) define the inset box; align within it.
   const { tx, ty, align } = textAnchor(item.rect, item.textInset, item.textHAlign, item.textVAlign, size);
-  ctx.textAlign = align;
-  ctx.fillText(item.text, tx, ty);
+  if (!item.runs) {
+    // Plain single-line text: the original fast path.
+    ctx.textAlign = align;
+    ctx.fillText(item.text!, tx, ty);
+    ctx.restore();
+    return;
+  }
+
+  // Rich text: styled runs, hard newlines, optional word/char wrapping within the inset box.
+  const ins = item.textInset ?? { left: 0, right: 0, top: 0, bottom: 0 };
+  const boxW = item.rect.w - ins.left - ins.right;
+  const measure = (t: string, st: { bold?: boolean; italic?: boolean }) => {
+    ctx.font = runFont(base, st);
+    return ctx.measureText(t).width;
+  };
+  const lines = layoutRuns(item.runs, measure, size, item.wrap ? Math.max(1, boxW) : undefined, item.wrap === "char");
+  const lineH = size * 1.15 + (item.leading ?? 0);
+  // Anchor the block so a single line lands exactly where the plain path puts it.
+  const n = lines.length;
+  const firstY =
+    item.textVAlign === "Top" ? ty : item.textVAlign === "Bottom" ? ty - (n - 1) * lineH : ty - ((n - 1) * lineH) / 2;
+  ctx.textAlign = "left";
+  lines.forEach((line, i) => {
+    const y = firstY + i * lineH;
+    const x0 =
+      item.textHAlign === "Center"
+        ? item.rect.x + (ins.left + item.rect.w - ins.right - line.width) / 2
+        : item.textHAlign === "Right"
+          ? item.rect.x + item.rect.w - ins.right - line.width
+          : item.rect.x + ins.left;
+    for (const p of line.runs) {
+      if (isImageRun(p.run)) {
+        const img = getImage?.(p.run.img);
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            ctx.drawImage(img, x0 + p.x, y - size / 2, p.width, size);
+          } catch {
+            /* ignore */
+          }
+        }
+        continue;
+      }
+      ctx.font = runFont(base, p.run);
+      ctx.fillStyle = p.run.colour ?? baseColour;
+      ctx.fillText(p.run.text, x0 + p.x, y);
+    }
+  });
   ctx.restore();
 }

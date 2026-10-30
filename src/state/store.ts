@@ -8,6 +8,7 @@ import {
   childByTag,
   componentMap,
   componentsSection,
+  docFormat,
   elementChildren,
   findComponentElement,
   fmtVec2,
@@ -56,6 +57,7 @@ import {
   removeContainerChild,
   removeNamedChild,
   renameNode,
+  replaceByThis,
   replaceComponent,
   replaceHierarchyNode,
   sameHierarchyParent,
@@ -65,6 +67,15 @@ import {
   SubtreeClip,
 } from "../twui/mutate";
 import { RawElement } from "../types/twui";
+import { diffDocuments } from "../twui/merge/diff";
+import { applyChanges, ApplyReport } from "../twui/merge/apply";
+import {
+  allIds,
+  deselectWithDependents,
+  MergeDiff,
+  selectWithDeps,
+  subtreeIds,
+} from "../twui/merge/types";
 
 interface View {
   zoom: number;
@@ -81,8 +92,9 @@ export type PanelId = "hierarchy" | "inspector" | "perspective" | "visualizer" |
 export const PANEL_IDS: PanelId[] = ["hierarchy", "inspector", "perspective", "visualizer", "packfiles", "packeditor", "layers", "diagnosis"];
 
 /** Games the editor supports. The Settings table always offers these; the user
- *  points each at its own folders (no folder scanning / auto-detect). */
-export const SUPPORTED_GAMES = ["3K", "WH3"];
+ *  points each at its own folders (no folder scanning / auto-detect). Attila's
+ *  UI layouts are binary (decoded/re-encoded by the Rust uic codec). */
+export const SUPPORTED_GAMES = ["3K", "WH3", "Attila"];
 
 /** Persisted user preferences (localStorage `twui-settings`). Document/runtime
  *  state is never persisted — only this subset (+ `background`/`view`). */
@@ -98,7 +110,7 @@ export interface Settings {
     /** Floating tool palette position (canvas-relative; null = default left-center) and hidden state. */
     palette: { x: number | null; y: number | null; hidden: boolean };
   };
-  editor: { undoLimit: number; rememberLastFile: boolean };
+  editor: { undoLimit: number; rememberLastFile: boolean; allowSaveIntoVanillaPack: boolean };
   /** Opt-in experimental features, off by default. `versionConversion` reveals the
    *  layout-version converter (root component only) in the Inspector. `webAccess`
    *  configures the experimental HTTP server that serves the editor to a remote
@@ -147,7 +159,7 @@ const DEFAULT_SETTINGS: Settings = {
     restoreView: false,
     palette: { x: null, y: null, hidden: false },
   },
-  editor: { undoLimit: 100, rememberLastFile: false },
+  editor: { undoLimit: 100, rememberLastFile: false, allowSaveIntoVanillaPack: false },
   experimental: {
     versionConversion: false,
     webAccess: { enabled: false, bind: "loopback", customIp: "", port: 8787, password: "" },
@@ -280,6 +292,11 @@ export interface AppStore {
   workspacePath: string | null;
   /** The open editable workspace pack's disk path (the "Pack Editor"), or null. */
   workspacePack: string | null;
+  /** PFH file type of the open workspace pack ("Mod"/"Release"/…), or null when none is open.
+   *  Anything other than "Mod" is an official CA (vanilla) pack; writes to it are guarded. */
+  workspacePackType: string | null;
+  /** Set when a write into a vanilla pack was blocked — drives the warning popup (null = hidden). */
+  vanillaGuard: { action: "save" | "create" | "delete"; rel: string } | null;
   /** The `.twui.xml` paths in the open workspace pack — backs the Pack Editor tree. */
   workspaceLayouts: string[];
   /** Every `.twui.xml` in the active pack(s) — backs the pack content browser. */
@@ -340,6 +357,16 @@ export interface AppStore {
   /** "Insert from file" picker: open state + an optional pre-seeded source (pack-relative path). */
   insertOpen: boolean;
   insertSource: string | null;
+  /** Merge Mode (full-screen overlay): merge changes from a second file (B) into the active doc (A). */
+  mergeOpen: boolean;
+  /** The incoming file (B), loaded transiently for diffing — NOT opened as a tab. */
+  mergeSource: { doc: TwuiDocument; path: string; fromPack: boolean } | null;
+  /** The computed diff of B relative to the active doc (A); null before B is chosen/diffed. */
+  mergeDiff: MergeDiff | null;
+  /** Per-change acceptance, keyed by ChangeNode.id (independent of the diff so it stays a pure value). */
+  mergeAccepted: Record<string, boolean>;
+  /** Status / error line shown in the merge overlay. */
+  mergeStatus: string | null;
   backgrounds: string[];
   background: string | null;
   /** Active visualizer tool (left tool palette). */
@@ -395,6 +422,20 @@ export interface AppStore {
   /** Open the insert picker, optionally pre-seeded with a source (pack-relative path). */
   openInsertDialog: (source?: string) => void;
   closeInsertDialog: () => void;
+  /** Open / close the Merge Mode overlay. Closing discards the transient B + diff. */
+  openMergeDialog: () => void;
+  closeMergeDialog: () => void;
+  /** Load the incoming file B (disk or pack) and immediately diff it against the active doc. */
+  loadMergeSource: (path: string, fromPack: boolean) => Promise<void>;
+  /** (Re)compute the diff of the loaded B against the active doc; seeds a safe default selection
+   *  (everything accepted except component deletions). */
+  computeMergeDiff: () => void;
+  /** Accept (on) or reject (off) one change, cascading to its subtree + dependencies. */
+  toggleMergeAccept: (id: string, on: boolean) => void;
+  /** Accept or reject every change at once. */
+  setAllMergeAccepted: (on: boolean) => void;
+  /** Apply the accepted changes into the active doc as ONE undo step, then close the overlay. */
+  applyMerge: () => Promise<void>;
   /** Internal: (re)load the active doc's scripts/templates/ComponentCreator sub-layouts. Shared by
    *  openFile and the new-file/insert flows so they all resolve referenced resources identically. */
   hydrateDocResources: (doc: TwuiDocument, label: string) => Promise<void>;
@@ -420,6 +461,8 @@ export interface AppStore {
   createWorkspaceFile: (rel: string) => Promise<void>;
   /** Delete a `.twui.xml` from the workspace pack (and close its tab if open). */
   deleteWorkspaceFile: (rel: string) => Promise<void>;
+  /** Dismiss the vanilla-pack write warning popup. */
+  closeVanillaGuard: () => void;
   /** Open a file with a layer placement: "single" makes it the only composited file (active +
    *  editable, all others hidden); "top"/"bottom" add it as a visible reference layer at that
    *  z-order while keeping the file you were editing active. */
@@ -539,6 +582,19 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/** True when the open workspace pack is an official CA (vanilla) pack — any PFH type other than
+ *  "Mod" — AND the user hasn't opted into writing to vanilla packs. Writes must be blocked. */
+function vanillaWriteBlocked(s: {
+  workspacePackType: string | null;
+  settings: Settings;
+}): boolean {
+  return (
+    s.workspacePackType != null &&
+    s.workspacePackType !== "Mod" &&
+    !s.settings.editor.allowSaveIntoVanillaPack
+  );
+}
+
 /** Stable key identifying the active document for preview-binding config/rows. */
 function docKeyOf(s: {
   filePath: string | null;
@@ -634,6 +690,13 @@ function removeTab(s: AppStore, id: string): void {
   rememberTabs(s);
 }
 
+/** True when any data source that can serve images is active: a game data root (folder or
+ *  pack mode), an editable workspace pack, or a read-only overlay pack. Image display gates on
+ *  this rather than `dataRoot` alone, so a pack opened without a game data root still renders its
+ *  own images (the backend resolves them from the workspace/overlay source stack). */
+export const selectHasImageSource = (s: AppStore) =>
+  !!s.dataRoot || !!s.workspacePack || !!s.overlayPack;
+
 export const useStore = create<AppStore>()(
   persist(
     immer((set, get) => ({
@@ -656,6 +719,8 @@ export const useStore = create<AppStore>()(
     packPath: null,
     workspacePath: null,
     workspacePack: null,
+    workspacePackType: null,
+    vanillaGuard: null,
     workspaceLayouts: [],
     packLayouts: [],
     imageEpoch: 0,
@@ -690,6 +755,11 @@ export const useStore = create<AppStore>()(
     newFileOpen: false,
     insertOpen: false,
     insertSource: null,
+    mergeOpen: false,
+    mergeSource: null,
+    mergeDiff: null,
+    mergeAccepted: {},
+    mergeStatus: null,
     backgrounds: [],
     background: null,
     mode: DEFAULT_SETTINGS.visualizer.defaultMode,
@@ -1071,6 +1141,7 @@ export const useStore = create<AppStore>()(
         await ipc.newPackWorkspace(path);
         set((s) => {
           s.workspacePack = path;
+          s.workspacePackType = "Mod"; // WorkspacePack::create always stamps Mod.
           s.workspaceLayouts = [];
           s.imageEpoch++;
           s.status = `New pack ${baseName(path)}`;
@@ -1083,11 +1154,22 @@ export const useStore = create<AppStore>()(
     openPackWorkspace: async (path) => {
       try {
         const layouts = await ipc.openPackWorkspace(path);
+        // Record the pack's PFH type so the editor can guard writes to vanilla (non-Mod) CA packs.
+        let pfhType: string | null = null;
+        try {
+          pfhType = (await ipc.packWorkspaceStatus()).pfh_type ?? null;
+        } catch {
+          /* type unknown -> treated as non-vanilla (no false blocks) */
+        }
         set((s) => {
           s.workspacePack = path;
+          s.workspacePackType = pfhType;
           s.workspaceLayouts = layouts;
           s.imageEpoch++;
-          s.status = `Opened pack ${baseName(path)}`;
+          s.status =
+            pfhType && pfhType !== "Mod"
+              ? `Opened ${baseName(path)} (${pfhType} — vanilla CA pack)`
+              : `Opened pack ${baseName(path)}`;
         });
       } catch (e) {
         set((s) => { s.status = `Open pack error: ${e}`; });
@@ -1102,6 +1184,7 @@ export const useStore = create<AppStore>()(
       }
       set((s) => {
         s.workspacePack = null;
+        s.workspacePackType = null;
         s.workspaceLayouts = [];
         s.imageEpoch++;
       });
@@ -1119,6 +1202,10 @@ export const useStore = create<AppStore>()(
     },
 
     createWorkspaceFile: async (rel) => {
+      if (vanillaWriteBlocked(get())) {
+        set((s) => { s.vanillaGuard = { action: "create", rel }; });
+        return;
+      }
       const res = get().renderResolution;
       const width = res?.w ?? 1920;
       const height = res?.h ?? 1080;
@@ -1138,6 +1225,10 @@ export const useStore = create<AppStore>()(
     },
 
     deleteWorkspaceFile: async (rel) => {
+      if (vanillaWriteBlocked(get())) {
+        set((s) => { s.vanillaGuard = { action: "delete", rel }; });
+        return;
+      }
       try {
         await ipc.deleteWorkspaceLayout(rel);
         set((s) => {
@@ -1152,6 +1243,8 @@ export const useStore = create<AppStore>()(
         });
       }
     },
+
+    closeVanillaGuard: () => set((s) => { s.vanillaGuard = null; }),
 
     openFileAs: async (path, fromPack, mode) => {
       const prevActive = get().activeTabId;
@@ -1186,6 +1279,11 @@ export const useStore = create<AppStore>()(
       if (!doc) return;
       // Opened from the editable Pack Editor: write back into the pack + persist it (Ctrl+S).
       if (workspacePath) {
+        // Guard: never overwrite an official CA (vanilla) pack unless the user opted in.
+        if (vanillaWriteBlocked(get())) {
+          set((s) => { s.vanillaGuard = { action: "save", rel: workspacePath }; });
+          return;
+        }
         try {
           await ipc.saveWorkspaceLayout(workspacePath, doc);
           set((s) => {
@@ -1254,7 +1352,11 @@ export const useStore = create<AppStore>()(
     // Open/Save-As dialogs live here so the toolbar and keybinds share one path.
     openFileDialog: async () => {
       const path = await pickOpenFile({
-        filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
+        filters: [
+          { name: "TWUI Layout", extensions: ["xml"] },
+          // Pre-3K binary UI layouts are extensionless (e.g. Attila).
+          { name: "All Files", extensions: ["*"] },
+        ],
         defaultPath: get().dataRoot ?? undefined,
       });
       if (path) await get().openFile(path);
@@ -1444,6 +1546,116 @@ export const useStore = create<AppStore>()(
         s.insertSource = null;
       }),
 
+    // --- Merge Mode ---------------------------------------------------------------------------
+
+    openMergeDialog: () =>
+      set((s) => {
+        // Merge Mode diffs twui structure (hierarchy/components); binary UIC
+        // layouts are a different dialect.
+        if (s.doc && docFormat(s.doc) === "uic") {
+          s.status = "Merge Mode is not available for binary UI layouts";
+          return;
+        }
+        s.mergeOpen = true;
+        s.mergeStatus = null;
+      }),
+    closeMergeDialog: () =>
+      set((s) => {
+        s.mergeOpen = false;
+        s.mergeSource = null;
+        s.mergeDiff = null;
+        s.mergeAccepted = {};
+        s.mergeStatus = null;
+      }),
+
+    loadMergeSource: async (path, fromPack) => {
+      if (!get().doc) {
+        set((s) => { s.mergeStatus = "Open a base file (A) first."; });
+        return;
+      }
+      set((s) => { s.mergeStatus = `Loading ${baseName(path)}…`; });
+      try {
+        const doc = fromPack ? await ipc.readLayoutRel(path) : await ipc.readLayout(path);
+        set((s) => { s.mergeSource = { doc, path, fromPack }; });
+        get().computeMergeDiff();
+      } catch (e) {
+        set((s) => {
+          s.mergeSource = null;
+          s.mergeDiff = null;
+          s.mergeStatus = `Load error: ${e}`;
+        });
+      }
+    },
+
+    computeMergeDiff: () => {
+      const a = get().doc;
+      const src = get().mergeSource;
+      if (!a || !src) return;
+      try {
+        const diff = diffDocuments(a, src.doc);
+        // Default selection: accept everything EXCEPT component deletions (safe default — the user
+        // opts into removals explicitly).
+        const sel: Record<string, boolean> = {};
+        for (const id of allIds(diff)) sel[id] = true;
+        for (const r of diff.roots) if (r.kind === "remove") for (const sid of subtreeIds(r)) sel[sid] = false;
+        set((s) => {
+          s.mergeDiff = diff;
+          s.mergeAccepted = sel;
+          s.mergeStatus =
+            diff.roots.length === 0
+              ? "No differences — the files are identical."
+              : diff.migrationNote ?? (diff.related ? null : "Files look unrelated (low GUID overlap); review carefully.");
+        });
+      } catch (e) {
+        set((s) => { s.mergeStatus = `Diff error: ${e}`; });
+      }
+    },
+
+    toggleMergeAccept: (id, on) => {
+      const diff = get().mergeDiff;
+      if (!diff) return;
+      const sel = on
+        ? selectWithDeps(diff.byId, get().mergeAccepted, id)
+        : deselectWithDependents(diff.byId, get().mergeAccepted, id);
+      set((s) => { s.mergeAccepted = sel; });
+    },
+
+    setAllMergeAccepted: (on) => {
+      const diff = get().mergeDiff;
+      if (!diff) return;
+      const sel: Record<string, boolean> = {};
+      for (const id of allIds(diff)) sel[id] = on;
+      set((s) => { s.mergeAccepted = sel; });
+    },
+
+    applyMerge: async () => {
+      const diff = get().mergeDiff;
+      const acc = get().mergeAccepted;
+      if (!diff) return;
+      const accepted = new Set(Object.keys(acc).filter((k) => acc[k]));
+      if (accepted.size === 0) {
+        set((s) => { s.mergeStatus = "No changes selected."; });
+        return;
+      }
+      let report: ApplyReport | undefined;
+      get().mutate((doc) => {
+        report = applyChanges(doc, diff, accepted);
+      });
+      // Merged-in components may reference templates / ComponentCreator layouts A hadn't loaded.
+      const after = get().doc;
+      if (after) await get().hydrateDocResources(after, get().fileName ?? "layout");
+      set((s) => {
+        s.mergeOpen = false;
+        s.mergeSource = null;
+        s.mergeDiff = null;
+        s.mergeAccepted = {};
+        s.mergeStatus = null;
+        s.status = report
+          ? `Merged: ${report.modifies} modified, ${report.adds} added, ${report.removes} removed, ${report.moves} moved`
+          : "Merged";
+      });
+    },
+
     switchTab: (id) =>
       set((s) => {
         if (id === s.activeTabId) return;
@@ -1554,14 +1766,24 @@ export const useStore = create<AppStore>()(
     },
 
     saveAsDialog: async () => {
-      if (!get().doc) return;
+      const doc = get().doc;
+      if (!doc) return;
+      // Binary UIC layouts save as extensionless binary; suggest the original
+      // bare file name instead of forcing an .xml extension.
+      const isUic = docFormat(doc) === "uic";
       // Suggest the pack file's own name when saving a pack-opened file.
       const fromPackLike = get().packPath ?? get().workspacePath;
-      const suggested = fromPackLike ? baseName(fromPackLike) : undefined;
+      const suggested = isUic
+        ? baseName(get().fileName ?? "")
+        : fromPackLike
+          ? baseName(fromPackLike)
+          : undefined;
       const path = await pickSaveFile({
-        filters: [{ name: "TWUI Layout", extensions: ["xml"] }],
+        filters: isUic
+          ? [{ name: "All Files", extensions: ["*"] }]
+          : [{ name: "TWUI Layout", extensions: ["xml"] }],
         defaultPath: get().dataRoot ?? undefined,
-        defaultFileName: suggested,
+        defaultFileName: suggested || undefined,
       });
       if (path) await get().saveAs(path);
     },
@@ -1827,6 +2049,9 @@ export const useStore = create<AppStore>()(
     migrateVersion: (target) => {
       const cur = get().doc;
       if (!cur) return null;
+      // Version migration is a twui-XML concept; binary UIC layouts have their
+      // own (unrelated) version numbering.
+      if (docFormat(cur) === "uic") return null;
       let result: MigrationResult | null = null;
       get().mutate((doc) => {
         result = migrateLayout(doc, target);
@@ -2195,7 +2420,12 @@ export const useStore = create<AppStore>()(
     },
 
     applyComponentRaw: (guid, el) => {
-      get().mutate((doc) => replaceComponent(doc, guid, el));
+      get().mutate((doc) => {
+        // Decoded binary UIC docs have no <components> section; replace by
+        // the synthetic `this` GUID anywhere in the tree instead.
+        if (docFormat(doc) === "uic") replaceByThis(doc, guid, el);
+        else replaceComponent(doc, guid, el);
+      });
       const newGuid = guidOf(el);
       if (newGuid && newGuid !== guid) set((s) => {
         s.selectedGuid = newGuid;

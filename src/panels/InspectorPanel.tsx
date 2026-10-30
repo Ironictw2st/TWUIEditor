@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { pickOpenFile } from "../ipc/dialog";
-import { useStore } from "../state/store";
+import { useStore, selectHasImageSource } from "../state/store";
 import {
   ancestorGuids,
   childByTag,
   componentImages,
   componentMap,
   componentStates,
+  docFormat,
   elementChildren,
+  findByThis,
   getAttr,
   getLayoutEngine,
   guidOf,
@@ -15,8 +17,10 @@ import {
   layoutVersion,
   stateImages,
 } from "../twui/doc";
+import { isUicPrimitive, uicLabel, uicRoot, uicVersion } from "../twui/uic";
 import { describeMigration, previewMigration } from "../twui/migrate";
 import { componentScriptId } from "../twui/script";
+import { staticTooltipOrigin, stateTextOrigin } from "../twui/textSource";
 import { inheritedContexts, Inheritance, representativeScope } from "../twui/inherit";
 import {
   callbacks,
@@ -37,12 +41,15 @@ import {
   MIN_PARENT_IMAGE_VERSION,
 } from "../twui/template";
 import { extractDataPack, LuaValue } from "../twui/lua";
-import { bindingHint } from "../twui/cco_docs";
+import { bindingHint, bindingStatus, type BindingStatus } from "../twui/cco_docs";
+import { formatExpr, isMultiline, splitComponentRefs } from "../twui/cco_format";
 import { shorthandHint } from "../twui/cco_shorthand";
 import { componentCreatorLayout } from "../twui/creator";
 import { attrInVersion, AttrKind, attrsFor, DOCKING_VALUES, schemaFor, validateAttr } from "../twui/schema";
 import { locateHier } from "../twui/mutate";
-import { PreviewBindingConfig, PreviewMapping, RawElement, TwuiDocument } from "../types/twui";
+import { CcoDocs, isElement, PreviewBindingConfig, PreviewMapping, RawElement, TwuiDocument } from "../types/twui";
+import { StructuredExprEditor } from "./StructuredExprEditor";
+import { useExprAutocomplete, AutocompleteCtx } from "./ExprAutocomplete";
 import { imageUrl, parseElement, readDbTable, serializeElement } from "../ipc/commands";
 
 /** Controlled text field that commits to the store on blur / Enter only. */
@@ -71,7 +78,7 @@ function Field({
     <label className="flex items-center gap-2 mb-1">
       {label && <span className="text-textMuted text-[11px] w-28 shrink-0">{label}</span>}
       <input
-        className="flex-1"
+        className="flex-1 min-w-0"
         style={{ width }}
         value={local}
         onChange={(e) => setLocal(e.target.value)}
@@ -200,7 +207,7 @@ function SchemaField({
           />
         )}
         <input
-          className="flex-1"
+          className="flex-1 min-w-0"
           value={local}
           placeholder={schema.default}
           onChange={(e) => setLocal(e.target.value)}
@@ -672,7 +679,6 @@ function ImagePathField({
 function ImageMetricBlock({
   img,
   ci,
-  dataRoot,
   stateGuid,
   index,
   count,
@@ -680,7 +686,6 @@ function ImageMetricBlock({
 }: {
   img: RawElement;
   ci: { imagepath: string } | undefined;
-  dataRoot: string | null;
   stateGuid: string;
   index: number;
   count: number;
@@ -691,6 +696,7 @@ function ImageMetricBlock({
   const removeChild = useStore((s) => s.removeChild);
   const editChildAttr = useStore((s) => s.editChildAttr);
   const imageEpoch = useStore((s) => s.imageEpoch);
+  const hasImageSource = useStore(selectHasImageSource);
   const path = ci?.imagepath;
   const ciGuid = getAttr(img, "componentimage");
   // Image-metric <image> entries usually carry no guid, so they can't be edited via the guid-based
@@ -699,7 +705,7 @@ function ImageMetricBlock({
   return (
     <div className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
       <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
-        {path && dataRoot ? (
+        {path && hasImageSource ? (
           <img
             src={imageUrl(path, imageEpoch)}
             alt=""
@@ -736,11 +742,38 @@ function ImageMetricBlock({
   );
 }
 
+/** Read-only "what the game shows" hint under a state's attributes: the static text and
+ *  tooltip after loc resolution (textlabel/tooltiplabel -> uied_component_texts), so a
+ *  missing loc row or a `textlocalised` flag that's off is visible at a glance. */
+function ResolvedTextHint({ comp, state }: { comp: RawElement; state: RawElement }) {
+  const loc = useStore((s) => s.loc);
+  const text = stateTextOrigin(comp, state, loc ?? undefined);
+  const tip = staticTooltipOrigin(comp, state, loc ?? undefined);
+  const rows: { label: string; o: typeof text }[] = [];
+  if (text.key || text.text) rows.push({ label: "text", o: text });
+  if (tip.key || tip.text) rows.push({ label: "tooltip", o: tip });
+  if (!rows.length) return null;
+  return (
+    <div className="mt-1 mb-1 text-[10px] border-l-2 border-edge pl-2">
+      {rows.map(({ label, o }) => (
+        <div key={label} className="flex gap-2" title={o.key}>
+          <span className="text-textMuted w-24 shrink-0">{label} resolves to</span>
+          <span className="flex-1 min-w-0 break-words">
+            {o.text !== undefined ? <span className="text-text">{o.text}</span> : <span className="text-textMuted">(empty)</span>}
+            {!o.localised && o.key && <span className="text-textMuted italic"> (no loc row: literal used)</span>}
+            {o.localised && <span className="text-textMuted italic"> (localised)</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StateBlock({
   state,
+  comp,
   active,
   ciByGuid,
-  dataRoot,
   compGuid,
   index,
   count,
@@ -748,9 +781,9 @@ function StateBlock({
   ciOptions,
 }: {
   state: RawElement;
+  comp: RawElement;
   active?: boolean;
   ciByGuid: Map<string, { imagepath: string }>;
-  dataRoot: string | null;
   compGuid: string;
   index: number;
   count: number;
@@ -766,7 +799,7 @@ function StateBlock({
   return (
     <div className={`mb-3 border rounded p-2 ${active ? "border-accent bg-accent/10" : "border-edge"}`}>
       <div className="flex items-center gap-2 mb-1.5">
-        <div className="text-[11px] text-accent flex-1 min-w-0 truncate">
+        <div className="text-[11px] text-accent flex-1 min-w-0 truncate" title={a("name") ?? state.tag}>
           {a("name") ?? state.tag}
           {active && <span className="ml-1 text-gray-500">· previewing</span>}
         </div>
@@ -801,6 +834,7 @@ function StateBlock({
         ]}
       />
       <AddAttr guid={guid} kind="state" present={state.attrs.map((x) => x[0])} />
+      <ResolvedTextHint comp={comp} state={state} />
       <div className="mt-2">
         <div className="flex items-center gap-2 mb-1">
           <div className="text-[10px] uppercase tracking-wide text-gray-500 flex-1">Images ({metrics.length})</div>
@@ -811,7 +845,6 @@ function StateBlock({
             key={guidOf(img) ?? `m${i}`}
             img={img}
             ci={ciByGuid.get(getAttr(img, "componentimage") ?? "")}
-            dataRoot={dataRoot}
             stateGuid={guid}
             index={i}
             count={metrics.length}
@@ -927,13 +960,14 @@ function LayoutEngineSection({ guid, comp }: { guid: string; comp: RawElement })
 /** A resolved/effective image (override_images + template, parent-determined slot 0).
  *  Read-only: templated/override images are computed, not backed by an editable element
  *  (edit them via the Raw tab to keep the file byte-identical). */
-function EffectiveImageBlock({ img, dataRoot }: { img: EffectiveImage; dataRoot: string | null }) {
+function EffectiveImageBlock({ img }: { img: EffectiveImage }) {
   const { imagepath: path, width, height } = img;
   const imageEpoch = useStore((s) => s.imageEpoch);
+  const hasImageSource = useStore(selectHasImageSource);
   return (
     <div className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
       <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
-        {path && dataRoot ? (
+        {path && hasImageSource ? (
           <img
             src={imageUrl(path, imageEpoch)}
             alt=""
@@ -966,6 +1000,7 @@ function ComponentImagesSection({ guid, comp, dataRoot }: { guid: string; comp: 
   const deleteComponentImage = useStore((s) => s.deleteComponentImage);
   const moveChild = useStore((s) => s.moveChild);
   const imageEpoch = useStore((s) => s.imageEpoch);
+  const hasImageSource = useStore(selectHasImageSource);
   return (
     <Section title={`Component images (${cis.length})`} defaultOpen={cis.length <= 4}>
       <div className="flex items-center gap-2 mb-2">
@@ -979,7 +1014,7 @@ function ComponentImagesSection({ guid, comp, dataRoot }: { guid: string; comp: 
         return (
           <div key={ciGuid || `ci${i}`} className="mb-2 border border-edge rounded p-2 flex gap-2 items-start">
             <div className="w-12 h-12 shrink-0 bg-sunken border border-edge rounded flex items-center justify-center overflow-hidden">
-              {path && dataRoot ? (
+              {path && hasImageSource ? (
                 <img
                   src={imageUrl(path, imageEpoch)}
                   alt=""
@@ -1112,7 +1147,10 @@ function ContainerListSection({
         return (
           <div key={guidOf(row) ?? `${rowTag}${i}`} className="mb-2 border border-edge rounded p-2">
             <div className="flex items-center gap-2 mb-1">
-              <div className="text-[11px] text-accent flex-1 min-w-0 truncate">
+              <div
+                className="text-[11px] text-accent flex-1 min-w-0 truncate"
+                title={rowLabel ? rowLabel(row, i) : `${row.tag} ${i + 1}`}
+              >
                 {rowLabel ? rowLabel(row, i) : `${row.tag} ${i + 1}`}
               </div>
               <RowControls
@@ -1411,6 +1449,77 @@ function PreviewDataSection({ doc, guid, hierNode }: { doc: TwuiDocument; guid: 
   );
 }
 
+/** Inspector branch for decoded binary UIC layouts (root <ui>, pre-3K games):
+ *  a generic attribute editor over the selected element plus the raw fragment
+ *  editor. Undeciphered positional children (<i/>, <flt/>, <yes/>, ...) are
+ *  edited through the Raw tab; the binary encoder validates structure at save
+ *  time and rejects malformed edits, so nothing can corrupt on disk. */
+function UicInspector({ doc, guid }: { doc: TwuiDocument; guid: string | null }) {
+  const applyComponentRaw = useStore((s) => s.applyComponentRaw);
+  const [mode, setMode] = useState<"clean" | "raw">("clean");
+  // Fall back to the root uientry so opening a file immediately shows content.
+  const selected = guid ? findByThis(doc, guid) : undefined;
+  const el = selected ?? uicRoot(doc);
+  const elGuid = el ? getAttr(el, "this") ?? "" : "";
+  if (!el || !elGuid) {
+    return <Empty msg="Select an element in the tree." />;
+  }
+  const primitives = el.children.filter(isElement).filter(isUicPrimitive);
+
+  const tab = (m: "clean" | "raw", label: string) => (
+    <button
+      className={`px-2 py-0.5 rounded text-[11px] border ${
+        mode === m ? "bg-accent/30 border-accent" : "bg-button border-edge hover:bg-buttonHover"
+      }`}
+      onClick={() => setMode(m)}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <>
+      <div className="px-3 h-9 flex items-center gap-2 border-b border-edge shrink-0">
+        <span className="font-semibold text-[12px] truncate">{uicLabel(el)}</span>
+        <span className="text-[10px] text-gray-500 shrink-0">binary v{uicVersion(doc)}</span>
+        <div className="flex-1" />
+        {tab("clean", "Clean")}
+        {tab("raw", "Raw")}
+      </div>
+      {mode === "raw" ? (
+        <div className="flex-1 overflow-auto">
+          <div className="px-3 py-1 text-[10px] text-gray-600 truncate">{elGuid}</div>
+          <RawEditor
+            title="Element"
+            el={el}
+            seedKey={elGuid}
+            onApply={(p) => applyComponentRaw(elGuid, p)}
+          />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto">
+          <Section title="Attributes">
+            {el.attrs
+              .filter(([k]) => k !== "this")
+              .map(([k, v]) => (
+                <Field key={`${elGuid}:${k}`} guid={elGuid} attrKey={k} value={v} label={k} />
+              ))}
+          </Section>
+          {primitives.length > 0 && (
+            <Section title="Undeciphered fields" defaultOpen={false}>
+              <div className="px-3 py-1.5 text-[11px] text-gray-500">
+                {primitives.length} positional value{primitives.length === 1 ? "" : "s"} not yet
+                deciphered by the community. Edit them in the Raw tab; order and count are
+                validated when the binary is rebuilt on save.
+              </div>
+            </Section>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function InspectorPanel() {
   const doc = useStore((s) => s.doc);
   const selectedGuid = useStore((s) => s.selectedGuid);
@@ -1430,6 +1539,9 @@ export default function InspectorPanel() {
 
   if (!doc) {
     return <Empty msg="No file open." />;
+  }
+  if (docFormat(doc) === "uic") {
+    return <UicInspector doc={doc} guid={selectedGuid} />;
   }
   if (!comp) {
     return <Empty msg="Select a component in the tree or visualizer." />;
@@ -1542,7 +1654,7 @@ export default function InspectorPanel() {
 
         <BindingsSection doc={doc} comp={comp} guid={guid} />
 
-        <CallbacksSection guid={guid} comp={comp} />
+        <CallbacksSection guid={guid} comp={comp} doc={doc} />
 
         <ContainerListSection
           ownerGuid={guid}
@@ -1590,7 +1702,7 @@ export default function InspectorPanel() {
         <Section title={`Images (${images.length})`} defaultOpen={images.length <= 6}>
           {images.length === 0 && <div className="text-gray-600 text-[11px]">No images.</div>}
           {images.map((im, i) => (
-            <EffectiveImageBlock key={`${im.imagepath}:${i}`} img={im} dataRoot={dataRoot} />
+            <EffectiveImageBlock key={`${im.imagepath}:${i}`} img={im} />
           ))}
         </Section>
 
@@ -1737,7 +1849,7 @@ function InheritanceSection({ doc, guid }: { doc: TwuiDocument; guid: string }) 
       {items.map((it, i) => (
         <div key={i} className="flex items-center gap-2 mb-1 text-[12px]">
           <span className="text-textMuted w-16 shrink-0">{INHERIT_LABEL[it.kind]}</span>
-          {it.label && <span className="text-text truncate">{it.label}</span>}
+          {it.label && <span className="text-text truncate" title={it.label}>{it.label}</span>}
           <button
             className="ml-auto text-[11px] text-accent hover:underline shrink-0"
             onClick={() => select(it.fromGuid)}
@@ -1809,26 +1921,189 @@ function bindingRows(comp: RawElement, scope: Scope, loc?: Record<string, string
   return out;
 }
 
-/** Editable binding expression — commits to the callback on blur / Enter. */
-function ExprField({ guid, index, expr }: { guid: string; index: number; expr: string }) {
+/** Editable binding expression — commits to the callback on blur / Cmd+Enter, with
+ *  type-aware autocomplete. */
+function ExprField({
+  guid,
+  index,
+  expr,
+  selfType,
+  docs,
+}: {
+  guid: string;
+  index: number;
+  expr: string;
+  selfType?: string;
+  docs?: CcoDocs | null;
+}) {
   const setCallbackFunc = useStore((s) => s.setCallbackFunc);
   const [local, setLocal] = useState(expr);
   useEffect(() => setLocal(expr), [expr, guid, index]);
   const commit = () => {
     if (local !== expr) setCallbackFunc(guid, index, local);
   };
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const ac = useExprAutocomplete(ref, { docs: docs ?? null, selfType }, local, setLocal);
   return (
-    <textarea
-      className="w-full text-[10px] font-mono leading-snug bg-codebg border border-edge rounded px-1.5 py-1 outline-none resize-none"
-      rows={Math.min(6, Math.max(1, Math.ceil(local.length / 48)))}
-      spellCheck={false}
-      value={local}
-      onChange={(e) => setLocal(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) (e.target as HTMLTextAreaElement).blur();
-      }}
-    />
+    <div className="w-full">
+      <textarea
+        ref={ref}
+        className="w-full text-[10px] font-mono leading-snug bg-codebg border border-edge rounded px-1.5 py-1 outline-none resize-none"
+        rows={Math.min(6, Math.max(1, Math.ceil(local.length / 48)))}
+        spellCheck={false}
+        value={local}
+        onChange={ac.onChange}
+        onBlur={() => {
+          ac.onBlur();
+          commit();
+        }}
+        onKeyDown={(e) => {
+          ac.onKeyDown(e);
+          if (e.defaultPrevented) return;
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.blur();
+        }}
+      />
+      {ac.popover}
+    </div>
+  );
+}
+
+/** Resolver mapping a component GUID → its id, for humanizing `Component("<guid>")` refs in
+ *  expression views. Returns undefined for GUIDs not in this layout (e.g. cross-file refs). */
+function useComponentResolver(doc: TwuiDocument) {
+  return useMemo(() => {
+    const m = componentMap(doc);
+    return (g: string) => {
+      const c = m.get(g);
+      return c ? getAttr(c, "id") : undefined;
+    };
+  }, [doc]);
+}
+
+/** Render one expression line, swapping resolvable `Component("<guid>")` references for the
+ *  component's id (dotted-underlined, hover shows the original GUID via `title`). */
+function renderRefs(text: string, resolve?: (guid: string) => string | undefined): ReactNode {
+  if (!resolve) return text;
+  const segs = splitComponentRefs(text);
+  if (segs.length === 1 && segs[0].kind === "text") return text;
+  return segs.map((seg, i) => {
+    if (seg.kind === "text") return <span key={i}>{seg.text}</span>;
+    const id = resolve(seg.guid);
+    if (!id) return <span key={i}>{seg.raw}</span>;
+    return (
+      <span key={i}>
+        Component(
+        <span className="border-b border-dotted border-textMuted cursor-help" title={seg.raw}>
+          {id}
+        </span>
+        <sup className="text-textMuted">#</sup>)
+      </span>
+    );
+  });
+}
+
+/** Read-only pretty rendering of a callback condition: each operand on its own line,
+ *  broken at top-level `&&`/`||` (shown as bold `AND`/`OR`), lambda bindings surfaced as
+ *  dimmed `let` context lines, indentation reflecting the paren grouping. `resolve` swaps
+ *  `Component("<guid>")` refs for readable ids. Display-only — never edited, so it can't
+ *  affect round-trip fidelity. */
+function ExprView({
+  expr,
+  resolve,
+}: {
+  expr: string;
+  resolve?: (guid: string) => string | undefined;
+}) {
+  const lines = useMemo(() => formatExpr(expr), [expr]);
+  return (
+    <div className="font-mono text-[10px] leading-snug bg-codebg border border-edge rounded px-2 py-1 mb-1">
+      {lines.map((ln, i) => (
+        <div key={i} className="flex" style={{ paddingLeft: ln.depth * 12 }}>
+          <span
+            className={`shrink-0 w-9 pr-1 text-right select-none ${
+              ln.binding ? "text-textMuted" : "font-bold text-accent/80"
+            }`}
+          >
+            {ln.binding ? "let" : ln.connective ?? ""}
+          </span>
+          <span className={`min-w-0 break-all ${ln.binding ? "text-textMuted" : "text-text"}`}>
+            {renderRefs(ln.text, resolve)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Wraps a callback expression: shows the read-only `ExprView` by default with a small
+ *  `edit` toggle that swaps in the raw editable control (passed as children). An empty
+ *  expression drops straight to the editable control so a new funcId can be typed. */
+function ExprBlock({
+  expr,
+  resolve,
+  selfType,
+  docs,
+  onCommit,
+  children,
+}: {
+  expr: string;
+  resolve?: (guid: string) => string | undefined;
+  selfType?: string;
+  docs?: CcoDocs | null;
+  /** Commit sink for structured edits (decoded compact string). When provided, the block
+   *  defaults to the editable structured view; absent → read-only pretty view. */
+  onCommit?: (compactDecoded: string) => void;
+  children: ReactNode;
+}) {
+  const [mode, setMode] = useState<"view" | "raw">("view");
+  const toggle = (label: string, to: "view" | "raw") => (
+    <button className="text-[10px] text-textMuted hover:text-text px-1" onClick={() => setMode(to)}>
+      {label}
+    </button>
+  );
+  // Only compound conditions (top-level `&&`/`||`) benefit from the broken-out view; a
+  // single leaf (or empty funcId) is already legible in the wrapping editable control.
+  if (!expr || !isMultiline(expr)) return <>{children}</>;
+
+  // Structured editing is available when a commit sink is provided (default view); the `raw`
+  // toggle drops to the plain textarea for larger restructures (add/remove operands).
+  if (onCommit) {
+    if (mode === "raw") {
+      return (
+        <div>
+          {children}
+          <div className="flex justify-end">{toggle("structured", "view")}</div>
+        </div>
+      );
+    }
+    return (
+      <div>
+        <div className="flex justify-end">{toggle("raw", "raw")}</div>
+        <StructuredExprEditor
+          expr={expr}
+          resolve={resolve}
+          selfType={selfType}
+          docs={docs ?? null}
+          onCommit={onCommit}
+        />
+      </div>
+    );
+  }
+
+  // No commit sink: keep the read-only pretty view with an edit toggle to the raw field.
+  if (mode === "raw") {
+    return (
+      <div>
+        {children}
+        <div className="flex justify-end">{toggle("view", "view")}</div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="flex justify-end">{toggle("edit", "raw")}</div>
+      <ExprView expr={expr} resolve={resolve} />
+    </div>
   );
 }
 
@@ -1861,6 +2136,21 @@ function EmbeddedLayoutSection({ comp }: { comp: RawElement }) {
   );
 }
 
+/** Chip styling/tooltips for the metadata-verification status of a binding
+ *  (see reference/cco-schema-sources.md — the asymmetric proof rule). */
+const BINDING_STATUS_STYLE: Record<BindingStatus, string> = {
+  documented: "text-emerald-400/90 border-emerald-400/30",
+  extension: "text-sky-400/90 border-sky-400/30",
+  undocumented: "text-amber-400 border-amber-400/40",
+  unverifiable: "text-gray-500 border-gray-600/40",
+};
+const BINDING_STATUS_TITLE: Record<BindingStatus, string> = {
+  documented: "Property exists on this type (ui/metadata.json symbols)",
+  extension: "Resolves via a ui/cco/*.json shorthand macro",
+  undocumented: "Not found on this metadata-verified type — likely a dead binding",
+  unverifiable: "Type has no symbols in ui/metadata.json, so it cannot be checked",
+};
+
 /** Show the component's script-context lookups (callbacks) + resolved values. */
 function BindingsSection({ doc, comp, guid }: { doc: TwuiDocument; comp: RawElement; guid: string }) {
   const scriptText = useStore((s) => s.scriptConn.text);
@@ -1874,12 +2164,14 @@ function BindingsSection({ doc, comp, guid }: { doc: TwuiDocument; comp: RawElem
     [dataPackOverride, scriptText, scriptId]
   );
   const ccoDocs = useStore((s) => s.ccoDocs);
+  const setCallbackFunc = useStore((s) => s.setCallbackFunc);
   const ccoShorthand = useStore((s) => s.ccoShorthand);
   const scope = useMemo(
     () => ({ ...representativeScope(doc, guid, dataPack), shorthand: ccoShorthand ?? undefined }),
     [doc, guid, dataPack, ccoShorthand]
   );
   const rows = useMemo(() => bindingRows(comp, scope, loc), [comp, scope, loc]);
+  const resolve = useComponentResolver(doc);
   if (rows.length === 0) return null;
   const fromList = scope.entry !== undefined;
   return (
@@ -1890,13 +2182,30 @@ function BindingsSection({ doc, comp, guid }: { doc: TwuiDocument; comp: RawElem
       {rows.map((r, i) => {
         const hint = bindingHint(r.expr, r.objectId, ccoDocs);
         const macro = shorthandHint(r.expr, r.objectId, ccoShorthand);
+        const status = bindingStatus(r.expr, r.objectId, ccoDocs, ccoShorthand);
         return (
           <div key={i} className="mb-2">
             <div className="flex items-baseline gap-2 mb-0.5">
               <span className="text-textMuted text-[11px] w-16 shrink-0">{r.label}</span>
-              <span className="text-[12px] text-accent break-all">{r.value}</span>
+              <span className="flex-1 min-w-0 text-[12px] text-accent break-all">{r.value}</span>
+              {status && (
+                <span
+                  className={`shrink-0 text-[9px] px-1 rounded border ${BINDING_STATUS_STYLE[status]}`}
+                  title={BINDING_STATUS_TITLE[status]}
+                >
+                  {status}
+                </span>
+              )}
             </div>
-            <ExprField guid={guid} index={r.index} expr={r.expr} />
+            <ExprBlock
+              expr={r.expr}
+              resolve={resolve}
+              selfType={r.objectId}
+              docs={ccoDocs}
+              onCommit={(v) => setCallbackFunc(guid, r.index, v)}
+            >
+              <ExprField guid={guid} index={r.index} expr={r.expr} selfType={r.objectId} docs={ccoDocs} />
+            </ExprBlock>
             {hint && (
               <div className="text-[10px] text-gray-500 mt-0.5 break-words">
                 <span className="text-textMuted">{hint.name}</span>
@@ -1929,12 +2238,19 @@ function CommitField({
   label,
   value,
   decode,
+  multiline,
+  autocomplete,
   resetKey,
   onCommit,
 }: {
   label: string;
   value: string | undefined;
   decode?: boolean;
+  /** Render a wrapping, auto-growing textarea instead of a single-line input (for long
+   *  expressions). Enter still commits — a newline is never injected into the value. */
+  multiline?: boolean;
+  /** When set (expression fields only), attach type-aware autocomplete to the textarea. */
+  autocomplete?: AutocompleteCtx;
   resetKey: string;
   onCommit: (value: string) => void;
 }) {
@@ -1944,18 +2260,47 @@ function CommitField({
   const commit = () => {
     if (local !== shown) onCommit(local);
   };
+  // Hook is called unconditionally (docs:null → inert); only wired to the textarea branch.
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const ac = useExprAutocomplete(taRef, autocomplete ?? { docs: null }, local, setLocal);
   return (
-    <label className="flex items-center gap-2 mb-1">
+    <label className={`flex gap-2 mb-1 ${multiline ? "items-start" : "items-center"}`}>
       <span className={LABEL_CLS}>{label}</span>
-      <input
-        className="flex-1"
-        value={local}
-        onChange={(e) => setLocal(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-        }}
-      />
+      {multiline ? (
+        <div className="flex-1 min-w-0">
+          <textarea
+            ref={taRef}
+            className="w-full text-[10px] font-mono leading-snug bg-codebg border border-edge rounded px-1.5 py-1 outline-none resize-none"
+            rows={Math.min(6, Math.max(1, Math.ceil(local.length / 48)))}
+            spellCheck={false}
+            value={local}
+            onChange={ac.onChange}
+            onBlur={() => {
+              ac.onBlur();
+              commit();
+            }}
+            onKeyDown={(e) => {
+              ac.onKeyDown(e);
+              if (e.defaultPrevented) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            }}
+          />
+          {ac.popover}
+        </div>
+      ) : (
+        <input
+          className="flex-1 min-w-0"
+          value={local}
+          onChange={(e) => setLocal(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+        />
+      )}
     </label>
   );
 }
@@ -1968,16 +2313,20 @@ function CallbackProps({
   tag,
   cbIndex,
   el,
+  resolve,
 }: {
   guid: string;
   tag: string;
   cbIndex: number;
   el: RawElement;
+  resolve?: (guid: string) => string | undefined;
 }) {
   const addCallbackProp = useStore((s) => s.addCallbackProp);
   const setCallbackPropAttr = useStore((s) => s.setCallbackPropAttr);
   const moveCallbackProp = useStore((s) => s.moveCallbackProp);
   const removeCallbackProp = useStore((s) => s.removeCallbackProp);
+  const ccoDocs = useStore((s) => s.ccoDocs);
+  const selfType = getAttr(el, "context_object_id");
   const props = childByTag(el, "child_m_user_properties");
   const propEls = props ? elementChildren(props) : [];
   return (
@@ -1997,13 +2346,23 @@ function CallbackProps({
               value={getAttr(p, "name")}
               onCommit={(v) => setCallbackPropAttr(guid, tag, cbIndex, pi, "name", v)}
             />
-            <CommitField
-              label="value"
-              decode
-              resetKey={`${guid}:${tag}:${cbIndex}:${pi}:value`}
-              value={getAttr(p, "value")}
+            <ExprBlock
+              resolve={resolve}
+              selfType={selfType}
+              docs={ccoDocs}
+              expr={getAttr(p, "value") ? decodeEntities(getAttr(p, "value")!) : ""}
               onCommit={(v) => setCallbackPropAttr(guid, tag, cbIndex, pi, "value", v)}
-            />
+            >
+              <CommitField
+                label="value"
+                decode
+                multiline
+                autocomplete={{ docs: ccoDocs, selfType }}
+                resetKey={`${guid}:${tag}:${cbIndex}:${pi}:value`}
+                value={getAttr(p, "value")}
+                onCommit={(v) => setCallbackPropAttr(guid, tag, cbIndex, pi, "value", v)}
+              />
+            </ExprBlock>
           </div>
           <RowControls
             index={pi}
@@ -2019,7 +2378,9 @@ function CallbackProps({
 
 /** Raw editable list of the component's <callback_with_context> entries (add/delete/reorder + the
  *  three callback attributes). Complements the resolved BindingsSection above. */
-function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
+function CallbacksSection({ guid, comp, doc }: { guid: string; comp: RawElement; doc: TwuiDocument }) {
+  const resolve = useComponentResolver(doc);
+  const ccoDocs = useStore((s) => s.ccoDocs);
   const addCallback = useStore((s) => s.addCallback);
   const setCallbackAttr = useStore((s) => s.setCallbackAttr);
   const moveChild = useStore((s) => s.moveChild);
@@ -2044,7 +2405,10 @@ function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
       {rows.map((r, k) => (
         <div key={k} className="mb-2 border border-edge rounded p-2">
           <div className="flex items-center gap-2 mb-1">
-            <div className="text-[11px] text-accent flex-1 min-w-0 truncate">
+            <div
+              className="text-[11px] text-accent flex-1 min-w-0 truncate"
+              title={getAttr(r.el, "callback_id") || "(callback)"}
+            >
               {getAttr(r.el, "callback_id") || "(callback)"}
             </div>
             <RowControls
@@ -2066,14 +2430,28 @@ function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
             value={getAttr(r.el, "context_object_id")}
             onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "context_object_id", v)}
           />
-          <CommitField
-            label="function"
-            decode
-            resetKey={`${guid}:${r.tag}:${r.index}:context_function_id`}
-            value={getAttr(r.el, "context_function_id")}
+          <ExprBlock
+            resolve={resolve}
+            selfType={getAttr(r.el, "context_object_id")}
+            docs={ccoDocs}
+            expr={
+              getAttr(r.el, "context_function_id")
+                ? decodeEntities(getAttr(r.el, "context_function_id")!)
+                : ""
+            }
             onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "context_function_id", v)}
-          />
-          <CallbackProps guid={guid} tag={r.tag} cbIndex={r.index} el={r.el} />
+          >
+            <CommitField
+              label="function"
+              decode
+              multiline
+              autocomplete={{ docs: ccoDocs, selfType: getAttr(r.el, "context_object_id") }}
+              resetKey={`${guid}:${r.tag}:${r.index}:context_function_id`}
+              value={getAttr(r.el, "context_function_id")}
+              onCommit={(v) => setCallbackAttr(guid, r.tag, r.index, "context_function_id", v)}
+            />
+          </ExprBlock>
+          <CallbackProps guid={guid} tag={r.tag} cbIndex={r.index} el={r.el} resolve={resolve} />
         </div>
       ))}
     </Section>
@@ -2084,7 +2462,6 @@ function CallbacksSection({ guid, comp }: { guid: string; comp: RawElement }) {
 function StatesSection({ guid, comp, states }: { guid: string; comp: RawElement; states: RawElement[] }) {
   const preview = useStore((s) => s.previewState[guid]);
   const setPreviewState = useStore((s) => s.setPreviewState);
-  const dataRoot = useStore((s) => s.dataRoot);
   const addState = useStore((s) => s.addState);
   const names = states.map((s) => getAttr(s, "name") ?? "");
   // componentimage guid -> imagepath, so each state's imagemetrics can show a thumbnail.
@@ -2128,9 +2505,9 @@ function StatesSection({ guid, comp, states }: { guid: string; comp: RawElement;
             <StateBlock
               key={guidOf(s) ?? `s${i}`}
               state={s}
+              comp={comp}
               active={(getAttr(s, "name") ?? "") === preview}
               ciByGuid={ciByGuid}
-              dataRoot={dataRoot}
               compGuid={guid}
               index={i}
               count={states.length}

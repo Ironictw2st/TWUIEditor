@@ -66,11 +66,13 @@ export default function DiagnosisPanel() {
   const doc = useStore((s) => s.doc);
   const activeTabId = useStore((s) => s.activeTabId);
   const select = useStore((s) => s.select);
+  const ccoDocs = useStore((s) => s.ccoDocs);
+  const ccoShorthand = useStore((s) => s.ccoShorthand);
   const [results, setResults] = useState<Diagnostic[]>([]);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
-    setResults(doc ? runDiagnostics(doc) : []);
+    setResults(doc ? runDiagnostics(doc, { ccoDocs, ccoShorthand }) : []);
     // Intentionally not keyed on `doc`: re-run on open / tab switch / Refresh only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, nonce]);

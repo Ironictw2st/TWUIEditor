@@ -19,6 +19,7 @@ fn compress_schemas() {
     for (src_name, out_name) in [
         ("schema_3k.ron", "schema_3k.ron.zst"),
         ("schema_wh3.ron", "schema_wh3.ron.zst"),
+        ("schema_att.ron", "schema_att.ron.zst"),
     ] {
         let src = Path::new(&manifest)
             .join("..")

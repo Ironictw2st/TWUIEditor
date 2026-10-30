@@ -39,6 +39,14 @@ export function childByTag(el: RawElement, tag: string): RawElement | undefined 
   return elementChildren(el).find((c) => c.tag === tag);
 }
 
+/** Document format: text twui (root <layout>) or a decoded binary UIC layout
+ *  (root <ui>, pre-3K games such as Attila). UIC docs use a different dialect
+ *  (uientry trees with positional typed children) and re-encode to binary on
+ *  save, so twui-specific panels and rules must gate on this. */
+export function docFormat(doc: TwuiDocument): "twui" | "uic" {
+  return doc.root.tag === "ui" ? "uic" : "twui";
+}
+
 /** The <layout version="…"> number (0 when absent/unparseable). Behaviour can be
  *  gated on this to avoid regressing older files (see MIN_PARENT_IMAGE_VERSION). */
 export function layoutVersion(doc: TwuiDocument): number {

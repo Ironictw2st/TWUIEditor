@@ -52,7 +52,9 @@ import {
 } from "../twui/cco";
 import { cqiRoleOf, portraitImagePath } from "../twui/players";
 import { RECORD_LOC, recordKeyFor } from "../twui/records";
-import { resolveTooltip } from "../twui/tooltip";
+import { resolveTooltip, TooltipResult } from "../twui/tooltip";
+import { hasMarkup, MarkupTables, parseMarkup, plainText, resolveLocText, Run } from "../twui/richText";
+import { stateText } from "../twui/textSource";
 import { componentCreatorLayout } from "../twui/creator";
 
 export interface Rect {
@@ -89,6 +91,9 @@ export interface DrawImage {
   /** A parent `maskimage` PNG path: this image is clipped/faded by the mask's alpha (drawn
    *  stretched over `box`), reproducing the game's masked character portrait. */
   maskPath?: string;
+  /** `rotation_angle` in RADIANS, about the draw rect's centre. Used by baked connector
+   *  lines (a vertical line texture rotated onto an arbitrary angle). */
+  rotation?: number;
 }
 
 /** Anchor a single line of text within a rect, given edge insets + alignment. Baseline
@@ -216,8 +221,14 @@ export interface RenderItem {
    *  Defines the box the text is aligned within (clears icons on either side). */
   textInset?: { left: number; right: number; top: number; bottom: number };
   images: DrawImage[];
-  /** Resolved tooltip text (only populated in Tooltip mode). */
-  tooltip?: string;
+  /** Styled runs when the text has markup / newlines / wraps (`text` is then its plain form). */
+  runs?: Run[];
+  /** `texthbehaviour` wrapping: "Split by word" / "Split by character". */
+  wrap?: "word" | "char";
+  /** `font_m_leading`: extra px between wrapped lines. */
+  leading?: number;
+  /** Resolved tooltip (only populated in Tooltip mode). */
+  tooltip?: TooltipResult;
 }
 
 /** A clipped, overflowing list that the user can scroll in Simulation mode. */
@@ -375,6 +386,17 @@ type Templates = Record<string, TwuiDocument>;
  *  widths match the drawn font. Absent in headless layout -> estimateTextWidth fallback. */
 export type MeasureText = (text: string, fontName: string | undefined, sizePx: number) => number;
 let activeMeasureText: MeasureText | undefined;
+/** The loc map of the layout pass in progress (for text measurement in layoutEngine). */
+let activeLoc: Record<string, string> | undefined;
+
+/** A state's text as the game displays it, markup-free: localised label or literal,
+ *  `{{tr:}}` replacements expanded (for `sizetocontent` measuring). */
+export function measurableStateText(comp: RawElement, state: RawElement, loc?: Record<string, string>): string | undefined {
+  const t = stateText(comp, state, loc);
+  if (t === undefined) return undefined;
+  const r = resolveLocText(t, loc);
+  return hasMarkup(r) ? plainText(parseMarkup(r)) : r;
+}
 
 /** Slider axis if the component is a vslider/hslider (by its VSlider/HSlider callback). */
 function sliderAxis(comp: RawElement): "v" | "h" | null {
@@ -614,7 +636,7 @@ function imagesFor(
       // differently (e.g. root's 1440x900 #F0F0F0 tint, the ink material) — never fill those.
       const thin = w !== undefined && h !== undefined && Math.min(w, h) <= 4;
       if (!thin) continue;
-      out.push({ imagepath: "", fill: true, colour: getAttr(img, "colour"), box: rect, hf, vf, ox, oy, w, h });
+      out.push({ imagepath: "", fill: true, colour: getAttr(img, "colour"), box: rect, hf, vf, ox, oy, w, h, rotation: numOpt(img, "rotation_angle") });
       continue;
     }
     out.push({
@@ -628,6 +650,7 @@ function imagesFor(
       w,
       h,
       margin: parseMargin(getAttr(img, "margin")),
+      rotation: numOpt(img, "rotation_angle"),
     });
   }
   return out;
@@ -651,9 +674,11 @@ export function computeLayout(
   renderResolution?: { w: number; h: number } | null,
   previewEmptyLists = false,
   uiPrefs: Record<string, boolean> = {},
-  previewBindings: PreviewBinding[] = []
+  previewBindings: PreviewBinding[] = [],
+  markup: MarkupTables = {}
 ): LayoutResult {
   activeMeasureText = measureText;
+  activeLoc = loc;
   const items: RenderItem[] = [];
   const scrollables: Scrollable[] = [];
   const sliderLinks: SliderLink[] = [];
@@ -820,9 +845,9 @@ export function computeLayout(
       images.push({ imagepath: iconOverride, box: rect, hf: 0, vf: 0, ox: 0, oy: 0, w: w ?? rect.w, h: h ?? rect.h });
     }
 
-    // Raw attribute values are XML-escaped for round-trip; decode for display.
-    let text = state ? getAttr(state, "text") : undefined;
-    if (text) text = decodeEntities(text);
+    // Static text as the engine picks it: the localised `textlabel` (when `textlocalised`)
+    // or WH3 `localised_text` row, else the literal (entities decoded for display).
+    let text = state ? stateText(comp, state, loc) : undefined;
 
     // ContextTextLabel. For a DB-record context (CcoEffectBundle / pooled
     // resource / ceo set / effect) the display text comes from the .loc files:
@@ -896,10 +921,22 @@ export function computeLayout(
 
     // Resolve inline {{CcoScriptObject/CcoScriptTableNode:…}} tokens embedded in
     // the text (e.g. "COMPLETE: {{…Size}}/8"); strips {{tt:…}} tooltip refs.
+    // `{{tr:}}` replacements + escaped newlines first, so replaced text's own tokens resolve.
+    if (text) text = resolveLocText(text, loc);
     if (text && text.includes("{{")) text = resolveInlineTokens(text, scope, loc);
 
-    // Tooltip mode: resolve the component's tooltip (script setter, else static).
-    const tooltip = resolveTooltips ? resolveTooltip(comp, scope, loc) ?? undefined : undefined;
+    // `[[col]]`/`[[b]]`/`[[img]]` markup, hard newlines and word-wrapping need the rich
+    // drawer; plain single-line text keeps the plain fast path (and draws as before).
+    const hb = state ? getAttr(state, "texthbehaviour") : undefined;
+    const wrap = hb === "Split by word" ? "word" : hb === "Split by character" ? "char" : undefined;
+    let runs: Run[] | undefined;
+    if (text && (hasMarkup(text) || text.includes("\n") || wrap)) {
+      runs = parseMarkup(text, markup);
+      text = plainText(runs);
+    }
+
+    // Tooltip mode: resolve the component's tooltip (script setter, static, layout ref).
+    const tooltip = resolveTooltips ? resolveTooltip(comp, scope, loc, state) ?? undefined : undefined;
 
     // Text insets: `textxoffset`=(left,right), `textyoffset`=(top,bottom) — both clear
     // side icons; they are NOT an (x,y) shift (a separate `textyoffset` carries vertical).
@@ -915,6 +952,9 @@ export function computeLayout(
       depth,
       clip: clip ?? undefined,
       text,
+      runs,
+      wrap,
+      leading: state ? numOpt(state, "font_m_leading") : undefined,
       fontColour: state ? getAttr(state, "font_m_colour") : undefined,
       fontSize: state ? num(state, "font_m_size", 13) : undefined,
       fontName: state ? getAttr(state, "font_m_font_name") : undefined,
@@ -1467,11 +1507,12 @@ export function layoutEngine(
     if (cs) return cs;
     const s = sizeFor(comp, state, parentRect, templates);
     if (sizeToContent && state && getAttr(state, "texthbehaviour") === "Resize") {
-      const t = getAttr(state, "text");
+      // The text as displayed (localised, replacements expanded, markup stripped).
+      const t = measurableStateText(comp, state, activeLoc);
       if (t) {
         const [il, ir] = parseVec2(getAttr(state, "textxoffset"), [0, 0]);
         const size = num(state, "font_m_size", 13);
-        const txt = decodeEntities(t);
+        const txt = t;
         // Real font metrics when available (visualizer), else the char-count estimate.
         const tw = activeMeasureText
           ? activeMeasureText(txt, getAttr(state, "font_m_font_name"), size)

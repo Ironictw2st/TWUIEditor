@@ -74,6 +74,10 @@ export interface ContextDb {
   campaigns: string[];
   campaign_factions: Record<string, string[]>;
   ministerial_positions: MinisterialPosition[];
+  /** `[[col:<key>]]` markup colours (ui_colours key -> `#RRGGBB`). Absent on older backends. */
+  ui_colours?: Record<string, string>;
+  /** `[[img:<key>]]` markup icons (ui_tagged_images key -> image path). */
+  tagged_images?: Record<string, string>;
 }
 
 export interface FactionContext {
@@ -99,13 +103,22 @@ export interface CharacterDb {
 /** A CCO function's signature from the UI documentation (Inspector hints). */
 export interface CcoFunc {
   ret: string;
+  /** True when the return type is a list (drives `(list)` badges + chain inference). */
+  list: boolean;
   args: string;
   desc: string;
+  /** True when `ui/metadata.json` backs this symbol (existence-proof authority). */
+  meta?: boolean;
 }
 
 /** CCO symbol table: object name -> (function name -> definition). */
 export interface CcoDocs {
   objects: Record<string, Record<string, CcoFunc>>;
+  /** Root accessors from the "Global Functions" section (e.g. `PlayersFaction`). */
+  globals: Record<string, CcoFunc>;
+  /** Types whose property set is verified by `ui/metadata.json` `symbols` — only
+   *  these can be checked against (see reference/cco-schema-sources.md). */
+  verified?: string[];
 }
 
 /** One clause of a `select`-form shorthand macro (a clause with no `cond` is the default). */

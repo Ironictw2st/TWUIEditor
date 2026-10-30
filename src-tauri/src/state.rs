@@ -224,11 +224,17 @@ impl AppState {
     // --- Editable pack workspace (the "Pack Editor") ---
 
     /// Open an existing `.pack` for editing; layer it on top of the dependencies and return its
-    /// `.twui.xml` paths.
+    /// layout paths (`.twui.xml` plus supported binary UIC).
     pub fn open_workspace(&self, path: PathBuf) -> Result<Vec<String>, String> {
         let game_key = self.inner.lock().unwrap().game_key.clone();
         let ws = Arc::new(WorkspacePack::open(&path, &game_key)?);
-        let layouts = ws.list(&|p| p.ends_with(".twui.xml"));
+        let mut layouts =
+            ws.list(&|p| p.ends_with(".twui.xml") || crate::uic::is_uic_candidate_path(p));
+        layouts.retain(|p| {
+            p.ends_with(".twui.xml")
+                || ws.read(p).map(|b| crate::uic::sniff_supported(&b)).unwrap_or(false)
+        });
+        let layouts = layouts;
         let mut g = self.inner.lock().unwrap();
         g.workspace = Some(ws);
         g.recompute_source();

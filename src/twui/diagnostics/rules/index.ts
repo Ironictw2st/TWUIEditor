@@ -4,9 +4,12 @@
 import type { Rule } from "../types";
 import { attrValueRule } from "./attrValue";
 import { attrVersionRule } from "./attrVersion";
+import { ccoPropagatorRule } from "./ccoPropagator";
+import { ccoUndocumentedRule } from "./ccoUndocumented";
 import { duplicateGuidsRule } from "./duplicateGuids";
 import { hierarchyComponentsRule } from "./hierarchyComponents";
 import { imageRefsRule } from "./imageRefs";
+import { imageResizeDockRule } from "./imageResizeDock";
 import { requiredAttrsRule } from "./requiredAttrs";
 import { stateRefsRule } from "./stateRefs";
 
@@ -18,4 +21,7 @@ export const RULES: Rule[] = [
   requiredAttrsRule,
   attrValueRule,
   attrVersionRule,
+  imageResizeDockRule,
+  ccoUndocumentedRule,
+  ccoPropagatorRule,
 ];

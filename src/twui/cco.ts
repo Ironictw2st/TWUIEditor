@@ -4,6 +4,7 @@
 // panel's own List/ContextList, ContextImageSetter, ContextTextLabel,
 // ContextPropagator and Context(Visibility|Trash) callbacks, not any one panel.
 
+import { expandTextReplacements } from "./richText";
 import { CcoShorthand, PreviewBinding, ShorthandDef } from "../types/twui";
 import { RawElement } from "../types/twui";
 import { childByTag, elementChildren, getAttr } from "./doc";
@@ -199,7 +200,7 @@ export function listSource(comp: RawElement): string | null {
 }
 
 /** Split an expression on a top-level binary operator (respecting quotes/parens). */
-function splitTop(expr: string, op: string): string[] {
+export function splitTop(expr: string, op: string): string[] {
   const parts: string[] = [];
   let depth = 0,
     inStr = false,
@@ -238,7 +239,7 @@ function literal(p: string): string | null {
 }
 
 /** Split on a top-level '.' (respecting quotes/parens) — for ref chains. */
-function splitDots(expr: string): string[] {
+export function splitDots(expr: string): string[] {
   const parts: string[] = [];
   let depth = 0,
     inStr = false,
@@ -270,7 +271,7 @@ function splitDots(expr: string): string[] {
 }
 
 /** Match a leading `name(...)` with balanced parens → { name, arg, rest }. */
-function headCall(expr: string): { name: string; arg: string; rest: string } | null {
+export function headCall(expr: string): { name: string; arg: string; rest: string } | null {
   const m = /^([A-Za-z]\w*)\(/.exec(expr);
   if (!m) return null;
   let depth = 0,
@@ -440,14 +441,21 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
       return v !== undefined && v !== null && v !== false;
     }
     if (call.name === "Format") {
-      // Format(fmt, …args) — printf-style %s substitution.
+      // Format(fmt, …args) — printf-style substitution: %s / %S strings, %d numbers, %+d signed,
+      // %% a percent sign (vanilla: Format( "%d%%", ... ), Format( "%S\n%S %d", ... )).
       const args = splitTop(call.arg, ",");
       const fmt = evalExpr(args[0].trim(), scope, loc);
       if (typeof fmt !== "string") return undefined;
       let i = 1;
-      return fmt.replace(/%s/g, () => {
+      return fmt.replace(/%(%|\+?[sSd])/g, (_m, spec: string) => {
+        if (spec === "%") return "%";
         const a = evalExpr((args[i++] ?? "").trim(), scope, loc);
-        return a == null ? "" : String(a);
+        if (a == null) return "";
+        if (spec === "+d") {
+          const n = Number(a);
+          return Number.isFinite(n) && n > 0 ? "+" + String(a) : String(a);
+        }
+        return String(a);
       });
     }
     if (call.name === "HasValueForKey") {
@@ -465,7 +473,11 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
       const a = evalExpr(call.arg, scope, loc);
       switch (call.name) {
         case "Loc":
-          return typeof a === "string" ? loc?.[a] ?? a : undefined;
+          // Campaign strings are bare-keyed; `random_localisation_strings` is the game's
+          // other `Loc()` table and stays full-keyed in the map.
+          return typeof a === "string"
+            ? loc?.[a] ?? loc?.["random_localisation_strings_string_" + a] ?? a
+            : undefined;
         case "ToUpper":
           return a == null ? undefined : String(a).toUpperCase();
         case "RoundFloat":
@@ -502,15 +514,18 @@ export function evalExpr(expr: string, scope: Scope, loc?: Record<string, string
   return chained;
 }
 
-/** Replace inline `{{Type:expr}}` tokens in a text string (tt tokens stripped). */
+/** Replace inline `{{Type:expr}}` tokens in a text string. `{{tr:key}}` is a UI text
+ *  replacement (resolved from loc, kept verbatim if missing); `{{tt:…}}` tooltip refs and
+ *  unresolvable context tokens are not display text and are dropped. */
 export function resolveInlineTokens(text: string, scope: Scope, loc?: Record<string, string>): string {
   if (!text.includes("{{")) return text;
-  return text.replace(/\{\{([A-Za-z]+):([\s\S]*?)\}\}/g, (_m, type: string, expr: string) => {
+  return text.replace(/\{\{([A-Za-z]+):([\s\S]*?)\}\}/g, (m, type: string, expr: string) => {
+    if (type === "tr") return expandTextReplacements(m, loc);
     if (type === "CcoScriptObject" || type === "CcoScriptTableNode") {
       const v = evalExpr(expr, scope, loc);
       return v == null ? "" : String(v);
     }
-    return ""; // tt: tooltip refs and anything else → not display text
+    return "";
   });
 }
 
@@ -531,7 +546,7 @@ export function evalTextLabel(
 }
 
 /** True if the whole expr is wrapped in one balanced pair of parens. */
-function isWrapped(e: string): boolean {
+export function isWrapped(e: string): boolean {
   if (e[0] !== "(" || e[e.length - 1] !== ")") return false;
   let depth = 0,
     inStr = false,

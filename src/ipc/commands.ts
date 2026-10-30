@@ -166,6 +166,9 @@ export function savePng(path: string, b64: string): Promise<void> {
 export interface WorkspaceStatus {
   path: string | null;
   dirty: boolean;
+  /** PFH file type ("Boot"/"Release"/"Patch"/"Mod"/"Movie"); null when no workspace is open.
+   *  Anything other than "Mod" is an official CA (vanilla) pack the editor guards writes to. */
+  pfh_type?: string | null;
 }
 
 /** Create a new empty Mod pack at `path` and open it as the editable workspace. */

@@ -2,7 +2,7 @@
 // problems in the open TWUI document. Everything is derived from the in-memory
 // doc; nothing here mutates it (the feature is strictly read-only / advisory).
 
-import type { TwuiDocument, RawElement } from "../../types/twui";
+import type { TwuiDocument, RawElement, CcoDocs, CcoShorthand } from "../../types/twui";
 import type { AttrKind } from "../schema";
 
 export type Severity = "error" | "warning" | "info";
@@ -45,6 +45,11 @@ export interface DiagContext {
   /** Every `this` GUID found in the <hierarchy> subtree. */
   hierGuids: Set<string>;
   classified: ClassifiedEl[];
+  /** CCO symbol table / shorthand macros when the caller has them loaded
+   *  (store-resident, threaded in by the panel). CCO rules degrade to silent
+   *  when absent — the engine itself stays synchronous. */
+  ccoDocs?: CcoDocs | null;
+  ccoShorthand?: CcoShorthand | null;
 }
 
 export interface Rule {

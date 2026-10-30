@@ -3,11 +3,13 @@ import { useStore } from "../state/store";
 import {
   ancestorGuids,
   componentMap,
+  docFormat,
   elementChildren,
   getAttr,
   guidOf,
   hierarchyRoot,
 } from "../twui/doc";
+import { uicLabel, uicNavChildren, uicRoot } from "../twui/uic";
 import { inheritingGuids } from "../twui/inherit";
 import { hiddenGuids } from "../twui/visibility";
 import { useLayoutInputs } from "../state/useLayoutInputs";
@@ -216,6 +218,72 @@ function Row({
   );
 }
 
+/** Read-only-structure hierarchy row for decoded binary UIC layouts: no
+ *  drag/drop, visibility toggles, or structural context menu — selection and
+ *  attribute editing go through the normal `this`-GUID machinery. */
+function UicRow({
+  node,
+  depth,
+  expanded,
+  toggle,
+}: {
+  node: RawElement;
+  depth: number;
+  expanded: Set<string>;
+  toggle: (g: string) => void;
+}) {
+  const guid = getAttr(node, "this") ?? "";
+  const kids = uicNavChildren(node);
+  const selected = useStore((s) => s.selectedGuids.includes(guid));
+  const hovered = useStore((s) => s.hoveredGuid === guid);
+  const setHovered = useStore((s) => s.setHovered);
+  const select = useStore((s) => s.select);
+  const isOpen = expanded.has(guid);
+
+  return (
+    <div>
+      <div
+        data-guid={guid}
+        className={`relative flex items-center gap-1 pr-1 cursor-pointer rounded select-none ${
+          selected
+            ? "bg-selected outline outline-1 outline-accent"
+            : hovered
+            ? "bg-panelHeader ring-1 ring-accent/40"
+            : "hover:bg-panelHeader"
+        }`}
+        style={{ paddingLeft: depth * 12 + 4 }}
+        onMouseEnter={() => setHovered(guid)}
+        onMouseLeave={() => setHovered(null)}
+        onClick={(e) => {
+          e.stopPropagation();
+          select(guid);
+        }}
+      >
+        <span
+          className="w-4 shrink-0 text-center text-gray-500"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (kids.length) toggle(guid);
+          }}
+        >
+          {kids.length ? (isOpen ? "▾" : "▸") : ""}
+        </span>
+        <span className="text-[12px] truncate min-w-0 mr-auto">{uicLabel(node)}</span>
+      </div>
+      {isOpen &&
+        kids.map((k) => (
+          <UicRow
+            key={getAttr(k, "this") ?? k.tag}
+            node={k}
+            depth={depth + 1}
+            expanded={expanded}
+            toggle={toggle}
+          />
+        ))}
+    </div>
+  );
+}
+
 export default function TreePanel() {
   const doc = useStore((s) => s.doc);
   const selectedGuid = useStore((s) => s.selectedGuid);
@@ -225,21 +293,29 @@ export default function TreePanel() {
 
   const openSearch = useStore((s) => s.openSearch);
 
-  const root = useMemo(() => (doc ? hierarchyRoot(doc) : undefined), [doc]);
-  const compMap = useMemo(
-    () => (doc ? componentMap(doc) : new Map<string, RawElement>()),
-    [doc]
+  // Decoded binary UIC layouts (pre-3K) get a simplified read-only-structure tree.
+  const uic = doc != null && docFormat(doc) === "uic";
+  const root = useMemo(
+    () => (doc ? (uic ? uicRoot(doc) : hierarchyRoot(doc)) : undefined),
+    [doc, uic]
   );
-  const inheriting = useMemo(() => (doc ? inheritingGuids(doc) : new Set<string>()), [doc]);
+  const compMap = useMemo(
+    () => (doc && !uic ? componentMap(doc) : new Map<string, RawElement>()),
+    [doc, uic]
+  );
+  const inheriting = useMemo(
+    () => (doc && !uic ? inheritingGuids(doc) : new Set<string>()),
+    [doc, uic]
+  );
   // Guids hidden by a script/context binding (evaluated like the canvas does), so the tree
   // dims them — and their subtree — exactly like a static visible="false" node.
   const { dataPack, staticVars, tokens, context, ccoShorthand } = useLayoutInputs();
   const hidden = useMemo(
     () =>
-      doc
+      doc && !uic
         ? hiddenGuids(doc, { dataPack, vars: staticVars, shorthand: ccoShorthand ?? undefined }, context, tokens)
         : new Set<string>(),
-    [doc, dataPack, staticVars, ccoShorthand, context, tokens]
+    [doc, uic, dataPack, staticVars, ccoShorthand, context, tokens]
   );
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [draggingGuid, setDraggingGuid] = useState<string | null>(null);
@@ -284,7 +360,7 @@ export default function TreePanel() {
     const walk = (n: RawElement) => {
       const g = guidOf(n);
       if (g) all.add(g);
-      elementChildren(n).forEach(walk);
+      (uic ? uicNavChildren(n) : elementChildren(n)).forEach(walk);
     };
     walk(root);
     setExpanded(all);
@@ -304,6 +380,14 @@ export default function TreePanel() {
   // Right-click empty tree space: document-level actions (paste needs a doc + a clipboard).
   const openBgContext = (e: React.MouseEvent) => {
     const s = useStore.getState();
+    if (uic) {
+      // Structural editing of binary UIC layouts is raw-XML-editor-only in v1.
+      menu.open(e, [
+        { label: "Expand All", disabled: !s.doc, onSelect: expandAll },
+        { label: "Collapse All", disabled: !s.doc, onSelect: () => setExpanded(new Set()) },
+      ]);
+      return;
+    }
     menu.open(e, [
       { label: "Insert from file…", disabled: !s.doc, onSelect: () => s.openInsertDialog() },
       { label: "Paste", disabled: !s.doc || s.clipboard == null, onSelect: () => s.paste() },
@@ -329,23 +413,27 @@ export default function TreePanel() {
           Collapse
         </button>
       </div>
-      <div className="px-2 py-1.5 flex gap-1.5 border-b border-edge shrink-0">
-        <button
-          className={btn}
-          disabled={!selectedGuid}
-          onClick={() => selectedGuid && addChild(selectedGuid, "new_component")}
-        >
-          + Child
-        </button>
-        <button className={btn} disabled={!selectedGuid} onClick={duplicateSelected}>
-          Duplicate
-        </button>
-        <button className={btn} disabled={!selectedGuid} onClick={deleteSelected}>
-          Delete
-        </button>
-      </div>
+      {!uic && (
+        <div className="px-2 py-1.5 flex gap-1.5 border-b border-edge shrink-0">
+          <button
+            className={btn}
+            disabled={!selectedGuid}
+            onClick={() => selectedGuid && addChild(selectedGuid, "new_component")}
+          >
+            + Child
+          </button>
+          <button className={btn} disabled={!selectedGuid} onClick={duplicateSelected}>
+            Duplicate
+          </button>
+          <button className={btn} disabled={!selectedGuid} onClick={deleteSelected}>
+            Delete
+          </button>
+        </div>
+      )}
       <div ref={scrollRef} className="flex-1 overflow-auto py-1" onContextMenu={openBgContext}>
-        {root ? (
+        {root && uic ? (
+          <UicRow node={root} depth={0} expanded={expanded} toggle={toggle} />
+        ) : root ? (
           <Row
             node={root}
             parentGuid={null}

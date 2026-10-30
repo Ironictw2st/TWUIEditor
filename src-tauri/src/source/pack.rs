@@ -77,10 +77,12 @@ pub fn ordered_packs(game_dir: &Path, include_mods: bool) -> Result<Vec<PathBuf>
     Ok(metas.into_iter().map(|(p, _)| p).collect())
 }
 
-/// The rpfm game key for our game folder name (`3K`, `WH3`); defaults to Three Kingdoms.
+/// The rpfm game key for our game folder name (`3K`, `WH3`, `Attila`); defaults to Three
+/// Kingdoms. Both Attila spellings are accepted (the games folder on disk is `Atilla`).
 pub fn rpfm_game_key(name: &str) -> &'static str {
     match name.to_ascii_uppercase().as_str() {
         "WH3" | "WARHAMMER_3" | "WARHAMMER3" => "warhammer_3",
+        "ATTILA" | "ATILLA" => "attila",
         _ => "three_kingdoms",
     }
 }

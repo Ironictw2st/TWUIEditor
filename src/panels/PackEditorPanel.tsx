@@ -103,7 +103,13 @@ export default function PackEditorPanel() {
   const openWorkspaceFile = useStore((s) => s.openWorkspaceFile);
   const createWorkspaceFile = useStore((s) => s.createWorkspaceFile);
   const deleteWorkspaceFile = useStore((s) => s.deleteWorkspaceFile);
+  const workspacePackType = useStore((s) => s.workspacePackType);
+  const allowVanillaSave = useStore((s) => s.settings.editor.allowSaveIntoVanillaPack);
   const menu = useContextMenu();
+
+  // Mirror of the store's vanilla-write guard, so we can raise its popup BEFORE the delete confirm
+  // (rather than confirming a delete that the store would then block).
+  const vanillaBlocked = workspacePackType != null && workspacePackType !== "Mod" && !allowVanillaSave;
 
   const [query, setQuery] = useState("");
   const [newPath, setNewPath] = useState("ui/");
@@ -124,6 +130,12 @@ export default function PackEditorPanel() {
         label: "Delete from pack",
         danger: true,
         onSelect: () => {
+          // Vanilla-pack guard fires first: deleteWorkspaceFile raises the warning popup and does
+          // not touch the pack, so skip the destructive confirm entirely.
+          if (vanillaBlocked) {
+            void deleteWorkspaceFile(rel);
+            return;
+          }
           if (window.confirm(`Delete "${rel}" from the pack? This rewrites the .pack on disk.`)) {
             void deleteWorkspaceFile(rel);
           }

@@ -17,6 +17,17 @@ fn norm(rel: &str) -> String {
     rel.replace('\\', "/").trim_start_matches('/').to_string()
 }
 
+/// The casing `pack` actually stores this path under, or the normalized path if it holds no
+/// such file. Reads go through rpfm's case-insensitive lookup, so without this an insert or
+/// remove using different casing would add a duplicate entry / silently remove nothing.
+fn stored_path(pack: &Pack, rel: &str) -> String {
+    let rel = norm(rel);
+    match pack.file(&rel, true) {
+        Some(f) => f.path_in_container_raw().replace('\\', "/"),
+        None => rel,
+    }
+}
+
 /// Resolve the rpfm GameInfo for a key (falling back to 3K) and run `f` with it. `SupportedGames` is
 /// rebuilt per call (only used on open/save, which are infrequent).
 fn with_game<T>(game_key: &str, f: impl FnOnce(&rpfm_lib::games::GameInfo) -> T) -> Result<T, String> {
@@ -77,12 +88,21 @@ impl WorkspacePack {
         self.dirty.load(Ordering::Relaxed)
     }
 
+    /// The pack's PFH file type as a string ("Boot"/"Release"/"Patch"/"Mod"/"Movie"). Anything other
+    /// than "Mod" is an official Creative Assembly (vanilla) pack the editor guards against writing to.
+    pub fn pfh_type(&self) -> String {
+        match self.pack.lock() {
+            Ok(pack) => pack.pfh_file_type().to_string(),
+            Err(_) => String::new(),
+        }
+    }
+
     /// Insert (or replace) a file's raw bytes. Stored as `Cached`, so it reads back immediately and
     /// is written verbatim on save.
     pub fn insert_file(&self, rel: &str, bytes: &[u8]) -> Result<(), String> {
-        let rel = norm(rel);
-        let rfile = RFile::new_from_vec(bytes, FileType::Text, 0, &rel);
         let mut pack = self.pack.lock().map_err(|_| "workspace lock poisoned")?;
+        let rel = stored_path(&pack, rel);
+        let rfile = RFile::new_from_vec(bytes, FileType::Text, 0, &rel);
         pack.insert(rfile).map_err(|e| format!("insert {rel}: {e}"))?;
         drop(pack);
         self.dirty.store(true, Ordering::Relaxed);
@@ -91,8 +111,8 @@ impl WorkspacePack {
 
     /// Remove a file. No-op if absent.
     pub fn remove_file(&self, rel: &str) -> Result<(), String> {
-        let rel = norm(rel);
         let mut pack = self.pack.lock().map_err(|_| "workspace lock poisoned")?;
+        let rel = stored_path(&pack, rel);
         pack.remove(&ContainerPath::File(rel));
         drop(pack);
         self.dirty.store(true, Ordering::Relaxed);

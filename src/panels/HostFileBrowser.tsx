@@ -45,7 +45,9 @@ function Browser({ req }: { req: HostDialogRequest }) {
   );
   const matchesExt = useCallback(
     (name: string) => {
-      if (exts.length === 0) return true;
+      // A "*" filter accepts anything, including extensionless files
+      // (pre-3K binary UI layouts have no extension).
+      if (exts.length === 0 || exts.includes("*")) return true;
       const dot = name.lastIndexOf(".");
       const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
       return exts.includes(ext);

@@ -2,7 +2,7 @@
 //! RPFM install. The source files live in the `vendor/rpfm-schemas` git submodule (MIT); `build.rs`
 //! zstd-compresses them into `OUT_DIR` (they are ~20 MB of RON text), and we decompress the one for
 //! the active game to a temp file on first use so `rpfm_lib::schema::Schema::load` (which takes a
-//! path) can read it. Only the games the editor supports (3K, WH3) are embedded.
+//! path) can read it. Only the games the editor supports (3K, WH3, Attila) are embedded.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -10,12 +10,14 @@ use std::path::PathBuf;
 
 const SCHEMA_3K_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/schema_3k.ron.zst"));
 const SCHEMA_WH3_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/schema_wh3.ron.zst"));
+const SCHEMA_ATT_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/schema_att.ron.zst"));
 
 /// The compressed embedded schema for an rpfm game key, if one is bundled.
 fn embedded_zst(game_key: &str) -> Option<&'static [u8]> {
     match game_key {
         "warhammer_3" => Some(SCHEMA_WH3_ZST),
         "three_kingdoms" => Some(SCHEMA_3K_ZST),
+        "attila" => Some(SCHEMA_ATT_ZST),
         _ => None,
     }
 }
@@ -28,13 +30,12 @@ pub fn embedded_schema_path(game_key: &str) -> Option<PathBuf> {
     // one is never reused (mirrors the image cache).
     let mut h = DefaultHasher::new();
     zst.hash(&mut h);
-    let dir = std::env::temp_dir().join("twui-editor-cache");
+    let dir = crate::cache::cache_dir();
     let out = dir.join(format!("schema_{game_key}_{:x}.ron", h.finish()));
     if std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
         return Some(out);
     }
     let data = zstd::decode_all(zst).ok()?;
-    std::fs::create_dir_all(&dir).ok()?;
     // Write to a temp sibling then rename so a concurrent reader never sees a half-written file.
     let tmp = dir.join(format!("schema_{game_key}_{:x}.ron.tmp", h.finish()));
     std::fs::write(&tmp, &data).ok()?;

@@ -63,6 +63,12 @@ pub async fn check_update() -> Result<Option<UpdateMeta>, String> {
     if cfg!(debug_assertions) {
         return Ok(None);
     }
+    // Releases publish a Windows portable exe only (see ASSET_NAME / the release workflow),
+    // so on any other platform there is nothing to offer. Report "up to date" rather than
+    // surfacing a missing-asset error on every startup.
+    if !cfg!(windows) {
+        return Ok(None);
+    }
     let latest = fetch_latest().await?;
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|e| format!("bad current version: {e}"))?;

@@ -68,6 +68,13 @@ export default function NewFileDialog() {
         </select>
         <div className="text-[10px] text-textMuted mb-4">
           Creates an empty root sized to the render resolution. Saved to disk via Save As.
+          {(game ?? "").toLowerCase().startsWith("at") && (
+            <>
+              {" "}
+              Note: Attila uses binary UI layouts, which cannot be created from scratch yet —
+              open a vanilla layout and Save As instead.
+            </>
+          )}
         </div>
 
         <div className="flex justify-end gap-2">
