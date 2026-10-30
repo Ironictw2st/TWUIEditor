@@ -35,6 +35,8 @@ lines += [
     "  values?: string[];",
     "  /** Layout versions the reader looks at this attribute in (inclusive); absent = all. */",
     "  versions?: { min?: number; max?: number };",
+    "  /** What the game does with a value it does not know (enums; default: uses values[0]). */",
+    "  unknown?: string;",
     "}",
     "",
     "export const ENGINE_EXE = %s;" % json.dumps(data["exe"]),
@@ -64,6 +66,8 @@ for r in rows:
         o["default"] = dv
     if r.get("values"):
         o["values"] = r["values"]
+    if r.get("unknown"):
+        o["unknown"] = r["unknown"]
     vr = {k: r[f] for k, f in (("min", "min_version"), ("max", "max_version")) if f in r}
     if vr:
         o["versions"] = vr

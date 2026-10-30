@@ -21,10 +21,10 @@ SERIALIZERS = {
     0x140635be0: "component_image",
     0x1406345c0: "animation",
     0x140634a10: "animation_frame",
-    0x14063c020: "layoutEngine",
-    0x14063d1e0: "layoutEngine",
-    0x14063e3a0: "layoutEngine_radial",
-    0x14063ea50: "layoutEngine_cells",
+    0x14063c020: "layoutEngine",          # type="HorizontalList" (wrapper FUN_14063d160)
+    0x14063d1e0: "layoutEngine",          # type="List" (wrapper FUN_14063e320)
+    0x14063e3a0: "layoutEngine_RadialList",   # reads only its own 6 properties
+    0x14063ea50: "layoutEngine_Table",        # cells / width / height only
     0x14063ef60: "trigger",
     0x140637aa0: "model",
     0x1406382b0: "component_model_view",
@@ -391,6 +391,10 @@ template_override = [n for n in ["component_image_uniqueguids", "callbacks_with_
 for n in template_override:
     schema.append({"kind": "template_override", "attr": n, "member": None, "type": "other", "offset": None,
                    "serializer": "template-instance reader"})
+# LayoutEngine `type` (factory FUN_14060f4b0: exact memcmp; any other value = no layout engine)
+schema.append({"kind": "layoutEngine_any", "attr": "type", "member": None, "type": "enum", "offset": None,
+               "serializer": "FUN_14060f4b0", "values": ["Table", "List", "HorizontalList", "RadialList"],
+               "unknown": "no layout engine"})
 # plain-string readers (callbacks, localised text)
 for kind, attrs in (("callback_with_context", ["callback_id", "context_object_id", "context_function_id"]),
                     ("localised_text", ["text_label", "tooltip_label", "tooltip_text", "is_text_localised"])):

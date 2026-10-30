@@ -14,7 +14,7 @@
 // attributes the table does not list yet.
 
 import type { EngineAttr } from "./engineAttrs";
-import { ENGINE_VERSIONS, engineAttrFor, engineAttrsOf, engineReadsInVersion, engineValueProblem } from "./engineSchema";
+import { ENGINE_VERSIONS, engineAttrFor, engineAttrsOf, engineReadsInVersion, engineValueProblem, layoutEngineAttr } from "./engineSchema";
 
 export type AttrKind =
   | "component"
@@ -513,8 +513,10 @@ for (const s of SCHEMA_LIST) {
  *  one that is valid in `version`), else the first applying to `kind`, else the first overall.
  *  Always returns a match when the name is known, even if it is out-of-version, so a present
  *  out-of-version attribute still renders with its label/type. */
-export function schemaFor(name: string, kind?: AttrKind, version = 0): AttrSchema | undefined {
-  const engine = ENGINE_VERSIONS.has(version) ? engineAttrFor(kind, name) : undefined;
+export function schemaFor(name: string, kind?: AttrKind, version = 0, layoutEngineType?: string): AttrSchema | undefined {
+  // A LayoutEngine's properties depend on its `type` (RadialList / Table read their own set).
+  const leAttr = kind === "layoutEngine" && layoutEngineType ? layoutEngineAttr(layoutEngineType, name) : undefined;
+  const engine = ENGINE_VERSIONS.has(version) ? leAttr ?? engineAttrFor(kind, name) : undefined;
   const list = BY_NAME.get(name);
   let base: AttrSchema | undefined;
   if (list && kind) {

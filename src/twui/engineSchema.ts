@@ -17,8 +17,9 @@ export const ENGINE_KIND_MAP: Record<string, AttrKind> = {
   image: "image",
   component_image: "component_image",
   layoutEngine: "layoutEngine",
-  layoutEngine_radial: "layoutEngine",
-  layoutEngine_cells: "layoutEngine",
+  layoutEngine_RadialList: "layoutEngine",
+  layoutEngine_Table: "layoutEngine",
+  layoutEngine_any: "layoutEngine",
   model: "model",
   transition: "transition",
   animation: "animation",
@@ -44,6 +45,29 @@ for (const a of ENGINE_ATTRS) {
   if (!prev) m.set(a.attr, a);
   else if (!prev.type.split("|").includes(a.type)) m.set(a.attr, { ...prev, type: `${prev.type}|${a.type}`, default: undefined, offset: null });
   else if (prev.default !== a.default) m.set(a.attr, { ...prev, default: undefined });
+}
+
+/** LayoutEngine `type` -> the engine reader of that type's properties. List and HorizontalList
+ *  read the same set; RadialList and Table read only their own (FUN_14063e3a0 / FUN_14063ea50). */
+const LE_READER: Record<string, string> = {
+  List: "layoutEngine",
+  HorizontalList: "layoutEngine",
+  RadialList: "layoutEngine_RadialList",
+  Table: "layoutEngine_Table",
+};
+const BY_READER = new Map<string, Map<string, EngineAttr>>();
+for (const a of ENGINE_ATTRS) {
+  if (!a.kind.startsWith("layoutEngine")) continue;
+  if (!BY_READER.has(a.kind)) BY_READER.set(a.kind, new Map());
+  if (!BY_READER.get(a.kind)!.has(a.attr)) BY_READER.get(a.kind)!.set(a.attr, a);
+}
+
+/** The reader of `name` on a LayoutEngine of `type`: undefined when the type is unknown (the
+ *  game then builds no layout engine), null when that type never reads the attribute. */
+export function layoutEngineAttr(type: string | undefined, name: string): EngineAttr | null | undefined {
+  const reader = type ? LE_READER[type] : undefined;
+  if (!reader) return undefined;
+  return BY_READER.get(reader)?.get(name) ?? BY_READER.get("layoutEngine_any")?.get(name) ?? null;
 }
 
 /** Whether the game's reader looks at an attribute in layout `version` (0 = unknown = yes). */
@@ -108,7 +132,8 @@ export function engineValueProblem(a: EngineAttr, value: string): string | null 
       const vals = a.values ?? [];
       if (vals.includes(v)) return null;
       const near = vals.find((x) => x.toLowerCase() === v.toLowerCase());
-      return `the game does not know "${v}" and uses "${vals[0]}"` + (near ? ` (names are case-sensitive: "${near}")` : "");
+      const what = a.unknown ? `: ${a.unknown}` : ` and uses "${vals[0]}"`;
+      return `the game does not know "${v}"${what}` + (near ? ` (names are case-sensitive: "${near}")` : "");
     }
     default:
       return null;

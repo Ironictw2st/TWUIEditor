@@ -6,7 +6,8 @@
 // only for the element kinds the extraction covers.
 
 import { ENGINE_ATTRS } from "../../engineAttrs";
-import { ENGINE_KIND_MAP as ENGINE_KINDS, ENGINE_VERSIONS, engineReadsInVersion, engineVersionText } from "../../engineSchema";
+import { getAttr } from "../../doc";
+import { ENGINE_KIND_MAP as ENGINE_KINDS, ENGINE_VERSIONS, engineReadsInVersion, engineVersionText, layoutEngineAttr } from "../../engineSchema";
 import type { AttrKind } from "../../schema";
 import type { Diagnostic, Rule } from "../types";
 
@@ -18,8 +19,9 @@ const KIND_MAP: Record<string, AttrKind> = {
   image: "image",
   component_image: "component_image",
   layoutEngine: "layoutEngine",
-  layoutEngine_radial: "layoutEngine",
-  layoutEngine_cells: "layoutEngine",
+  layoutEngine_RadialList: "layoutEngine",
+  layoutEngine_Table: "layoutEngine",
+  layoutEngine_any: "layoutEngine",
 };
 
 /** Read by the game through paths the extractor does not follow yet (verified by the
@@ -82,7 +84,9 @@ export const engineUnreadRule: Rule = {
     for (const c of ctx.classified) {
       for (const [name] of c.el.attrs) {
         if (EDITOR_METADATA.has(name)) continue;
-        const reads = engineReads(c.kind, name, c.templated);
+        // A LayoutEngine of a known type reads only that type's properties.
+        const le = c.kind === "layoutEngine" && name !== "type" ? layoutEngineAttr(getAttr(c.el, "type"), name) : undefined;
+        const reads = le === null ? false : engineReads(c.kind, name, c.templated);
         const gate = reads ? versionGate(c.kind, name, ctx.version) : undefined;
         if (gate) {
           out.push({
@@ -98,7 +102,10 @@ export const engineUnreadRule: Rule = {
         out.push({
           ruleId: "engine-unread-attr",
           severity: "info",
-          message: `${name} is never read by the 3K game on a ${c.kind} (ignored in game)`,
+          message:
+            le === null
+              ? `${name} is never read by the 3K game on a ${getAttr(c.el, "type")} layout engine (ignored in game)`
+              : `${name} is never read by the 3K game on a ${c.kind} (ignored in game)`,
           guid: c.guid,
           attr: name,
         });

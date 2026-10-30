@@ -40,6 +40,13 @@ describe("engine overlay on 3K versions", () => {
     expect(attrsFor("component", 136).some((s) => s.name === "callbackid")).toBe(false);
   });
 
+  it("reads LayoutEngine properties by type", () => {
+    expect(validateAttr(S("type", "layoutEngine"), "Grid")).toMatch(/no layout engine/);
+    expect(validateAttr(S("type", "layoutEngine"), "Table")).toBeNull();
+    expect(validateAttr(schemaFor("spacing", "layoutEngine", 136, "RadialList")!, "12.5")).toBeNull();
+    expect(validateAttr(schemaFor("spacing", "layoutEngine", 136, "List")!, "12.5")).toMatch(/expected 2/);
+  });
+
   it("accepts either type where engine readers of one kind disagree (spacing: list vs radial)", () => {
     const sp = S("spacing", "layoutEngine");
     expect(sp.engine?.type).toBe("vec2|float");

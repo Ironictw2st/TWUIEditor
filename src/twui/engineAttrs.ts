@@ -26,6 +26,8 @@ export interface EngineAttr {
   values?: string[];
   /** Layout versions the reader looks at this attribute in (inclusive); absent = all. */
   versions?: { min?: number; max?: number };
+  /** What the game does with a value it does not know (enums; default: uses values[0]). */
+  unknown?: string;
 }
 
 export const ENGINE_EXE = "Three_Kingdoms.exe 1.7.2.0";
@@ -199,15 +201,15 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "layoutEngine", "attr": "is_listview_lookup_enabled", "member": "m_is_listview_lookup_enabled", "type": "bool", "offset": "0xa0", "serializer": "FUN_14063d1e0", "default": "true"},
   {"kind": "layoutEngine", "attr": "horizontal_alignment", "member": "m_horizontal_alignment", "type": "enum", "offset": "0x90", "serializer": "FUN_14063d1e0", "default": "Left", "values": ["Left", "Center", "Right"]},
   {"kind": "layoutEngine", "attr": "vertical_alignment", "member": "m_vertical_alignment", "type": "enum", "offset": "0x94", "serializer": "FUN_14063d1e0", "default": "Top", "values": ["Top", "Center", "Bottom"]},
-  {"kind": "layoutEngine_radial", "attr": "starting_angle", "member": "m_starting_angle", "type": "float", "offset": "0x28", "serializer": "FUN_14063e3a0", "default": "0"},
-  {"kind": "layoutEngine_radial", "attr": "arc", "member": "m_arc", "type": "float", "offset": "0x2c", "serializer": "FUN_14063e3a0", "default": "0"},
-  {"kind": "layoutEngine_radial", "attr": "spacing", "member": "m_spacing", "type": "float", "offset": "0x30", "serializer": "FUN_14063e3a0", "default": "0"},
-  {"kind": "layoutEngine_radial", "attr": "radius", "member": "m_radius", "type": "float", "offset": "0x34", "serializer": "FUN_14063e3a0", "default": "0"},
-  {"kind": "layoutEngine_radial", "attr": "clockwise", "member": "m_clockwise", "type": "bool", "offset": "0x38", "serializer": "FUN_14063e3a0", "default": "false"},
-  {"kind": "layoutEngine_radial", "attr": "even_distribution", "member": "m_even_distribution", "type": "bool", "offset": "0x3a", "serializer": "FUN_14063e3a0", "default": "false"},
-  {"kind": "layoutEngine_cells", "attr": "cells", "member": "m_cells", "type": "list", "offset": null, "serializer": "FUN_14063ea50"},
-  {"kind": "layoutEngine_cells", "attr": "width", "member": "m_Width", "type": "float", "offset": "0x38", "serializer": "FUN_14063ea50", "default": "32"},
-  {"kind": "layoutEngine_cells", "attr": "height", "member": "m_Height", "type": "float", "offset": "0x3c", "serializer": "FUN_14063ea50", "default": "32"},
+  {"kind": "layoutEngine_RadialList", "attr": "starting_angle", "member": "m_starting_angle", "type": "float", "offset": "0x28", "serializer": "FUN_14063e3a0", "default": "0"},
+  {"kind": "layoutEngine_RadialList", "attr": "arc", "member": "m_arc", "type": "float", "offset": "0x2c", "serializer": "FUN_14063e3a0", "default": "0"},
+  {"kind": "layoutEngine_RadialList", "attr": "spacing", "member": "m_spacing", "type": "float", "offset": "0x30", "serializer": "FUN_14063e3a0", "default": "0"},
+  {"kind": "layoutEngine_RadialList", "attr": "radius", "member": "m_radius", "type": "float", "offset": "0x34", "serializer": "FUN_14063e3a0", "default": "0"},
+  {"kind": "layoutEngine_RadialList", "attr": "clockwise", "member": "m_clockwise", "type": "bool", "offset": "0x38", "serializer": "FUN_14063e3a0", "default": "false"},
+  {"kind": "layoutEngine_RadialList", "attr": "even_distribution", "member": "m_even_distribution", "type": "bool", "offset": "0x3a", "serializer": "FUN_14063e3a0", "default": "false"},
+  {"kind": "layoutEngine_Table", "attr": "cells", "member": "m_cells", "type": "list", "offset": null, "serializer": "FUN_14063ea50"},
+  {"kind": "layoutEngine_Table", "attr": "width", "member": "m_Width", "type": "float", "offset": "0x38", "serializer": "FUN_14063ea50", "default": "32"},
+  {"kind": "layoutEngine_Table", "attr": "height", "member": "m_Height", "type": "float", "offset": "0x3c", "serializer": "FUN_14063ea50", "default": "32"},
   {"kind": "trigger", "attr": "target", "member": "target", "type": "guid_ref", "offset": null, "serializer": "FUN_14063ef60"},
   {"kind": "trigger", "attr": "time", "member": "time", "type": "uint", "offset": null, "serializer": "FUN_14063ef60"},
   {"kind": "trigger", "attr": "property_mask", "member": "property_mask", "type": "uint", "offset": null, "serializer": "FUN_14063ef60"},
@@ -264,6 +266,7 @@ export const ENGINE_ATTRS: EngineAttr[] = [
   {"kind": "template_override", "attr": "user_properties", "member": null, "type": "other", "offset": null, "serializer": "template-instance reader"},
   {"kind": "template_override", "attr": "localised_texts", "member": null, "type": "other", "offset": null, "serializer": "template-instance reader"},
   {"kind": "template_override", "attr": "override_images", "member": null, "type": "other", "offset": null, "serializer": "template-instance reader"},
+  {"kind": "layoutEngine_any", "attr": "type", "member": null, "type": "enum", "offset": null, "serializer": "FUN_14060f4b0", "values": ["Table", "List", "HorizontalList", "RadialList"], "unknown": "no layout engine"},
   {"kind": "callback_with_context", "attr": "callback_id", "member": null, "type": "string", "offset": null, "serializer": "plain-string reader"},
   {"kind": "callback_with_context", "attr": "context_object_id", "member": null, "type": "string", "offset": null, "serializer": "plain-string reader"},
   {"kind": "callback_with_context", "attr": "context_function_id", "member": null, "type": "string", "offset": null, "serializer": "plain-string reader"},

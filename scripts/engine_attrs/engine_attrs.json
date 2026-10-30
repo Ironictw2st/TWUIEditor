@@ -1544,7 +1544,7 @@
    ]
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "starting_angle",
    "member": "m_starting_angle",
    "type": "float",
@@ -1553,7 +1553,7 @@
    "default": 0.0
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "arc",
    "member": "m_arc",
    "type": "float",
@@ -1562,7 +1562,7 @@
    "default": 0.0
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "spacing",
    "member": "m_spacing",
    "type": "float",
@@ -1571,7 +1571,7 @@
    "default": 0.0
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "radius",
    "member": "m_radius",
    "type": "float",
@@ -1580,7 +1580,7 @@
    "default": 0.0
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "clockwise",
    "member": "m_clockwise",
    "type": "bool",
@@ -1589,7 +1589,7 @@
    "default": false
   },
   {
-   "kind": "layoutEngine_radial",
+   "kind": "layoutEngine_RadialList",
    "attr": "even_distribution",
    "member": "m_even_distribution",
    "type": "bool",
@@ -1598,7 +1598,7 @@
    "default": false
   },
   {
-   "kind": "layoutEngine_cells",
+   "kind": "layoutEngine_Table",
    "attr": "cells",
    "member": "m_cells",
    "type": "list",
@@ -1606,7 +1606,7 @@
    "serializer": "FUN_14063ea50"
   },
   {
-   "kind": "layoutEngine_cells",
+   "kind": "layoutEngine_Table",
    "attr": "width",
    "member": "m_Width",
    "type": "float",
@@ -1615,7 +1615,7 @@
    "default": 32.0
   },
   {
-   "kind": "layoutEngine_cells",
+   "kind": "layoutEngine_Table",
    "attr": "height",
    "member": "m_Height",
    "type": "float",
@@ -2080,6 +2080,21 @@
    "type": "other",
    "offset": null,
    "serializer": "template-instance reader"
+  },
+  {
+   "kind": "layoutEngine_any",
+   "attr": "type",
+   "member": null,
+   "type": "enum",
+   "offset": null,
+   "serializer": "FUN_14060f4b0",
+   "values": [
+    "Table",
+    "List",
+    "HorizontalList",
+    "RadialList"
+   ],
+   "unknown": "no layout engine"
   },
   {
    "kind": "callback_with_context",
