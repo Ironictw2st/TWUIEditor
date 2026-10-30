@@ -567,7 +567,8 @@ function withEngine(base: AttrSchema | undefined, a: EngineAttr, kind: AttrKind)
  *  null. Never blocks a commit (the raw tree always keeps whatever the user types). */
 export function validateAttr(schema: AttrSchema, value: string): string | null {
   // The game's own parsing wins where it is known (3K versions).
-  if (schema.engine && schema.engine.type !== "colour" && ENGINE_TYPE[schema.engine.type])
+  const et = schema.engine?.type;
+  if (schema.engine && et && et !== "colour" && et.split("|").every((t) => ENGINE_TYPE[t]))
     return engineValueProblem(schema.engine, value);
   const v = value.trim();
   if (v === "") return null;

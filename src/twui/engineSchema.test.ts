@@ -35,7 +35,11 @@ describe("engine overlay on 3K versions", () => {
     expect(attrsFor("layoutEngine", 142).some((s) => s.name === "skew_angle")).toBe(false);
   });
 
-  it("claims nothing where engine readers of one kind disagree (spacing: list vs radial)", () => {
-    expect(S("spacing", "layoutEngine").engine).toBeUndefined();
+  it("accepts either type where engine readers of one kind disagree (spacing: list vs radial)", () => {
+    const sp = S("spacing", "layoutEngine");
+    expect(sp.engine?.type).toBe("vec2|float");
+    expect(validateAttr(sp, "4.00,0.00")).toBeNull();
+    expect(validateAttr(sp, "12.5")).toBeNull();
+    expect(validateAttr(sp, "wide")).toMatch(/vec2 or float/);
   });
 });

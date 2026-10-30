@@ -31,24 +31,18 @@ const VALUE_TYPES = new Set([
 ]);
 
 /** (kind, attr) -> the engine attribute. When two engine readers of one editor kind disagree on
- *  the type (layoutEngine `spacing`: vec2 on lists, float on radial lists) the entry is dropped,
- *  so nothing is claimed that depends on the layout engine's type. */
+ *  the type (layoutEngine `spacing`: vec2 on lists, float on radial lists) the entry becomes a
+ *  union ("vec2|float", no default): a value is accepted when either reader can parse it. */
 const BY_KIND = new Map<AttrKind, Map<string, EngineAttr>>();
-{
-  const clash = new Set<string>();
-  for (const a of ENGINE_ATTRS) {
-    const kind = ENGINE_KIND_MAP[a.kind];
-    if (!kind || !VALUE_TYPES.has(a.type)) continue;
-    if (!BY_KIND.has(kind)) BY_KIND.set(kind, new Map());
-    const m = BY_KIND.get(kind)!;
-    const prev = m.get(a.attr);
-    if (prev && (prev.type !== a.type || prev.default !== a.default)) clash.add(`${kind}.${a.attr}`);
-    else if (!prev) m.set(a.attr, a);
-  }
-  for (const k of clash) {
-    const [kind, attr] = k.split(".");
-    BY_KIND.get(kind as AttrKind)?.delete(attr);
-  }
+for (const a of ENGINE_ATTRS) {
+  const kind = ENGINE_KIND_MAP[a.kind];
+  if (!kind || !VALUE_TYPES.has(a.type)) continue;
+  if (!BY_KIND.has(kind)) BY_KIND.set(kind, new Map());
+  const m = BY_KIND.get(kind)!;
+  const prev = m.get(a.attr);
+  if (!prev) m.set(a.attr, a);
+  else if (!prev.type.split("|").includes(a.type)) m.set(a.attr, { ...prev, type: `${prev.type}|${a.type}`, default: undefined, offset: null });
+  else if (prev.default !== a.default) m.set(a.attr, { ...prev, default: undefined });
 }
 
 /** The engine's reader for `name` on an element of `kind`, if the value type is known. */
@@ -71,6 +65,11 @@ const VEC_RE: Record<string, RegExp> = { vec2: vecRe(2), vec3: vecRe(3), vec4: v
 export function engineValueProblem(a: EngineAttr, value: string): string | null {
   const v = value;
   if (v === "") return null;
+  if (a.type.includes("|")) {
+    const types = a.type.split("|");
+    if (types.some((t) => engineValueProblem({ ...a, type: t }, v) === null)) return null;
+    return `the game reads ${a.attr} as ${types.join(" or ")} (depends on the layout engine); "${v}" parses as neither`;
+  }
   switch (a.type) {
     case "bool":
       if (v === "true" || v === "false") return null;
